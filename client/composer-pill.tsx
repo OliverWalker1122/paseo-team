@@ -131,7 +131,7 @@ export function registerTeamComposerPills(
           badge = t.pillAttention(task.attentionCount);
         } else if (task.runningCount > 0) {
           badge = t.pillRunning(task.runningCount);
-        } else if (task.lifecycleStatus === "merged") {
+        } else if (task.lifecycleStatus === "completed") {
           badge = t.pillDone;
         } else if (task.codeReviewRound > 0) {
           badge = `Team · R${task.codeReviewRound}/2`;

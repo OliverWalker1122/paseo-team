@@ -51,10 +51,8 @@ export const ProviderCatalogItemSchema = z.object({
 
 export const ConfigBundleSchema = z.object({
   config: PaseoTeamConfigSchema,
-  configPath: z.string(),
   effectiveTeamName: z.string().nullable(),
   providers: z.array(ProviderCatalogItemSchema),
-  readyProviders: z.array(z.string()),
 });
 
 export const PipelineNodeViewSchema = z.object({
@@ -105,7 +103,6 @@ export const PipelineNodeViewSchema = z.object({
   round: z.number().optional(),
   verdict: z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]).optional(),
   summary: z.string().optional(),
-  commitBadge: z.string().optional(),
   rounds: z
     .array(
       z.object({
@@ -148,36 +145,19 @@ export const PipelineTaskSnapshotSchema = z.object({
   taskId: z.string(),
   sourceKind: z.enum(["team_task", "native_subagents"]).optional(),
   projectRoot: z.string(),
-  targetBranch: z.string(),
-  baseCommit: z.string().nullable(),
-  candidate: z.string().nullable(),
-  worktree: z.string().nullable(),
-  branch: z.string().nullable(),
   goal: z.string(),
   isComplex: z.boolean(),
   teamName: z.string(),
   complexMode: ComplexModeSchema,
   coordinatorAgentId: z.string().optional(),
   coordinatorServerId: z.string().optional(),
-  scopePaths: z.array(z.string()),
   planReview: z.enum(["required", "not-required", "waived"]),
   planReviewRound: z.number(),
   codeReview: z.enum(["required", "not-required", "waived"]),
   codeReviewReason: z.string().optional(),
   codeReviewRound: z.number(),
   ciStatus: z.enum(["pending", "pass", "waived"]),
-  ciDetail: z.string().optional(),
   architectureImpact: z.string().optional(),
-  performanceStatus: z
-    .enum(["ok", "not-applicable", "regressed", "waived"])
-    .optional(),
-  gates: z.array(
-    z.object({
-      name: z.string(),
-      status: z.enum(["pending", "passed", "waived"]),
-      waivedReason: z.string().optional(),
-    }),
-  ),
   circuitBroken: z
     .object({
       stage: z.enum(["plan", "code"]),
@@ -186,19 +166,11 @@ export const PipelineTaskSnapshotSchema = z.object({
       triggeredAt: z.string(),
     })
     .nullable(),
-  readOnlyViolationsCount: z.number(),
-  scopeConflicts: z.array(
-    z.object({
-      otherTaskId: z.string(),
-      otherGoal: z.string(),
-      overlappingPaths: z.array(z.string()),
-    }),
-  ),
-  mergeChecks: z.record(z.string(), z.boolean()).optional(),
-  mergeReady: z.boolean().optional(),
+  gateChecks: z.record(z.string(), z.boolean()).optional(),
+  gateReady: z.boolean().optional(),
   lifecycleStatus: z.enum([
     "active",
-    "merged",
+    "completed",
     "paused",
     "abandoned",
     "blocked",
@@ -319,7 +291,6 @@ export const startTeamTaskRpc = defineRpc({
     recordPath: z.string(),
     coordinatorAgentId: z.string().optional(),
     teamName: z.string(),
-    scopeConflictCount: z.number(),
     message: z.string(),
   }),
 });
@@ -328,14 +299,7 @@ export const controlTaskRpc = defineRpc({
   name: "paseo_team.tasks.control",
   input: z.object({
     recordPath: z.string().min(1),
-    action: z.enum([
-      "inspect_gate",
-      "complete_task",
-      "authorize_extra_round",
-      "pause",
-      "abandon",
-      "resume",
-    ]),
+    action: z.enum(["inspect_gate", "complete_task", "authorize_extra_round"]),
     note: z.string().optional(),
     language: UiLanguageSchema.optional(),
   }),

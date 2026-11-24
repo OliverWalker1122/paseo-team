@@ -285,6 +285,7 @@ export function inspectQualityGate(options: {
   const deliveryRecorded = Boolean(delivery) || Boolean(recordedCandidate);
 
   const isCompleted =
+    record?.lifecycleStatus === "completed" ||
     record?.lifecycleStatus === "merged" ||
     record?.status === "merged" ||
     record?.status === "deployed" ||

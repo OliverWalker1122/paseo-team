@@ -1,10 +1,5 @@
 export type UiLanguage = "en" | "zh";
 
-export function normalizeLanguage(raw: unknown): UiLanguage {
-  if (raw === "zh" || raw === "zh-CN" || raw === "zh-TW") return "zh";
-  return "en";
-}
-
 export function detectPromptLanguage(
   goalText: string,
   fallback: UiLanguage = "en",
@@ -279,7 +274,7 @@ export const UI_TEXT = {
     parallelTag: (n: number) => `×${n}`,
     focusPrefix: "Focus:",
     currentChatTag: "● This chat",
-    gateMerged: "Verified",
+    gateCompleted: "Verified",
     gateReady: "Ready",
     gateCheck: "Not checked",
     coordinatorIdle: "Coordinator",
@@ -334,13 +329,13 @@ export const UI_TEXT = {
     badgeRunning: (n: number) => `Team · ${n} running`,
   },
   zh: {
-    // 导航
+    // Navigation
     tabConfig: "配置",
     tabHistory: "历史",
     backToGraph: "返回状态图",
     configureTeam: "配置",
 
-    // 配置页
+    // Setup page
     setupIntro: "为每个角色选择模型，修改自动保存。",
     savedStatus: "已保存",
     savingStatus: "保存中…",
@@ -388,7 +383,7 @@ export const UI_TEXT = {
     planRevRoleTitle: (idx: number) => `方案审查 #${idx + 1}`,
     planRevRoleHint: "实现前的独立交叉审核",
 
-    // 模型选择
+    // Model picker
     autoModelLabel: "自动",
     autoModelDesc: "自动选用本机可用模型，并让两位审查员使用不同 Provider",
     noneReviewerLabel: "关闭（单人审查）",
@@ -398,7 +393,7 @@ export const UI_TEXT = {
     noMatchingModels: "没有匹配的模型。",
     providerDefaultModel: "Provider 默认模型",
 
-    // 错误与提示
+    // Errors and toasts
     errEnterPresetName: "请输入预设名称。",
     errPresetExists: (n: string) => `已存在名为「${n}」的预设。`,
     errKeepOnePreset: "至少需要保留一个预设。",
@@ -407,7 +402,7 @@ export const UI_TEXT = {
     errEnterTaskGoal: "请输入任务目标。",
     toastTaskStarted: "已在当前对话启动团队协作",
 
-    // 历史
+    // History
     filterAll: "全部",
     filterActive: "进行中",
     filterDone: "已完成",
@@ -433,7 +428,7 @@ export const UI_TEXT = {
         .join(" · "),
     roundsCount: (n: number) => `${n} 轮`,
 
-    // 状态图
+    // Graph
     nativeTreeBadge: "当前对话的子 Agent",
     presetBadge: (name: string, mode: string) =>
       `${name} · ${mode === "expert" ? "专家起草方案" : "主控起草方案"}`,
@@ -448,7 +443,7 @@ export const UI_TEXT = {
     parallelTag: (n: number) => `×${n}`,
     focusPrefix: "侧重：",
     currentChatTag: "● 当前对话",
-    gateMerged: "已验收",
+    gateCompleted: "已验收",
     gateReady: "可验收",
     gateCheck: "未核验",
     coordinatorIdle: "主控会话",

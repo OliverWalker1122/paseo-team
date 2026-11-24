@@ -51,12 +51,12 @@ test("validatePluginManifest and validateOverviewContent enforce Paseo registry 
 
   assert.ok(
     validateOverviewContent("Contains an em dash — here.").some((e: string) =>
-      e.includes("破折号"),
+      e.includes("em dash"),
     ),
   );
   assert.ok(
     validateOverviewContent("Run paseo plugin install foo").some((e: string) =>
-      e.includes("安装命令"),
+      e.includes("install command"),
     ),
   );
 });

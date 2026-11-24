@@ -9,8 +9,6 @@ Never read, search, copy, print, or upload \`.env\` (including \`.env.*\`, \`.en
 export const SAFETY_RULES_ZH = `### 安全与凭据红线（强制执行）
 禁止读取、搜索、复制、输出或上传 \`.env\`（含 \`.env.*\`、\`.envrc\` 等）及其他秘密文件；不执行 \`env\`、\`printenv\`、\`set\`、\`export -p\` 等列出全部环境变量的命令；只能检查任务需要的特定变量是否已配置，输出仅限变量名与 \`configured\`/\`missing\`。格式化、lint、单元测试隔离真实凭据（\`SKIP_DOTENV=true\`、\`DOTENV_CONFIG_PATH=/dev/null\`）。真实 API 验证只能由已检查过、不会打印凭据的可信程序在内部加载配置。凭据存在不代表获准交易、部署、发送消息或修改远程数据。再派生子 agent 时，必须将本节原文写入其简报。`;
 
-export const SAFETY_RULES_TEXT = SAFETY_RULES_EN;
-
 export function getSafetyRulesText(lang: UiLanguage = "en"): string {
   return lang === "zh" ? SAFETY_RULES_ZH : SAFETY_RULES_EN;
 }

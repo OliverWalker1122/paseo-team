@@ -106,65 +106,37 @@ function normalizeMode(raw: unknown): ComplexMode {
   return "simple";
 }
 
-export function normalizeRoleSpec(
-  raw: unknown,
-  legacyLookup?: Map<string, RoleModelSpec>,
-): RoleModelSpec {
+export function normalizeRoleSpec(raw: unknown): RoleModelSpec {
+  // Schema v3/v4 stored Paseo agent-profile names as bare strings. Only
+  // "provider/model" strings carry a model; anything else falls back to Auto.
   if (typeof raw === "string") {
     const trimmed = raw.trim();
-    if (!trimmed || trimmed === AUTO_MODEL) {
-      return { model: AUTO_MODEL };
-    }
-    const mapped = legacyLookup?.get(trimmed);
-    if (mapped) {
-      return {
-        model: mapped.model,
-        ...(mapped.thinking ? { thinking: mapped.thinking } : {}),
-      };
-    }
-    return { model: trimmed };
+    return trimmed.includes("/") ? { model: trimmed } : { model: AUTO_MODEL };
   }
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     const r = raw as Record<string, unknown>;
-    const rawModel =
+    const model =
       typeof r.model === "string" && r.model.trim()
         ? r.model.trim()
         : AUTO_MODEL;
-    const mapped = legacyLookup?.get(rawModel);
-    if (mapped) {
-      return {
-        model: mapped.model,
-        ...(typeof r.thinking === "string" && r.thinking.trim()
-          ? { thinking: r.thinking.trim() }
-          : mapped.thinking
-            ? { thinking: mapped.thinking }
-            : {}),
-      };
-    }
     const thinking =
       typeof r.thinking === "string" &&
       r.thinking.trim() &&
       r.thinking.trim() !== "auto"
         ? r.thinking.trim()
         : undefined;
-    return {
-      model: rawModel,
-      ...(thinking ? { thinking } : {}),
-    };
+    return { model, ...(thinking ? { thinking } : {}) };
   }
   return { model: AUTO_MODEL };
 }
 
-function normalizeRoleSpecList(
-  raw: unknown,
-  legacyLookup?: Map<string, RoleModelSpec>,
-): RoleModelSpec[] {
+function normalizeRoleSpecList(raw: unknown): RoleModelSpec[] {
   if (!Array.isArray(raw)) return [{ model: AUTO_MODEL }];
   const out: RoleModelSpec[] = [];
   for (const item of raw) {
     if (item === null || item === undefined) continue;
     if (typeof item === "string" && !item.trim()) continue;
-    const spec = normalizeRoleSpec(item, legacyLookup);
+    const spec = normalizeRoleSpec(item);
     out.push(spec);
   }
   return out.length > 0 ? out : [{ model: AUTO_MODEL }];
@@ -206,10 +178,7 @@ export function createEmptyConfig(): PaseoTeamConfig {
   };
 }
 
-export function migrateConfig(
-  raw: unknown,
-  legacyLookup?: Map<string, RoleModelSpec>,
-): PaseoTeamConfig {
+export function migrateConfig(raw: unknown): PaseoTeamConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return createEmptyConfig();
   }
@@ -230,10 +199,10 @@ export function migrateConfig(
       continue;
     }
     const e = entry as Record<string, unknown>;
-    const developer = normalizeRoleSpec(e.developer, legacyLookup);
-    const codeReviewers = normalizeRoleSpecList(e.codeReviewers, legacyLookup);
+    const developer = normalizeRoleSpec(e.developer);
+    const codeReviewers = normalizeRoleSpecList(e.codeReviewers);
     const rawPlan = Array.isArray(e.planReviewers)
-      ? normalizeRoleSpecList(e.planReviewers, legacyLookup)
+      ? normalizeRoleSpecList(e.planReviewers)
       : [...codeReviewers];
     const separatePlanReviewers =
       typeof e.separatePlanReviewers === "boolean"
@@ -243,9 +212,7 @@ export function migrateConfig(
     const complexMode =
       e.complexMode === "expert" ? "expert" : normalizeMode(e.complexMode);
     const expert =
-      e.expert !== undefined
-        ? normalizeRoleSpec(e.expert, legacyLookup)
-        : undefined;
+      e.expert !== undefined ? normalizeRoleSpec(e.expert) : undefined;
     const description =
       typeof e.description === "string" && e.description.trim()
         ? e.description.trim()
@@ -342,13 +309,12 @@ export function loadConfig(configPath = defaultConfigPath()): {
 export function saveConfig(
   config: PaseoTeamConfig,
   configPath = defaultConfigPath(),
-  legacyLookup?: Map<string, RoleModelSpec>,
 ): PaseoTeamConfig {
   const resolved = path.resolve(configPath);
   if (existsSync(resolved) && lstatSync(resolved).isSymbolicLink()) {
     throw new Error("Refusing to write symlinked config file.");
   }
-  const normalized = migrateConfig(config, legacyLookup);
+  const normalized = migrateConfig(config);
   mkdirSync(path.dirname(resolved), { recursive: true, mode: 0o700 });
   const temp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(temp, `${JSON.stringify(normalized, null, 2)}\n`, {

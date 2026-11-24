@@ -36,8 +36,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write README.md OVERVIEW.md CONTRIBUTING.md SECURITY.md CHANGELOG.md paseo-plugin.json package.json tsconfig.json index.client.tsx index.server.ts \"shared/**/*.ts\" \"server/**/*.ts\" \"client/**/*.{ts,tsx}\" scripts/check.mjs \"tests/**/*.ts\" .prettierrc.json .github/workflows/ci.yml",
-    "format:check": "prettier --check README.md OVERVIEW.md CONTRIBUTING.md SECURITY.md CHANGELOG.md paseo-plugin.json package.json tsconfig.json index.client.tsx index.server.ts \"shared/**/*.ts\" \"server/**/*.ts\" \"client/**/*.{ts,tsx}\" scripts/check.mjs \"tests/**/*.ts\" .prettierrc.json .github/workflows/ci.yml",
+    "format": "prettier --write README.md README.zh-CN.md OVERVIEW.md CONTRIBUTING.md SECURITY.md CHANGELOG.md paseo-plugin.json package.json tsconfig.json index.client.tsx index.server.ts \"shared/**/*.ts\" \"server/**/*.ts\" \"client/**/*.{ts,tsx}\" scripts/check.mjs \"tests/**/*.ts\" .prettierrc.json .github/workflows/ci.yml",
+    "format:check": "prettier --check README.md README.zh-CN.md OVERVIEW.md CONTRIBUTING.md SECURITY.md CHANGELOG.md paseo-plugin.json package.json tsconfig.json index.client.tsx index.server.ts \"shared/**/*.ts\" \"server/**/*.ts\" \"client/**/*.{ts,tsx}\" scripts/check.mjs \"tests/**/*.ts\" .prettierrc.json .github/workflows/ci.yml",
     "lint": "node scripts/check.mjs --lint",
     "check:plugin": "node scripts/check.mjs",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run check:plugin",

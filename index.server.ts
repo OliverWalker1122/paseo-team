@@ -234,30 +234,9 @@ export default function contribute(server: PluginServerContext) {
         };
       }
 
-      if (action === "pause" || action === "abandon" || action === "resume") {
-        record.lifecycleStatus =
-          action === "pause"
-            ? "paused"
-            : action === "abandon"
-              ? "abandoned"
-              : "active";
-        saveTask(recordPath, record);
-        notifyTaskChanges();
-        const snap = await listPipelineSnapshots(paseo, {
-          cwd: record.projectRoot,
-          ...(language ? { language } : {}),
-        });
-        return {
-          ok: true,
-          message: `Status updated to ${record.lifecycleStatus}.`,
-          task: snap.tasks.find((t) => t.taskId === record.taskId),
-        };
-      }
-
       const rep = inspectQualityGate({
         recordPath,
         cwd: record.projectRoot,
-        ...(language ? { language } : {}),
       });
 
       if (action === "complete_task" && rep.status === "READY") {

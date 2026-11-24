@@ -1,5 +1,7 @@
 # Paseo Team
 
+English | [简体中文](./README.zh-CN.md)
+
 [![CI](https://github.com/OliverWalker1122/paseo-team/actions/workflows/ci.yml/badge.svg)](https://github.com/OliverWalker1122/paseo-team/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Paseo](https://img.shields.io/badge/paseo-%3E%3D0.17.3-informational)](https://paseo.sh)
@@ -67,13 +69,16 @@ After editing a local clone, run `paseo plugin reload paseo-team`.
 
 ### Phrases you can add to the goal
 
-| Phrase                                 | Effect                                     |
-| -------------------------------------- | ------------------------------------------ |
-| `with review` / `需要审查`             | Always run code review                     |
-| `plan review` / `方案审查`             | Review the plan before any code is written |
-| `no review` / `跳过审查`               | Skip code review and record the reason     |
-| `expert mode` / `用专家模式`           | A dedicated expert session writes the plan |
-| `use preset <name>` / `用 <name> 预设` | Use a preset other than the default        |
+| Phrase              | Effect                                     |
+| ------------------- | ------------------------------------------ |
+| `with review`       | Always run code review                     |
+| `plan review`       | Review the plan before any code is written |
+| `no review`         | Skip code review and record the reason     |
+| `expert mode`       | A dedicated expert session writes the plan |
+| `simple mode`       | The coordinator writes the plan itself     |
+| `use preset <name>` | Use a preset other than the default        |
+
+Chinese equivalents are recognized too; see the [Chinese README](./README.zh-CN.md).
 
 Without `with review`, code review starts automatically when a change touches more than 5 files, exceeds 200 lines, or affects the architecture.
 

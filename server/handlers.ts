@@ -86,11 +86,9 @@ export async function readProviderCatalog(
 ): Promise<{
   providers: ProviderCatalogItemDto[];
   readyProviders: string[];
-  legacyProfileMap: Map<string, RoleModelSpec>;
 }> {
   const providers: ProviderCatalogItemDto[] = [];
   const readyProviders: string[] = [];
-  const legacyProfileMap = new Map<string, RoleModelSpec>();
 
   try {
     const snap = await paseo.providers.snapshot(cwd ? { cwd } : undefined);
@@ -207,81 +205,27 @@ export async function readProviderCatalog(
     }
   }
 
-  try {
-    const { config: daemonCfg } = await paseo.config.get();
-    const raw = daemonCfg as Record<string, unknown>;
-    const candidates = Array.isArray(raw.profiles)
-      ? raw.profiles
-      : Array.isArray(raw.agentProfiles)
-        ? raw.agentProfiles
-        : [];
-    for (const item of candidates) {
-      if (!item || typeof item !== "object") continue;
-      const p = item as Record<string, unknown>;
-      if (typeof p.name !== "string" || typeof p.provider !== "string")
-        continue;
-      const fullModel =
-        typeof p.model === "string" && p.model.trim()
-          ? `${p.provider}/${p.model.trim()}`
-          : p.provider;
-      const thinking =
-        typeof p.thinkingOptionId === "string" && p.thinkingOptionId.trim()
-          ? p.thinkingOptionId.trim()
-          : undefined;
-      legacyProfileMap.set(p.name.trim(), {
-        model: fullModel,
-        ...(thinking ? { thinking } : {}),
-      });
-    }
-  } catch {
-    // Ignore
-  }
-
-  return { providers, readyProviders, legacyProfileMap };
+  return { providers, readyProviders };
 }
 
-function loadAndAutoUpgradeConfig(
-  legacyProfileMap: Map<string, RoleModelSpec>,
-) {
+/** Loads the config and rewrites older schema versions in place. */
+function loadAndUpgradeConfig() {
   const loaded = loadConfig();
-  if (!loaded.exists) {
+  if (!loaded.exists || loaded.rawVersion >= 5) return loaded;
+  try {
+    const saved = saveConfig(loaded.config, loaded.path);
+    return { ...loaded, config: saved, rawVersion: 5 };
+  } catch {
     return loaded;
   }
-
-  let needsUpgrade = loaded.rawVersion < 5;
-  if (!needsUpgrade && legacyProfileMap.size > 0) {
-    for (const preset of Object.values(loaded.config.teams)) {
-      const allSpecs = [
-        preset.developer,
-        ...preset.codeReviewers,
-        ...preset.planReviewers,
-        ...(preset.expert ? [preset.expert] : []),
-      ];
-      if (allSpecs.some((s) => legacyProfileMap.has(s.model))) {
-        needsUpgrade = true;
-        break;
-      }
-    }
-  }
-
-  if (needsUpgrade) {
-    try {
-      const saved = saveConfig(loaded.config, loaded.path, legacyProfileMap);
-      return { ...loaded, config: saved, rawVersion: 5 };
-    } catch {
-      return loaded;
-    }
-  }
-  return loaded;
 }
 
 export async function buildConfigBundle(
   paseo: PaseoApi,
   cwd?: string,
 ): Promise<ConfigBundleDto> {
-  const { providers, readyProviders, legacyProfileMap } =
-    await readProviderCatalog(paseo, cwd);
-  const loaded = loadAndAutoUpgradeConfig(legacyProfileMap);
+  const { providers } = await readProviderCatalog(paseo, cwd);
+  const loaded = loadAndUpgradeConfig();
 
   let effectiveTeamName: string | null = loaded.config.default;
   if (cwd?.trim()) {
@@ -295,10 +239,8 @@ export async function buildConfigBundle(
 
   return {
     config: loaded.config,
-    configPath: loaded.path,
     effectiveTeamName,
     providers,
-    readyProviders,
   };
 }
 
@@ -398,8 +340,8 @@ export function toPipelineSnapshot(
   liveMap: Map<string, LiveAgentRuntime>,
   lang: UiLanguage = "en",
 ): PipelineTaskSnapshotDto {
-  let mergeChecks: Record<string, boolean> | undefined;
-  let mergeReady: boolean | undefined;
+  let gateChecks: Record<string, boolean> | undefined;
+  let gateReady: boolean | undefined;
 
   if (record.delivery || record.candidate || record.ci) {
     try {
@@ -407,8 +349,8 @@ export function toPipelineSnapshot(
         recordPath,
         cwd: record.projectRoot,
       });
-      mergeChecks = report.checks;
-      mergeReady = report.status === "READY";
+      gateChecks = report.checks;
+      gateReady = report.status === "READY";
     } catch {
       // Non-fatal
     }
@@ -446,11 +388,11 @@ export function toPipelineSnapshot(
       liveState = "idle";
     } else if (
       node.nodeId === "merge-gate" &&
-      record.lifecycleStatus !== "merged"
+      record.lifecycleStatus !== "completed"
     ) {
       if (record.circuitBroken || record.readOnlyViolations.length > 0) {
         visualStatus = "blocked";
-      } else if (mergeReady === true) {
+      } else if (gateReady === true) {
         visualStatus = "completed";
       }
     }
@@ -560,11 +502,11 @@ export function toPipelineSnapshot(
                 : "Conditional on diff";
       } else if (stageId === "merge-gate") {
         subtitle =
-          record.lifecycleStatus === "merged"
+          record.lifecycleStatus === "completed"
             ? zh
               ? "已完成验收"
               : "Signed off"
-            : mergeReady
+            : gateReady
               ? zh
                 ? "验收项已就绪"
                 : "Ready to complete"
@@ -613,7 +555,7 @@ export function toPipelineSnapshot(
   const ciStatus: PipelineTaskSnapshotDto["ciStatus"] = record.ci?.waived
     ? "waived"
     : record.ci?.log
-      ? mergeChecks?.ciPassed === false
+      ? gateChecks?.ciPassed === false
         ? "pending"
         : "pass"
       : "pending";
@@ -623,11 +565,6 @@ export function toPipelineSnapshot(
     taskId: record.taskId,
     sourceKind: "team_task",
     projectRoot: record.projectRoot,
-    targetBranch: record.targetBranch,
-    baseCommit: record.baseCommit,
-    candidate: record.candidate,
-    worktree: record.worktree,
-    branch: record.branch,
     goal: record.goal,
     isComplex: record.isComplex,
     teamName: record.teamName,
@@ -638,7 +575,6 @@ export function toPipelineSnapshot(
     ...(record.coordinatorServerId
       ? { coordinatorServerId: record.coordinatorServerId }
       : {}),
-    scopePaths: record.scopePaths,
     planReview: record.planReview,
     planReviewRound: record.planReviewRound,
     codeReview: record.codeReview,
@@ -647,23 +583,12 @@ export function toPipelineSnapshot(
       : {}),
     codeReviewRound: record.codeReviewRound,
     ciStatus,
-    ...(record.ci?.waived
-      ? { ciDetail: `${zh ? "豁免" : "Waived"}: ${record.ci.waived}` }
-      : record.ci?.log
-        ? { ciDetail: record.ci.log }
-        : {}),
     ...(record.delivery?.architectureImpact
       ? { architectureImpact: record.delivery.architectureImpact }
       : {}),
-    ...(record.delivery?.performanceStatus
-      ? { performanceStatus: record.delivery.performanceStatus }
-      : {}),
-    gates: record.gates,
     circuitBroken: record.circuitBroken,
-    readOnlyViolationsCount: record.readOnlyViolations.length,
-    scopeConflicts: [],
-    ...(mergeChecks ? { mergeChecks } : {}),
-    ...(mergeReady !== undefined ? { mergeReady } : {}),
+    ...(gateChecks ? { gateChecks } : {}),
+    ...(gateReady !== undefined ? { gateReady } : {}),
     lifecycleStatus: record.lifecycleStatus,
     runningCount,
     attentionCount,
@@ -879,11 +804,6 @@ function buildNativeSubagentGraph(
     taskId: rootId,
     sourceKind: "native_subagents",
     projectRoot: root.cwd || "",
-    targetBranch: "main",
-    baseCommit: null,
-    candidate: null,
-    worktree: root.cwd || null,
-    branch: null,
     goal:
       root.title?.trim() ||
       (zh ? "当前对话子 Agent 协作拓扑" : "Subagent Collaboration Graph"),
@@ -891,17 +811,13 @@ function buildNativeSubagentGraph(
     teamName: zh ? "原生子 Agent" : "Native Subagents",
     complexMode: "simple",
     coordinatorAgentId: rootId,
-    scopePaths: [],
     planReview: "not-required",
     planReviewRound: 0,
     codeReview: "not-required",
     codeReviewRound: 0,
     ciStatus: "pending",
-    gates: [],
     circuitBroken: null,
-    readOnlyViolationsCount: 0,
-    scopeConflicts: [],
-    lifecycleStatus: runningCount > 0 ? "active" : "merged",
+    lifecycleStatus: runningCount > 0 ? "active" : "completed",
     runningCount,
     attentionCount,
     skippedStageCount: 0,
@@ -1204,12 +1120,13 @@ export async function startTeamTask(
   recordPath: string;
   coordinatorAgentId?: string;
   teamName: string;
-  scopeConflictCount: number;
   message: string;
 }> {
-  const { providers, readyProviders, legacyProfileMap } =
-    await readProviderCatalog(paseo, input.cwd);
-  const { config } = loadAndAutoUpgradeConfig(legacyProfileMap);
+  const { providers, readyProviders } = await readProviderCatalog(
+    paseo,
+    input.cwd,
+  );
+  const { config } = loadAndUpgradeConfig();
 
   const parsed = parseInlineTaskDirectives(input.rawArgs);
   const promptLang = detectPromptLanguage(parsed.goal, input.language ?? "en");
@@ -1382,7 +1299,6 @@ export async function startTeamTask(
     recordPath: created.recordPath,
     ...(coordinatorAgentId ? { coordinatorAgentId } : {}),
     teamName: eff.teamName,
-    scopeConflictCount: 0,
     message: zh ? "已启动团队协作流水线。" : "Team pipeline started.",
   };
 }
@@ -1456,16 +1372,12 @@ export function createCoordinatorTools(
     name: "paseo_team_record_delivery",
     title: "Record Developer Delivery",
     description:
-      "Record Developer's change summary, CI log filename (e.g. ci-1.log), and architecture/performance assessment.",
+      "Record Developer's change summary, CI log filename (e.g. ci-1.log), and architecture impact.",
     input: z.object({
       summary: z.string().min(1),
       ciLog: z.string().optional(),
       ciWaivedUserQuote: z.string().optional(),
       architectureImpact: z.string().min(1),
-      performanceStatus: z
-        .enum(["ok", "not-applicable", "regressed", "waived"])
-        .optional(),
-      performanceSummary: z.string().optional(),
       requireCodeReview: z.boolean().optional(),
       codeReviewReason: z.string().optional(),
     }),

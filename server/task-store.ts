@@ -78,7 +78,6 @@ export interface TaskAgentNode {
   round?: number;
   verdict?: ReviewVerdict;
   summary?: string;
-  evidencePath?: string;
   startedAt?: string;
   updatedAt: string;
 }
@@ -163,21 +162,10 @@ export function readReviewRounds(
   return [...byRound.values()].sort((a, b) => a.round - b.round);
 }
 
-export interface TaskGateEntry {
-  name: string;
-  status: "pending" | "passed" | "waived";
-  waivedReason?: string;
-}
-
 export interface TaskDeliveryInfo {
   candidate: string;
-  worktree: string;
-  branch?: string;
   summary: string;
   architectureImpact: string;
-  performanceStatus: "ok" | "not-applicable" | "regressed" | "waived";
-  performanceSummary?: string;
-  performanceWaived?: string;
   deliveredAt: string;
 }
 
@@ -193,11 +181,7 @@ export interface TaskRecord {
   taskId: string;
   projectRoot: string;
   projectSlug: string;
-  targetBranch: string;
-  baseCommit: string | null;
   candidate: string | null;
-  worktree: string | null;
-  branch: string | null;
   goal: string;
   isComplex: boolean;
   teamName: string;
@@ -205,7 +189,6 @@ export interface TaskRecord {
   team: TeamPreset;
   coordinatorAgentId?: string;
   coordinatorServerId?: string;
-  scopePaths: string[];
   planReview: "required" | "not-required" | "waived";
   planReviewReason?: string;
   planReviewRound: number;
@@ -217,7 +200,6 @@ export interface TaskRecord {
   codeReviewers: ReviewerRecordEntry[];
   ci: { log?: string; waived?: string } | null;
   delivery: TaskDeliveryInfo | null;
-  gates: TaskGateEntry[];
   circuitBroken: CircuitBreakerInfo | null;
   readOnlySnapshots: Record<string, RepoSnapshot>;
   readOnlyViolations: {
@@ -227,8 +209,8 @@ export interface TaskRecord {
     detectedAt: string;
   }[];
   nodes: TaskAgentNode[];
-  lifecycleStatus: "active" | "merged" | "paused" | "abandoned" | "blocked";
-  mergedAt?: string;
+  lifecycleStatus: "active" | "completed" | "paused" | "abandoned" | "blocked";
+  completedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -264,27 +246,6 @@ function slugify(input: string, fallback = "task"): string {
     .replace(/-+$/g, "");
   if (safe.replace(/-/g, "").length >= 3) return safe;
   return `${fallback}-${createHash("sha1").update(input).digest("hex").slice(0, 6)}`;
-}
-
-function detectGitBaseline(projectRoot: string): {
-  targetBranch: string;
-  baseCommit: string | null;
-} {
-  const git = (...args: string[]) =>
-    spawnSync("git", ["--no-optional-locks", "-C", projectRoot, ...args], {
-      encoding: "utf8",
-    });
-  const branchRes = git("symbolic-ref", "--quiet", "--short", "HEAD");
-  const targetBranch =
-    branchRes.status === 0 && branchRes.stdout.trim()
-      ? branchRes.stdout.trim()
-      : "main";
-  const headRes = git("rev-parse", "HEAD");
-  const baseCommit =
-    headRes.status === 0 && headRes.stdout.trim()
-      ? headRes.stdout.trim()
-      : null;
-  return { targetBranch, baseCommit };
 }
 
 function writeJsonAtomic(filePath: string, value: unknown): void {
@@ -481,7 +442,6 @@ export function initTask(options: {
   const taskDir = path.join(projectDir, taskId);
   mkdirSync(path.join(taskDir, "reviews"), { recursive: true, mode: 0o700 });
 
-  const baseline = detectGitBaseline(projectRoot);
   const isComplex = Boolean(options.isComplex);
   const skipRequested = Boolean(options.skipReviewReason?.trim());
   const planReviewRequired =
@@ -495,11 +455,7 @@ export function initTask(options: {
     taskId,
     projectRoot,
     projectSlug,
-    targetBranch: baseline.targetBranch,
-    baseCommit: baseline.baseCommit,
     candidate: null,
-    worktree: projectRoot,
-    branch: baseline.targetBranch,
     goal: options.goal.trim(),
     isComplex,
     teamName: options.teamName,
@@ -511,7 +467,6 @@ export function initTask(options: {
     ...(options.coordinatorServerId
       ? { coordinatorServerId: options.coordinatorServerId }
       : {}),
-    scopePaths: [],
     planReview: skipRequested
       ? "waived"
       : planReviewRequired
@@ -537,7 +492,6 @@ export function initTask(options: {
     codeReviewers: [],
     ci: null,
     delivery: null,
-    gates: [],
     circuitBroken: null,
     readOnlySnapshots: {},
     readOnlyViolations: [],
@@ -592,7 +546,7 @@ function normalizeLifecycleStatus(
   const s =
     asNonEmptyString(raw.lifecycleStatus) ?? asNonEmptyString(raw.status);
   if (raw.merged === true || (raw.merged && typeof raw.merged === "object")) {
-    return "merged";
+    return "completed";
   }
   if (s) {
     const low = s.toLowerCase();
@@ -603,7 +557,7 @@ function normalizeLifecycleStatus(
       low === "done" ||
       low === "completed"
     ) {
-      return "merged";
+      return "completed";
     }
     if (low === "paused") return "paused";
     if (low === "abandoned" || low === "cancelled" || low === "canceled") {
@@ -657,7 +611,7 @@ function synthesizeNodesFromLegacy(
   candidate: string | null,
   fallbackNow: string,
 ): TaskAgentNode[] {
-  const isFinished = lifecycleStatus === "merged";
+  const isFinished = lifecycleStatus === "completed";
   const nodes = buildInitialNodes({
     preset,
     isComplex: Boolean(raw.isComplex) || planReview === "required",
@@ -825,14 +779,7 @@ function normalizeLoadedTaskRecord(
     asNonEmptyString(rawObj.projectSlug) ??
     path.basename(path.dirname(path.dirname(resolvedPath)));
 
-  const targetBranch = asNonEmptyString(rawObj.targetBranch) ?? "main";
-  const baseCommit =
-    asNonEmptyString(rawObj.baseCommit) ??
-    asNonEmptyString(rawObj.base) ??
-    null;
   const candidate = asNonEmptyString(rawObj.candidate) ?? null;
-  const worktree = asNonEmptyString(rawObj.worktree) ?? projectRoot;
-  const branch = asNonEmptyString(rawObj.branch) ?? null;
   const goal =
     asNonEmptyString(rawObj.goal) ??
     asNonEmptyString(rawObj.request) ??
@@ -928,11 +875,7 @@ function normalizeLoadedTaskRecord(
     taskId,
     projectRoot,
     projectSlug,
-    targetBranch,
-    baseCommit,
     candidate,
-    worktree,
-    branch,
     goal,
     isComplex: Boolean(rawObj.isComplex),
     teamName,
@@ -942,7 +885,6 @@ function normalizeLoadedTaskRecord(
     ...(asNonEmptyString(rawObj.coordinatorServerId)
       ? { coordinatorServerId: asNonEmptyString(rawObj.coordinatorServerId)! }
       : {}),
-    scopePaths: [],
     planReview,
     ...(asNonEmptyString(rawObj.planReviewReason)
       ? { planReviewReason: asNonEmptyString(rawObj.planReviewReason)! }
@@ -970,7 +912,6 @@ function normalizeLoadedTaskRecord(
       typeof (rawObj.delivery as Record<string, unknown>).candidate === "string"
         ? (rawObj.delivery as TaskDeliveryInfo)
         : null,
-    gates: [],
     circuitBroken:
       rawObj.circuitBroken &&
       typeof rawObj.circuitBroken === "object" &&
@@ -988,8 +929,12 @@ function normalizeLoadedTaskRecord(
       : [],
     nodes,
     lifecycleStatus,
-    ...(asNonEmptyString(rawObj.mergedAt)
-      ? { mergedAt: asNonEmptyString(rawObj.mergedAt)! }
+    ...((asNonEmptyString(rawObj.completedAt) ??
+    asNonEmptyString(rawObj.mergedAt))
+      ? {
+          completedAt: (asNonEmptyString(rawObj.completedAt) ??
+            asNonEmptyString(rawObj.mergedAt))!,
+        }
       : {}),
     createdAt,
     updatedAt,
@@ -1376,7 +1321,6 @@ export function recordReviewVerdict(
     node.round = input.round;
     node.verdict = input.verdict;
     node.summary = input.summary;
-    node.evidencePath = sidecarPath;
     node.status =
       input.verdict === "APPROVE"
         ? "approved"
@@ -1428,29 +1372,23 @@ export function recordCandidateDelivery(
   recordPath: string,
   input: {
     candidate?: string;
-    worktree?: string;
     ciLog?: string;
     ciWaivedUserQuote?: string;
     summary: string;
     architectureImpact: string;
-    performanceStatus?: TaskDeliveryInfo["performanceStatus"];
-    performanceSummary?: string;
     requireCodeReview?: boolean;
     codeReviewReason?: string;
   },
 ): TaskRecord {
   const record = loadTask(recordPath);
   const now = new Date().toISOString();
-  const targetDir = input.worktree?.trim()
-    ? path.resolve(input.worktree.trim())
-    : record.projectRoot;
+  const targetDir = record.projectRoot;
 
   const fingerprint =
     input.candidate?.trim() || computeWorkspaceFingerprint(targetDir);
   const stats = computeWorkspaceChangeStats(targetDir);
 
   record.candidate = fingerprint;
-  record.worktree = targetDir;
 
   if (input.ciWaivedUserQuote?.trim()) {
     record.ci = { waived: input.ciWaivedUserQuote.trim() };
@@ -1460,13 +1398,8 @@ export function recordCandidateDelivery(
 
   record.delivery = {
     candidate: fingerprint,
-    worktree: targetDir,
     summary: input.summary.trim(),
     architectureImpact: input.architectureImpact.trim(),
-    performanceStatus: input.performanceStatus ?? "not-applicable",
-    ...(input.performanceSummary
-      ? { performanceSummary: input.performanceSummary.trim() }
-      : {}),
     deliveredAt: now,
   };
 
@@ -1521,8 +1454,8 @@ export function markTaskCompleted(
 ): TaskRecord {
   const record = loadTask(recordPath);
   const now = new Date().toISOString();
-  record.lifecycleStatus = "merged";
-  record.mergedAt = now;
+  record.lifecycleStatus = "completed";
+  record.completedAt = now;
   if (fingerprint) {
     record.candidate = fingerprint;
   }

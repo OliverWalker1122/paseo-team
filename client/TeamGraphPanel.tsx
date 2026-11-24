@@ -194,7 +194,7 @@ function taskStatusInfo(
 ): { label: string; tone: TaskStatusTone } {
   const t = UI_TEXT[lang];
   if (task.circuitBroken) return { label: t.statusHalted, tone: "danger" };
-  if (task.lifecycleStatus === "merged") {
+  if (task.lifecycleStatus === "completed") {
     return { label: t.statusMerged, tone: "success" };
   }
   if (task.runningCount > 0) {
@@ -357,9 +357,9 @@ function nodeFooterText(
   const t = UI_TEXT[lang];
   if (isViewerSelf) return t.currentChatTag;
   if (node.role === "gate") {
-    return task.lifecycleStatus === "merged"
-      ? t.gateMerged
-      : task.mergeReady
+    return task.lifecycleStatus === "completed"
+      ? t.gateCompleted
+      : task.gateReady
         ? t.gateReady
         : t.gateCheck;
   }
@@ -698,7 +698,7 @@ function NodeInspector({
                   {t.recheckGateBtn}
                 </Text>
               </Pressable>
-              {task.lifecycleStatus !== "merged" ? (
+              {task.lifecycleStatus !== "completed" ? (
                 <Pressable
                   accessibilityRole="button"
                   disabled={controlling}
@@ -788,10 +788,10 @@ function NodeInspector({
         </View>
       ) : null}
 
-      {node.role === "gate" && task.mergeChecks ? (
+      {node.role === "gate" && task.gateChecks ? (
         <View style={{ gap: 5 }}>
           <SectionLabel theme={theme} text={t.gateChecklistTitle} />
-          {Object.entries(task.mergeChecks).map(([key, passed]) => (
+          {Object.entries(task.gateChecks).map(([key, passed]) => (
             <View
               key={key}
               style={{ flexDirection: "row", alignItems: "center", gap: 7 }}
@@ -1940,17 +1940,17 @@ export function GlobalTeamGraphScreen({
 
   const counts = useMemo(() => {
     const all = historyTasks ?? [];
-    const done = all.filter((x) => x.lifecycleStatus === "merged").length;
+    const done = all.filter((x) => x.lifecycleStatus === "completed").length;
     return { all: all.length, done, active: all.length - done };
   }, [historyTasks]);
 
   const visibleTasks = useMemo(() => {
     const all = historyTasks ?? [];
     if (filter === "done") {
-      return all.filter((x) => x.lifecycleStatus === "merged");
+      return all.filter((x) => x.lifecycleStatus === "completed");
     }
     if (filter === "active") {
-      return all.filter((x) => x.lifecycleStatus !== "merged");
+      return all.filter((x) => x.lifecycleStatus !== "completed");
     }
     return all;
   }, [historyTasks, filter]);

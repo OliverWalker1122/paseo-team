@@ -173,7 +173,7 @@ test("verifies uncompressed uncommitted workspace changes end-to-end without req
     created.recordPath,
     gateRestored.fingerprint,
   );
-  assert.equal(completed.lifecycleStatus, "merged");
+  assert.equal(completed.lifecycleStatus, "completed");
 
   // Once completed/signed-off, future workspace edits do not corrupt archived task gate
   writeFileSync(path.join(repoDir, "app.mjs"), "export const v = 3;\n");

@@ -65,53 +65,49 @@ function tempGitRepo(t: test.TestContext) {
   return { baseDir, repoDir, stateRoot, configPath };
 }
 
-test("migrates legacy profile-based v3/v4 config to schemaVersion 5 direct models with English default", (t) => {
+test("migrates legacy v3/v4 configs to schemaVersion 5 direct model specs", (t) => {
   const { repoDir, configPath } = tempGitRepo(t);
   const v3 = {
     schemaVersion: 3,
     teams: {
-      标准: {
-        developer: "Developer",
-        planReviewers: ["Architect", "QA"],
-        codeReviewers: ["Architect", "QA"],
-        expert: "Architect",
+      Standard: {
+        developer: "codex/gpt-6.1-sol",
+        planReviewers: ["claude/claude-opus-5-5", "codex/gpt-6-astra"],
+        codeReviewers: ["claude/claude-opus-5-5", "codex/gpt-6-astra"],
+        expert: "claude/claude-opus-5-5",
         complexMode: "expert",
         reader: "legacy-ignored",
       },
-      旧深思: {
+      LegacyDeep: {
         developer: "Developer",
         planReviewers: ["QA"],
         codeReviewers: ["QA"],
         complexMode: "deep",
       },
     },
-    default: "标准",
-    projects: { [repoDir]: "旧深思" },
+    default: "Standard",
+    projects: { [repoDir]: "LegacyDeep" },
   };
-  const legacyMap = new Map([
-    ["Developer", { model: "codex/gpt-6.1-sol", thinking: "high" }],
-    ["Architect", { model: "claude/claude-opus-5-5", thinking: "high" }],
-    ["QA", { model: "codex/gpt-6-astra", thinking: "high" }],
-  ]);
 
-  const migrated = migrateConfig(v3, legacyMap);
+  const migrated = migrateConfig(v3);
   assert.equal(migrated.schemaVersion, 5);
-  assert.deepEqual(migrated.teams["标准"].developer, {
+  assert.deepEqual(migrated.teams["Standard"].developer, {
     model: "codex/gpt-6.1-sol",
-    thinking: "high",
   });
-  assert.deepEqual(migrated.teams["标准"].codeReviewers, [
-    { model: "claude/claude-opus-5-5", thinking: "high" },
-    { model: "codex/gpt-6-astra", thinking: "high" },
+  assert.deepEqual(migrated.teams["Standard"].codeReviewers, [
+    { model: "claude/claude-opus-5-5" },
+    { model: "codex/gpt-6-astra" },
   ]);
-  assert.equal(migrated.teams["标准"].separatePlanReviewers, false);
-  assert.equal(migrated.teams["旧深思"].complexMode, "simple");
+  // Old Paseo agent-profile names carry no model, so they fall back to Auto.
+  assert.deepEqual(migrated.teams["LegacyDeep"].developer, { model: "auto" });
+  assert.equal(migrated.teams["Standard"].separatePlanReviewers, false);
+  assert.equal(migrated.teams["LegacyDeep"].complexMode, "simple");
 
   saveConfig(migrated, configPath);
   const loaded = loadConfig(configPath);
   assert.equal(loaded.exists, true);
   const eff = resolveEffectiveTeam(loaded.config, repoDir);
-  assert.equal(eff.teamName, "旧深思");
+  assert.equal(eff.teamName, "LegacyDeep");
   assert.equal(eff.source, "project");
 });
 
@@ -348,7 +344,7 @@ test("normalizes legacy v1-v5 task.json records without nodes so hooks and UI ne
       task_id: "20261123-legacy-v5",
       project: repoDir,
       goal: "Fix settlement sync",
-      team: "标准",
+      team: "Standard",
       complexMode: "expert",
       status: "deployed",
       candidate: "b".repeat(40),
