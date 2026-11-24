@@ -1411,9 +1411,11 @@ export function parseInlineTaskDirectives(rawArgs: string): {
   let skipReviewReason: string | undefined;
 
   const zhTeamMatch =
-    /(?:^|[，,\s])用\s*([^\s，,]+?)\s*(?:组合|预设)(?:[，,\s]|$)/.exec(text);
+    /(?:^|[，,；;。\s])用\s*([^\s，,；;。]+?)\s*(?:组合|预设)(?:[，,；;。\s]|$)/.exec(
+      text,
+    );
   const enTeamMatch =
-    /(?:^|[\s,])(?:use\s+preset|preset:|team:)\s*([a-zA-Z0-9_-]+)/i.exec(text);
+    /(?:^|[\s,;])(?:use\s+preset|preset:|team:)\s*([a-zA-Z0-9_-]+)/i.exec(text);
   if (zhTeamMatch) {
     teamOverride = zhTeamMatch[1].trim();
   } else if (enTeamMatch) {

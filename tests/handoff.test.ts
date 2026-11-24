@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   buildConversationGraph,
   memberOwnsHandoff,
+  parseInlineTaskDirectives,
   reviewInputProblem,
 } from "../server/handlers.ts";
 import { inspectQualityGate } from "../server/quality-gate.ts";
@@ -282,4 +283,18 @@ test("asking a reviewer to look again at the same delivery opens the next round"
   assert.equal(review("rev-2", "APPROVE").round, 2);
   // Still failing after that would hit the limit.
   assert.equal(review("rev-2", "REQUEST_CHANGES").status, "CIRCUIT_BROKEN");
+});
+
+test("preset phrases are recognized after Chinese punctuation", () => {
+  for (const raw of [
+    "加 search 命令；需要审查；用 Deepseek 预设",
+    "加 search 命令，用 Deepseek 预设。",
+    "add search; use preset Deepseek",
+  ]) {
+    assert.equal(parseInlineTaskDirectives(raw).teamOverride, "Deepseek", raw);
+  }
+  assert.equal(
+    parseInlineTaskDirectives("加 search 命令").teamOverride,
+    undefined,
+  );
 });
