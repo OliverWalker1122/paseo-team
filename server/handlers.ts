@@ -276,7 +276,7 @@ async function fetchLiveAgentMap(
   try {
     const listed = await paseo.agents.list({
       filter: { includeArchived: true },
-      page: { limit: 300 },
+      page: { limit: 200 }, // daemon rejects larger pages, which emptied all live state
     });
     for (const entry of listed.entries) {
       const a = entry.agent as unknown as Record<string, unknown>;
@@ -315,8 +315,9 @@ async function fetchLiveAgentMap(
         updatedAt: typeof a.updatedAt === "string" ? a.updatedAt : undefined,
       });
     }
-  } catch {
-    // Ignore transient list errors
+  } catch (err) {
+    // Non-fatal, but log it: a silent failure here blanks every live status.
+    console.error("[paseo-team] agents.list failed:", err);
   }
   return map;
 }
