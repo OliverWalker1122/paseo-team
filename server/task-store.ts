@@ -122,7 +122,8 @@ export function readReviewRounds(
     path.dirname(path.resolve(recordPath)),
     "reviews",
   );
-  const byRound = new Map<number, ReviewRoundView>();
+  // Every submission is kept: a re-review of the same delivery is a second verdict in that round.
+  const out: ReviewRoundView[] = [];
   if (existsSync(reviewsDir)) {
     for (const name of readdirSync(reviewsDir)) {
       if (!name.startsWith(`${stage}-`) || !name.endsWith(".json")) continue;
@@ -137,10 +138,8 @@ export function readReviewRounds(
       const round = typeof raw.round === "number" ? raw.round : 0;
       if (!verdict || round < 1) continue;
       const recordedAt = asNonEmptyString(raw.recordedAt) ?? undefined;
-      const prev = byRound.get(round);
-      if (prev && (prev.recordedAt ?? "") > (recordedAt ?? "")) continue;
       const findings = toStringList(raw.findings);
-      byRound.set(round, {
+      out.push({
         round,
         verdict,
         summary: asNonEmptyString(raw.summary) ?? "",
@@ -149,8 +148,8 @@ export function readReviewRounds(
       });
     }
   }
-  if (byRound.size === 0 && latest) {
-    byRound.set(latest.round, {
+  if (out.length === 0 && latest) {
+    out.push({
       round: latest.round,
       verdict: latest.status,
       summary: latest.summary,
@@ -158,7 +157,11 @@ export function readReviewRounds(
       recordedAt: latest.updatedAt,
     });
   }
-  return [...byRound.values()].sort((a, b) => a.round - b.round);
+  return out.sort(
+    (a, b) =>
+      a.round - b.round ||
+      (a.recordedAt ?? "").localeCompare(b.recordedAt ?? ""),
+  );
 }
 
 export interface TaskDeliveryInfo {
@@ -1241,7 +1244,11 @@ export function recordReviewVerdict(
   const taskDir = path.dirname(path.resolve(recordPath));
   const safeAgent = input.agentId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 32);
   const safeTarget = targetRef.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 16);
-  const sidecarName = `${input.stage}-${safeAgent}-${safeTarget}-r${input.round}.json`;
+  const base = `${input.stage}-${safeAgent}-${safeTarget}-r${input.round}`;
+  let sidecarName = `${base}.json`;
+  for (let n = 2; existsSync(path.join(taskDir, "reviews", sidecarName)); n++) {
+    sidecarName = `${base}-${n}.json`;
+  }
   const sidecarPath = path.join(taskDir, "reviews", sidecarName);
 
   writeJsonAtomic(sidecarPath, {

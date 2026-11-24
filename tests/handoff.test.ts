@@ -15,6 +15,7 @@ import {
   listTasksByLauncher,
   markTurnStarted,
   nextReviewRound,
+  readReviewRounds,
   recordPlanSubmission,
   recordReviewVerdict,
   registerTaskAgent,
@@ -228,5 +229,26 @@ test("coordinator may record for a member only after its reminder failed", (t) =
   assert.deepEqual(
     rec.codeReviewers.map((r) => r.source),
     ["self", "self"],
+  );
+});
+
+test("a re-review of the same delivery keeps both verdicts in history", (t) => {
+  const { make } = setup(t);
+  const { recordPath } = make("Re-review history");
+  const base = { stage: "code" as const, agentId: "rev-1", round: 1 };
+  recordReviewVerdict(recordPath, {
+    ...base,
+    verdict: "REQUEST_CHANGES",
+    summary: "first",
+    findings: ["blocking: a.ts:1 bug"],
+  });
+  recordReviewVerdict(recordPath, {
+    ...base,
+    verdict: "APPROVE",
+    summary: "second",
+  });
+  assert.deepEqual(
+    readReviewRounds(recordPath, "code", "rev-1").map((r) => r.verdict),
+    ["REQUEST_CHANGES", "APPROVE"],
   );
 });

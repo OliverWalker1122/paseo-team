@@ -608,7 +608,10 @@ function ReviewRoundsList({
         const color = verdictColor(theme, round.verdict);
         const isLast = idx === rounds.length - 1;
         return (
-          <View key={round.round} style={{ flexDirection: "row", gap: 10 }}>
+          <View
+            key={`${round.round}-${round.recordedAt ?? idx}`}
+            style={{ flexDirection: "row", gap: 10 }}
+          >
             <View style={{ alignItems: "center", width: 26 }}>
               <View
                 style={{
