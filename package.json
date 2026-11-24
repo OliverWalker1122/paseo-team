@@ -1,0 +1,66 @@
+{
+  "name": "paseo-team",
+  "version": "6.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Paseo plugin that runs a coding task as a small team: a coordinator, a developer, and two cross-reviewing code reviewers behind a quality gate.",
+  "author": "OliverWalker1122",
+  "homepage": "https://github.com/OliverWalker1122/paseo-team#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OliverWalker1122/paseo-team.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OliverWalker1122/paseo-team/issues"
+  },
+  "keywords": [
+    "paseo",
+    "paseo-plugin",
+    "ai-agents",
+    "multi-agent",
+    "code-review",
+    "coding-agent"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write README.md OVERVIEW.md CONTRIBUTING.md SECURITY.md CHANGELOG.md paseo-plugin.json package.json tsconfig.json index.client.tsx index.server.ts \"shared/**/*.ts\" \"server/**/*.ts\" \"client/**/*.{ts,tsx}\" scripts/check.mjs \"tests/**/*.ts\" .prettierrc.json .github/workflows/ci.yml",
+    "format:check": "prettier --check README.md OVERVIEW.md CONTRIBUTING.md SECURITY.md CHANGELOG.md paseo-plugin.json package.json tsconfig.json index.client.tsx index.server.ts \"shared/**/*.ts\" \"server/**/*.ts\" \"client/**/*.{ts,tsx}\" scripts/check.mjs \"tests/**/*.ts\" .prettierrc.json .github/workflows/ci.yml",
+    "lint": "node scripts/check.mjs --lint",
+    "check:plugin": "node scripts/check.mjs",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run check:plugin",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "ci": "npm run check && npm test"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.17.3",
+    "@tanstack/react-query": "^5.90.11",
+    "@types/node": "^22.15.0",
+    "@types/react": "~19.2.0",
+    "markdown-it": "15.0.3",
+    "markdownlint": "0.41.1",
+    "prettier": "3.9.10",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.9.3",
+    "yaml": "2.9.1",
+    "zod": "^4.4.3"
+  },
+  "overrides": {
+    "micromark-extension-math": {
+      "katex": "0.18.2"
+    }
+  }
+}

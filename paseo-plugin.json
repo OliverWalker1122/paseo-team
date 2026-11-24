@@ -1,0 +1,9 @@
+{
+  "id": "paseo-team",
+  "name": "Paseo Team",
+  "description": "Run a coding task as a small team: a coordinator, a developer, and two cross-reviewing code reviewers behind a quality gate.",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.17.3"
+  }
+}
