@@ -1748,7 +1748,17 @@ export async function startTeamTask(
   const updated = loadTask(created.recordPath);
   updated.coordinatorAgentId = coordinatorAgentId;
   const coordNode = updated.nodes.find((n) => n.nodeId === "coordinator");
-  if (coordNode) coordNode.agentId = coordinatorAgentId;
+  if (coordNode) {
+    // The coordinator is a new session now, so show its real model instead of "current chat".
+    const [provider, ...model] = coordLaunch.providerArg.split("/");
+    coordNode.agentId = coordinatorAgentId;
+    coordNode.profile = coordLaunch.providerArg;
+    coordNode.provider = provider;
+    if (model.length) coordNode.model = model.join("/");
+    if (coordLaunch.thinkingOptionId) {
+      coordNode.thinkingOptionId = coordLaunch.thinkingOptionId;
+    }
+  }
   saveTask(created.recordPath, updated);
 
   notifyTaskChanges();
