@@ -1930,7 +1930,7 @@ function submitReview(
   }
   const res = recordReviewVerdict(recordPath, {
     ...input,
-    round: input.round ?? nextReviewRound(record, input.stage),
+    round: input.round ?? nextReviewRound(record, input.stage, input.agentId),
   });
   notifyTaskChanges();
   return {

@@ -12,10 +12,12 @@ import { inspectQualityGate } from "../server/quality-gate.ts";
 import {
   checkTurnHandoff,
   initTask,
+  loadTask,
   listTasksByLauncher,
   markTurnStarted,
   nextReviewRound,
   readReviewRounds,
+  recordCandidateDelivery,
   recordPlanSubmission,
   recordReviewVerdict,
   registerTaskAgent,
@@ -251,4 +253,33 @@ test("a re-review of the same delivery keeps both verdicts in history", (t) => {
     readReviewRounds(recordPath, "code", "rev-1").map((r) => r.verdict),
     ["REQUEST_CHANGES", "APPROVE"],
   );
+});
+
+test("asking a reviewer to look again at the same delivery opens the next round", (t) => {
+  const { make } = setup(t);
+  const { recordPath, record } = make("Round counting");
+  const deliver = () =>
+    recordCandidateDelivery(recordPath, {
+      summary: "d",
+      architectureImpact: "None",
+      ciWaivedUserQuote: "user said skip CI for this test",
+    });
+  const review = (agentId: string, verdict: "APPROVE" | "REQUEST_CHANGES") => {
+    const rec = loadTask(recordPath);
+    return recordReviewVerdict(recordPath, {
+      stage: "code",
+      agentId,
+      round: nextReviewRound(rec, "code", agentId),
+      verdict,
+      summary: "s",
+    });
+  };
+  assert.equal(nextReviewRound(record, "code", "rev-1"), 1);
+  deliver();
+  assert.equal(review("rev-1", "APPROVE").round, 1);
+  assert.equal(review("rev-2", "REQUEST_CHANGES").round, 1);
+  // Coordinator rules on the finding and asks rev-2 to re-review: round 2.
+  assert.equal(review("rev-2", "APPROVE").round, 2);
+  // Still failing after that would hit the limit.
+  assert.equal(review("rev-2", "REQUEST_CHANGES").status, "CIRCUIT_BROKEN");
 });

@@ -1383,10 +1383,21 @@ export function nextDeliveryRound(record: TaskRecord): number {
 export function nextReviewRound(
   record: TaskRecord,
   stage: "plan" | "code",
+  agentId?: string,
 ): number {
-  if (stage === "plan") return Math.max(1, record.planSubmissions ?? 0);
-  const rounds = (record.deliveries ?? []).map((d) => d.round);
-  return Math.max(1, ...rounds);
+  // A new plan version or delivery opens its round...
+  const base =
+    stage === "plan"
+      ? Math.max(1, record.planSubmissions ?? 0)
+      : Math.max(1, ...(record.deliveries ?? []).map((d) => d.round));
+  const current =
+    stage === "plan" ? record.planReviewRound : record.codeReviewRound;
+  if (current < base) return base;
+  // ...and a reviewer asked to look again at the same target counts as the next
+  // round, so rulings cannot bypass the round limit.
+  const list = stage === "plan" ? record.planReviewers : record.codeReviewers;
+  const again = list.some((r) => r.agentId === agentId && r.round === current);
+  return again ? current + 1 : current;
 }
 
 export function recordPlanSubmission(
