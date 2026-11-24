@@ -15,7 +15,7 @@ When one agent writes code and then judges its own work, it tends to approve its
 ## Features
 
 - **Separated roles.** A new coordinator session per task scopes the work and dispatches one Developer at a time. Reviewers do not edit product code, while remaining free to run tests or reproduction checks to verify edge cases.
-- **Checked handoffs.** Every member hands off through its own submit tool (delivery, plan or review). The tool rejects malformed input or a delivery without a passing check, and the plugin reminds a member once if its turn ends without submitting.
+- **Checked handoffs.** Every member hands off through its own submit tool (delivery, plan or review). The tool rejects malformed input or a delivery without a passing check, and the plugin reminds a member once if its turn ends while it still owes a handoff (for example, rework was requested).
 - **Cross review.** Two reviewers examine each change independently from opposing angles (requirements and real edge cases vs. architecture and simpler alternatives). Neither sees the other's verdict.
 - **Two-round limit.** If review still fails after two rounds, the team stops and asks you instead of patching endlessly.
 - **Quality gate.** A task completes only when four evidence checks pass, and a blocked gate lists exactly what is missing and from whom (see [Quality gate](#quality-gate)).
