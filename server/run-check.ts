@@ -10,7 +10,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { computeWorkspaceFingerprint } from "./quality-gate.ts";
+import { computeWorkspaceFingerprint, resolveGitRoot } from "./quality-gate.ts";
 
 const tailBytes = 8192;
 const tailCharacters = 2000;
@@ -82,9 +82,10 @@ export function gitCheckoutState(cwd: string): {
   clean: boolean;
   fingerprint: string;
 } {
-  const fingerprint = computeWorkspaceFingerprint(cwd);
+  const root = resolveGitRoot(cwd);
+  const fingerprint = computeWorkspaceFingerprint(root);
   const git = (...args: string[]) =>
-    spawnSync("git", ["--no-optional-locks", "-C", cwd, ...args], {
+    spawnSync("git", ["--no-optional-locks", "-C", root, ...args], {
       encoding: "utf8",
     });
   const head = git("rev-parse", "HEAD");
@@ -117,7 +118,6 @@ export function runCheck(
   try {
     // Sidecar read by the workflow merge gate; created before the check runs.
     resultFd = openSync(`${resolved}.json`, "wx", 0o600);
-    const checked = gitCheckoutState(cwd);
     const child = spawnSync(command, args, {
       cwd,
       shell: false,
@@ -128,6 +128,7 @@ export function runCheck(
         DOTENV_CONFIG_PATH: process.platform === "win32" ? "NUL" : "/dev/null",
       },
     });
+    const checked = gitCheckoutState(cwd);
     const exitCode = child.status;
     const signal = child.signal ?? null;
     const errCode = (child.error as NodeJS.ErrnoException | undefined)?.code;

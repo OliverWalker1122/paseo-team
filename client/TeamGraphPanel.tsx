@@ -82,50 +82,58 @@ function statusPalette(
   switch (visualStatus) {
     case "running":
       return {
-        stripe: theme.colors.accent,
-        badgeFg: theme.colors.accent,
+        dot: theme.colors.accent,
+        fg: theme.colors.accent,
+        iconFg: theme.colors.accent,
         label: t.visRunning,
       };
     case "awaiting_permission":
       return {
-        stripe: theme.colors.statusWarning,
-        badgeFg: theme.colors.statusWarning,
+        dot: theme.colors.statusWarning,
+        fg: theme.colors.statusWarning,
+        iconFg: theme.colors.statusWarning,
         label: t.visAuth,
       };
     case "approved":
       return {
-        stripe: theme.colors.statusSuccess,
-        badgeFg: theme.colors.statusSuccess,
+        dot: theme.colors.statusSuccess,
+        fg: theme.colors.statusSuccess,
+        iconFg: theme.colors.statusSuccess,
         label: t.visApproved,
       };
     case "completed":
       return {
-        stripe: theme.colors.statusSuccess,
-        badgeFg: theme.colors.statusSuccess,
+        dot: theme.colors.statusSuccess,
+        fg: theme.colors.statusSuccess,
+        iconFg: theme.colors.foreground,
         label: t.visCompleted,
       };
     case "changes_requested":
       return {
-        stripe: theme.colors.statusWarning,
-        badgeFg: theme.colors.statusWarning,
+        dot: theme.colors.statusWarning,
+        fg: theme.colors.statusWarning,
+        iconFg: theme.colors.statusWarning,
         label: t.visChanges,
       };
     case "blocked":
       return {
-        stripe: theme.colors.statusDanger,
-        badgeFg: theme.colors.statusDanger,
+        dot: theme.colors.statusDanger,
+        fg: theme.colors.statusDanger,
+        iconFg: theme.colors.statusDanger,
         label: t.visBlocked,
       };
     case "skipped":
       return {
-        stripe: theme.colors.border,
-        badgeFg: theme.colors.foregroundMuted,
+        dot: theme.colors.border,
+        fg: theme.colors.foregroundMuted,
+        iconFg: theme.colors.foregroundMuted,
         label: t.visSkipped,
       };
     default:
       return {
-        stripe: theme.colors.border,
-        badgeFg: theme.colors.foregroundMuted,
+        dot: theme.colors.border,
+        fg: theme.colors.foregroundMuted,
+        iconFg: theme.colors.foregroundMuted,
         label: t.visPending,
       };
   }
@@ -148,22 +156,21 @@ function roleIconName(role: PipelineNodeViewDto["role"]): string {
   }
 }
 
-function connectorColor(
+function edgeStrokeColor(
   theme: PluginTheme,
-  stageStatus: PipelineStageColumnDto["stageStatus"],
+  fromStatus: PipelineStageColumnDto["stageStatus"],
+  toStatus: PipelineStageColumnDto["stageStatus"],
 ): string {
-  switch (stageStatus) {
-    case "completed":
-      return theme.colors.statusSuccess;
-    case "running":
-      return theme.colors.accent;
-    case "awaiting_permission":
-      return theme.colors.statusWarning;
-    case "blocked":
-      return theme.colors.statusDanger;
-    default:
-      return theme.colors.border;
+  if (toStatus === "running" || toStatus === "awaiting_permission") {
+    return theme.colors.accent;
   }
+  if (fromStatus === "blocked") {
+    return theme.colors.statusWarning;
+  }
+  if (fromStatus === "completed" && toStatus !== "pending") {
+    return theme.colors.foregroundMuted;
+  }
+  return theme.colors.border;
 }
 
 function formatShortTime(iso: string): string {
@@ -339,7 +346,7 @@ function verdictColor(theme: PluginTheme, verdict: ReviewRound["verdict"]) {
       : theme.colors.statusDanger;
 }
 
-/** Card text: the latest conclusion, never a bare count. */
+/** Card text: concrete conclusion or brief for this exact workflow step. */
 function nodeCardBody(lang: UiLanguage, node: PipelineNodeViewDto): string {
   const latest = node.rounds?.[node.rounds.length - 1];
   if (latest) {
@@ -348,35 +355,13 @@ function nodeCardBody(lang: UiLanguage, node: PipelineNodeViewDto): string {
   return node.summary || node.briefSummary;
 }
 
-function nodeFooterText(
-  lang: UiLanguage,
-  task: PipelineTaskSnapshotDto,
-  node: PipelineNodeViewDto,
-  isViewerSelf: boolean,
-): string {
-  const t = UI_TEXT[lang];
-  if (isViewerSelf) return t.currentChatTag;
-  if (node.role === "gate") {
-    return task.lifecycleStatus === "completed"
-      ? t.gateCompleted
-      : task.gateReady
-        ? t.gateReady
-        : t.gateCheck;
-  }
-  if (node.agentId) {
-    return liveStateLabel(lang, node.liveState, node.visualStatus);
-  }
-  return node.role === "coordinator" ? t.coordinatorIdle : t.waitingPrev;
-}
-
-function NodeCard({
+function WorkflowNodeCard({
   theme,
   lang,
   task,
   node,
   selected,
   isViewerSelf,
-  fill,
   onPress,
 }: {
   theme: PluginTheme;
@@ -385,85 +370,210 @@ function NodeCard({
   node: PipelineNodeViewDto;
   selected: boolean;
   isViewerSelf: boolean;
-  fill?: boolean;
   onPress: () => void;
 }) {
+  const t = UI_TEXT[lang];
   const pal = statusPalette(theme, lang, node.visualStatus);
   const body = nodeCardBody(lang, node);
-  const rounds = node.rounds?.length ?? 0;
+  const labelAlreadyHasRound = /第\s*\d+\s*轮|Round\s*\d+/i.test(node.label);
+  const statusText =
+    node.role === "gate"
+      ? task.lifecycleStatus === "completed"
+        ? t.gateCompleted
+        : task.gateReady
+          ? t.gateReady
+          : pal.label
+      : node.round && !labelAlreadyHasRound
+        ? `R${node.round} ${pal.label}`
+        : pal.label;
+
+  const metaItems = [
+    node.modelBadge || node.profile,
+    node.perspectiveLabel,
+    isViewerSelf ? t.currentChatTag : undefined,
+  ].filter(Boolean);
+
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityState={{ selected }}
       onPress={onPress}
       style={({ hovered }: HoverState) => ({
-        flexDirection: "row",
-        borderRadius: 8,
+        borderRadius: 10,
         borderWidth: 1,
         borderColor: selected
           ? theme.colors.accent
           : hovered
             ? theme.colors.foregroundMuted
             : theme.colors.border,
-        backgroundColor: theme.colors.surface0,
-        overflow: "hidden",
+        backgroundColor: theme.colors.surface1,
+        paddingHorizontal: 13,
+        paddingVertical: 11,
+        gap: 6,
         opacity: node.visualStatus === "skipped" ? 0.55 : 1,
-        ...(fill ? { flexGrow: 1, flexBasis: 240, maxWidth: 420 } : {}),
       })}
     >
-      <View style={{ width: 3, backgroundColor: pal.stripe }} />
-      <View style={{ flex: 1, padding: 10, gap: 4 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <Icon name={roleIconName(node.role)} size={13} color={pal.stripe} />
-          <Text
-            numberOfLines={1}
-            style={{
-              flex: 1,
-              color: theme.colors.foreground,
-              fontSize: 13,
-              fontWeight: "600",
-            }}
-          >
-            {node.label}
-          </Text>
-          <Text style={{ color: pal.badgeFg, fontSize: 10, fontWeight: "600" }}>
-            {node.round ? `R${node.round} ${pal.label}` : pal.label}
-          </Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <View
+          style={{
+            width: 24,
+            height: 24,
+            borderRadius: 6,
+            backgroundColor: theme.colors.surface2,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Icon name={roleIconName(node.role)} size={13} color={pal.iconFg} />
         </View>
         <Text
           numberOfLines={1}
-          style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
-        >
-          {node.modelBadge || node.profile}
-        </Text>
-        {body ? (
-          <Text
-            numberOfLines={2}
-            style={{
-              color: theme.colors.foreground,
-              fontSize: 12,
-              lineHeight: 17,
-              marginTop: 2,
-            }}
-          >
-            {body}
-          </Text>
-        ) : null}
-        <Text
-          numberOfLines={1}
           style={{
-            color: isViewerSelf
-              ? theme.colors.accent
-              : theme.colors.foregroundMuted,
-            fontSize: 11,
-            marginTop: 2,
+            flex: 1,
+            color: theme.colors.foreground,
+            fontSize: 13,
+            fontWeight: "600",
           }}
         >
-          {nodeFooterText(lang, task, node, isViewerSelf)}
-          {rounds > 1 ? ` · ${UI_TEXT[lang].roundsCount(rounds)}` : ""}
+          {node.label}
         </Text>
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 5,
+            paddingHorizontal: 7,
+            paddingVertical: 2,
+            borderRadius: 999,
+            backgroundColor: theme.colors.surface0,
+            borderWidth: 1,
+            borderColor: theme.colors.border,
+          }}
+        >
+          <View
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 3,
+              backgroundColor: pal.dot,
+            }}
+          />
+          <Text style={{ color: pal.fg, fontSize: 10, fontWeight: "600" }}>
+            {statusText}
+          </Text>
+        </View>
       </View>
+
+      <Text
+        numberOfLines={1}
+        style={{
+          color: isViewerSelf
+            ? theme.colors.accent
+            : theme.colors.foregroundMuted,
+          fontSize: 11,
+        }}
+      >
+        {metaItems.join(" · ")}
+      </Text>
+
+      {body ? (
+        <Text
+          numberOfLines={2}
+          style={{
+            color: theme.colors.foreground,
+            fontSize: 12,
+            lineHeight: 17,
+          }}
+        >
+          {body}
+        </Text>
+      ) : null}
     </Pressable>
+  );
+}
+
+/**
+ * Pure React Native topological edge connector between consecutive workflow steps:
+ * - 1 -> 1: straight centered stem
+ * - 1 -> N: stem + symmetric flexbox fork bar into each parallel node center
+ * - N -> 1: symmetric flexbox join bar from each parallel node center + stem
+ * - N -> M: join bar + center stem + fork bar
+ */
+function WorkflowEdgeConnector({
+  color,
+  fromCount,
+  toCount,
+}: {
+  color: string;
+  fromCount: number;
+  toCount: number;
+}) {
+  if (fromCount <= 1 && toCount <= 1) {
+    return (
+      <View style={{ alignItems: "center" }}>
+        <View style={{ width: 2, height: 18, backgroundColor: color }} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ width: "100%", alignItems: "center" }}>
+      {fromCount > 1 ? (
+        <View style={{ width: "100%", flexDirection: "row", height: 12 }}>
+          {Array.from({ length: fromCount }).map((_, idx) => (
+            <View key={`join-${idx}`} style={{ flex: 1, flexDirection: "row" }}>
+              <View
+                style={{
+                  flex: 1,
+                  borderBottomWidth: idx > 0 ? 2 : 0,
+                  borderColor: color,
+                }}
+              />
+              <View style={{ width: 2, backgroundColor: color }} />
+              <View
+                style={{
+                  flex: 1,
+                  borderBottomWidth: idx < fromCount - 1 ? 2 : 0,
+                  borderColor: color,
+                }}
+              />
+            </View>
+          ))}
+        </View>
+      ) : null}
+
+      <View
+        style={{
+          width: 2,
+          height: fromCount > 1 && toCount > 1 ? 8 : 10,
+          backgroundColor: color,
+        }}
+      />
+
+      {toCount > 1 ? (
+        <View style={{ width: "100%", flexDirection: "row", height: 12 }}>
+          {Array.from({ length: toCount }).map((_, idx) => (
+            <View key={`fork-${idx}`} style={{ flex: 1, flexDirection: "row" }}>
+              <View
+                style={{
+                  flex: 1,
+                  borderTopWidth: idx > 0 ? 2 : 0,
+                  borderColor: color,
+                }}
+              />
+              <View style={{ width: 2, backgroundColor: color }} />
+              <View
+                style={{
+                  flex: 1,
+                  borderTopWidth: idx < toCount - 1 ? 2 : 0,
+                  borderColor: color,
+                }}
+              />
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -624,10 +734,11 @@ function NodeInspector({
   return (
     <View
       style={{
+        marginTop: 8,
         padding: 14,
         borderRadius: 10,
         borderWidth: 1,
-        borderColor: theme.colors.border,
+        borderColor: theme.colors.accent,
         backgroundColor: theme.colors.surface1,
         gap: 12,
       }}
@@ -645,7 +756,7 @@ function NodeInspector({
             <Icon
               name={roleIconName(node.role)}
               size={14}
-              color={statusPalette(theme, lang, node.visualStatus).stripe}
+              color={statusPalette(theme, lang, node.visualStatus).iconFg}
             />
             <Text
               style={{
@@ -823,14 +934,16 @@ function NodeInspector({
   );
 }
 
+/**
+ * Unified top-to-bottom Workflow Node Graph shared identically by the Chat
+ * Team Graph panel and the History detail view.
+ */
 function TaskFlowCanvas({
   theme,
   compact,
   lang,
   task,
   viewerAgentId,
-  orientation = "horizontal",
-  autoSelectNode = true,
   onOpenAgent,
   onOpenConfig,
   onTaskUpdated,
@@ -840,8 +953,6 @@ function TaskFlowCanvas({
   lang: UiLanguage;
   task: PipelineTaskSnapshotDto;
   viewerAgentId?: string | null;
-  orientation?: "horizontal" | "vertical";
-  autoSelectNode?: boolean;
   onOpenAgent?: (agentId: string, serverId?: string) => void;
   onOpenConfig?: () => void;
   onTaskUpdated?: (next: PipelineTaskSnapshotDto) => void;
@@ -859,25 +970,14 @@ function TaskFlowCanvas({
   }, [task.taskId]);
 
   const selectedNode = useMemo(() => {
+    if (!selectedNodeId) return null;
     for (const stage of task.stages) {
       for (const node of stage.nodes) {
         if (node.nodeId === selectedNodeId) return node;
       }
     }
-    if (!autoSelectNode) return null;
-    for (const stage of task.stages) {
-      for (const node of stage.nodes) {
-        if (
-          node.visualStatus === "awaiting_permission" ||
-          node.visualStatus === "blocked" ||
-          node.visualStatus === "running"
-        ) {
-          return node;
-        }
-      }
-    }
     return null;
-  }, [task, selectedNodeId, autoSelectNode]);
+  }, [task, selectedNodeId]);
 
   async function handleControl(
     action: "inspect_gate" | "complete_task" | "authorize_extra_round",
@@ -920,47 +1020,11 @@ function TaskFlowCanvas({
   ].filter(Boolean);
 
   const toggleNode = (nodeId: string) =>
-    setSelectedNodeId((prev) =>
-      prev === nodeId || selectedNode?.nodeId === nodeId ? null : nodeId,
-    );
-
-  const inspector = selectedNode ? (
-    <NodeInspector
-      theme={theme}
-      compact={compact}
-      lang={lang}
-      task={task}
-      node={selectedNode}
-      viewerAgentId={viewerAgentId}
-      controlling={controlling}
-      onControl={(action) => void handleControl(action)}
-      onOpenAgent={onOpenAgent}
-    />
-  ) : null;
-
-  const hint =
-    !selectedNode || (task.skippedStageCount ?? 0) > 0 ? (
-      <View
-        style={{
-          flexDirection: "row",
-          justifyContent: "space-between",
-          gap: 8,
-        }}
-      >
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-          {!selectedNode ? t.pickNodeHint : ""}
-        </Text>
-        {task.skippedStageCount && task.skippedStageCount > 0 ? (
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-            {t.hiddenStagesHint(task.skippedStageCount)}
-          </Text>
-        ) : null}
-      </View>
-    ) : null;
+    setSelectedNodeId((prev) => (prev === nodeId ? null : nodeId));
 
   return (
     <View style={{ gap: 16 }}>
-      {/* Header: goal + one quiet meta line */}
+      {/* Header: goal + quiet meta line */}
       <View style={{ gap: 6 }}>
         <View
           style={{ flexDirection: "row", alignItems: "flex-start", gap: 12 }}
@@ -1018,29 +1082,45 @@ function TaskFlowCanvas({
             flexDirection: "row",
             flexWrap: "wrap",
             alignItems: "center",
-            gap: 6,
+            justifyContent: "space-between",
+            gap: 8,
           }}
         >
           <View
             style={{
-              width: 7,
-              height: 7,
-              borderRadius: 4,
-              backgroundColor: toneColor(theme, status.tone),
-            }}
-          />
-          <Text
-            style={{
-              color: toneColor(theme, status.tone),
-              fontSize: 12,
-              fontWeight: "600",
+              flexDirection: "row",
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: 6,
             }}
           >
-            {status.label}
-          </Text>
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-            {metaParts.map((part) => ` · ${part}`).join("")}
-          </Text>
+            <View
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: 4,
+                backgroundColor: toneColor(theme, status.tone),
+              }}
+            />
+            <Text
+              style={{
+                color: toneColor(theme, status.tone),
+                fontSize: 12,
+                fontWeight: "600",
+              }}
+            >
+              {status.label}
+            </Text>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+              {metaParts.map((part) => ` · ${part}`).join("")}
+            </Text>
+          </View>
+
+          {task.skippedStageCount && task.skippedStageCount > 0 ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+              {t.hiddenStagesHint(task.skippedStageCount)}
+            </Text>
+          ) : null}
         </View>
 
         {task.circuitBroken ? (
@@ -1052,7 +1132,7 @@ function TaskFlowCanvas({
               marginTop: 6,
               padding: 10,
               borderRadius: 8,
-              borderLeftWidth: 3,
+              borderWidth: 1,
               borderColor: theme.colors.statusDanger,
               backgroundColor: theme.colors.surface1,
             }}
@@ -1097,267 +1177,143 @@ function TaskFlowCanvas({
         ) : null}
       </View>
 
-      {orientation === "vertical" ? (
-        /* Top-to-bottom timeline: one row per stage, parallel agents side by side,
-           details open right under the stage they belong to. */
-        <View style={{ gap: 10 }}>
-          {hint}
-          <View>
-            {task.stages.map((stage, stageIdx) => {
-              const isLastStage = stageIdx === task.stages.length - 1;
-              const lineCol = connectorColor(theme, stage.stageStatus);
-              const selectedHere = stage.nodes.some(
-                (n) => n.nodeId === selectedNode?.nodeId,
-              );
-              return (
-                <View
-                  key={stage.stageId}
-                  style={{ flexDirection: "row", gap: 12 }}
-                >
-                  <View style={{ width: 22, alignItems: "center" }}>
-                    <View
-                      style={{
-                        width: 22,
-                        height: 22,
-                        borderRadius: 11,
-                        borderWidth: 2,
-                        borderColor: lineCol,
-                        alignItems: "center",
-                        justifyContent: "center",
-                        backgroundColor: theme.colors.surface0,
-                      }}
-                    >
-                      <Text
-                        style={{
-                          color:
-                            lineCol === theme.colors.border
-                              ? theme.colors.foregroundMuted
-                              : lineCol,
-                          fontSize: 10,
-                          fontWeight: "700",
-                        }}
-                      >
-                        {stage.stepNumber}
-                      </Text>
-                    </View>
-                    {!isLastStage ? (
-                      <View
-                        style={{
-                          flex: 1,
-                          width: 2,
-                          marginVertical: 3,
-                          backgroundColor: lineCol,
-                        }}
-                      />
-                    ) : null}
-                  </View>
+      {/* Workflow Node DAG */}
+      <View
+        style={{
+          maxWidth: 820,
+          width: "100%",
+          alignSelf: "center",
+        }}
+      >
+        {task.stages.map((stage, stageIdx) => {
+          const nextStage = task.stages[stageIdx + 1];
+          const stackParallel = compact && stage.nodes.length > 2;
+          const visualNodeCount = stackParallel ? 1 : stage.nodes.length;
+          const nextVisualCount = nextStage
+            ? compact && nextStage.nodes.length > 2
+              ? 1
+              : nextStage.nodes.length
+            : 0;
+          const selectedInThisStep = stage.nodes.find(
+            (n) => n.nodeId === selectedNode?.nodeId,
+          );
 
-                  <View
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      gap: 8,
-                      paddingBottom: isLastStage ? 0 : 20,
-                    }}
-                  >
-                    <View
-                      style={{
-                        minHeight: 22,
-                        flexDirection: "row",
-                        alignItems: "center",
-                        flexWrap: "wrap",
-                        gap: 6,
-                      }}
-                    >
-                      <Text
-                        style={{
-                          color: theme.colors.foreground,
-                          fontSize: 13,
-                          fontWeight: "600",
-                        }}
-                      >
-                        {stage.title}
-                      </Text>
-                      {stage.nodes.length > 1 ? (
-                        <Text
-                          style={{
-                            color: theme.colors.foregroundMuted,
-                            fontSize: 11,
-                          }}
-                        >
-                          {t.parallelTag(stage.nodes.length)}
-                        </Text>
-                      ) : null}
-                      <Text
-                        numberOfLines={1}
-                        style={{
-                          color: theme.colors.foregroundMuted,
-                          fontSize: 12,
-                        }}
-                      >
-                        {stage.subtitle}
-                      </Text>
-                    </View>
-                    <View
-                      style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}
-                    >
-                      {stage.nodes.map((node) => (
-                        <NodeCard
-                          key={node.nodeId}
-                          theme={theme}
-                          lang={lang}
-                          task={task}
-                          node={node}
-                          fill
-                          selected={selectedNode?.nodeId === node.nodeId}
-                          isViewerSelf={
-                            Boolean(viewerAgentId) &&
-                            node.agentId === viewerAgentId
-                          }
-                          onPress={() => toggleNode(node.nodeId)}
-                        />
-                      ))}
-                    </View>
-                    {selectedHere ? inspector : null}
-                  </View>
+          return (
+            <View key={stage.stepId} style={{ width: "100%" }}>
+              {stage.nodes.length === 1 ? (
+                <View
+                  style={{
+                    width: "100%",
+                    maxWidth: 540,
+                    alignSelf: "center",
+                    paddingHorizontal: 5,
+                  }}
+                >
+                  <WorkflowNodeCard
+                    theme={theme}
+                    lang={lang}
+                    task={task}
+                    node={stage.nodes[0]}
+                    selected={selectedNode?.nodeId === stage.nodes[0].nodeId}
+                    isViewerSelf={
+                      Boolean(viewerAgentId) &&
+                      stage.nodes[0].agentId === viewerAgentId
+                    }
+                    onPress={() => toggleNode(stage.nodes[0].nodeId)}
+                  />
                 </View>
-              );
-            })}
-          </View>
-        </View>
-      ) : (
-        <>
-          <View
+              ) : stackParallel ? (
+                <View style={{ width: "100%", gap: 8, paddingHorizontal: 5 }}>
+                  {stage.nodes.map((node) => (
+                    <WorkflowNodeCard
+                      key={node.nodeId}
+                      theme={theme}
+                      lang={lang}
+                      task={task}
+                      node={node}
+                      selected={selectedNode?.nodeId === node.nodeId}
+                      isViewerSelf={
+                        Boolean(viewerAgentId) && node.agentId === viewerAgentId
+                      }
+                      onPress={() => toggleNode(node.nodeId)}
+                    />
+                  ))}
+                </View>
+              ) : (
+                <View style={{ width: "100%", flexDirection: "row" }}>
+                  {stage.nodes.map((node) => (
+                    <View
+                      key={node.nodeId}
+                      style={{ flex: 1, minWidth: 0, paddingHorizontal: 5 }}
+                    >
+                      <WorkflowNodeCard
+                        theme={theme}
+                        lang={lang}
+                        task={task}
+                        node={node}
+                        selected={selectedNode?.nodeId === node.nodeId}
+                        isViewerSelf={
+                          Boolean(viewerAgentId) &&
+                          node.agentId === viewerAgentId
+                        }
+                        onPress={() => toggleNode(node.nodeId)}
+                      />
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {selectedInThisStep ? (
+                <View
+                  style={{
+                    width: "100%",
+                    maxWidth: stage.nodes.length === 1 ? 540 : undefined,
+                    alignSelf: "center",
+                    paddingHorizontal: 5,
+                  }}
+                >
+                  <NodeInspector
+                    theme={theme}
+                    compact={compact}
+                    lang={lang}
+                    task={task}
+                    node={selectedInThisStep}
+                    viewerAgentId={viewerAgentId}
+                    controlling={controlling}
+                    onControl={(action) => void handleControl(action)}
+                    onOpenAgent={onOpenAgent}
+                  />
+                </View>
+              ) : null}
+
+              {nextStage ? (
+                <WorkflowEdgeConnector
+                  color={edgeStrokeColor(
+                    theme,
+                    stage.stageStatus,
+                    nextStage.stageStatus,
+                  )}
+                  fromCount={visualNodeCount}
+                  toCount={nextVisualCount}
+                />
+              ) : null}
+            </View>
+          );
+        })}
+
+        {!selectedNode ? (
+          <Text
             style={{
-              padding: 12,
-              borderRadius: 10,
-              borderWidth: 1,
-              borderColor: theme.colors.border,
-              backgroundColor: theme.colors.surface1,
-              gap: 8,
+              color: theme.colors.foregroundMuted,
+              fontSize: 11,
+              textAlign: "center",
+              marginTop: 10,
             }}
           >
-            {hint}
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator
-              contentContainerStyle={{
-                flexDirection: "row",
-                alignItems: "flex-start",
-                paddingBottom: 4,
-              }}
-            >
-              {task.stages.map((stage, stageIdx) => {
-                const isLastStage = stageIdx === task.stages.length - 1;
-                const lineCol = connectorColor(theme, stage.stageStatus);
-                return (
-                  <View
-                    key={stage.stageId}
-                    style={{ flexDirection: "row", alignItems: "stretch" }}
-                  >
-                    <View style={{ width: 210, gap: 8 }}>
-                      <View style={{ height: 32, justifyContent: "center" }}>
-                        <View
-                          style={{
-                            flexDirection: "row",
-                            alignItems: "center",
-                            gap: 6,
-                          }}
-                        >
-                          <Text
-                            style={{
-                              color: theme.colors.foregroundMuted,
-                              fontSize: 11,
-                              fontWeight: "600",
-                            }}
-                          >
-                            {stage.stepNumber}
-                          </Text>
-                          <Text
-                            style={{
-                              color: theme.colors.foreground,
-                              fontSize: 12,
-                              fontWeight: "600",
-                            }}
-                          >
-                            {stage.title}
-                          </Text>
-                          {stage.nodes.length > 1 ? (
-                            <Text
-                              style={{
-                                color: theme.colors.foregroundMuted,
-                                fontSize: 11,
-                              }}
-                            >
-                              {t.parallelTag(stage.nodes.length)}
-                            </Text>
-                          ) : null}
-                        </View>
-                        <Text
-                          numberOfLines={1}
-                          style={{
-                            color: theme.colors.foregroundMuted,
-                            fontSize: 11,
-                          }}
-                        >
-                          {stage.subtitle}
-                        </Text>
-                      </View>
-                      <View style={{ gap: 8 }}>
-                        {stage.nodes.map((node) => (
-                          <NodeCard
-                            key={node.nodeId}
-                            theme={theme}
-                            lang={lang}
-                            task={task}
-                            node={node}
-                            selected={selectedNode?.nodeId === node.nodeId}
-                            isViewerSelf={
-                              Boolean(viewerAgentId) &&
-                              node.agentId === viewerAgentId
-                            }
-                            onPress={() => toggleNode(node.nodeId)}
-                          />
-                        ))}
-                      </View>
-                    </View>
-
-                    {!isLastStage ? (
-                      <View
-                        style={{
-                          width: 28,
-                          paddingTop: 72,
-                          alignItems: "center",
-                        }}
-                      >
-                        <View
-                          style={{ flexDirection: "row", alignItems: "center" }}
-                        >
-                          <View
-                            style={{
-                              width: 14,
-                              height: 2,
-                              backgroundColor: lineCol,
-                            }}
-                          />
-                          <View style={{ marginLeft: -6 }}>
-                            <Icon
-                              name="ChevronRight"
-                              size={14}
-                              color={lineCol}
-                            />
-                          </View>
-                        </View>
-                      </View>
-                    ) : null}
-                  </View>
-                );
-              })}
-            </ScrollView>
-          </View>
-          {inspector}
-        </>
-      )}
+            {t.pickNodeHint}
+          </Text>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -1481,7 +1437,7 @@ function SingleConversationGraphView({
     <ScrollView
       style={{ flex: 1, backgroundColor: theme.colors.surface0 }}
       contentContainerStyle={{
-        padding: compact ? 12 : 18,
+        padding: compact ? 12 : 20,
         gap: 14,
       }}
     >
@@ -2032,7 +1988,7 @@ export function GlobalTeamGraphScreen({
 
         <ScrollView
           style={{ flex: 1 }}
-          contentContainerStyle={{ padding: compact ? 12 : 22 }}
+          contentContainerStyle={{ padding: compact ? 12 : 20 }}
         >
           {activeHistoryTask ? (
             <TaskFlowCanvas
@@ -2040,8 +1996,6 @@ export function GlobalTeamGraphScreen({
               compact={compact}
               lang={lang}
               task={activeHistoryTask}
-              orientation="vertical"
-              autoSelectNode={false}
               onOpenAgent={
                 navigation?.openAgent
                   ? (targetId, serverId) =>
@@ -2050,6 +2004,15 @@ export function GlobalTeamGraphScreen({
                         ...(serverId ? { serverId } : {}),
                       })
                   : undefined
+              }
+              onTaskUpdated={(nextTask) =>
+                setHistoryTasks((prev) =>
+                  prev
+                    ? prev.map((x) =>
+                        x.taskId === nextTask.taskId ? nextTask : x,
+                      )
+                    : prev,
+                )
               }
             />
           ) : null}

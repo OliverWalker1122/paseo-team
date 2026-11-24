@@ -262,3 +262,68 @@ test("supports multiple parallel developers registered by coordinator and invali
   assert.equal(blocked.checks.ciPassed, false);
   assert.equal(blocked.checks.codeReviewSatisfied, false);
 });
+
+test("ignores accidental git commit SHA in targetVersionOrCommit for code reviews, auto-detects CI log, and normalizes subdirectory cwd", (t) => {
+  const { repoDir, stateRoot } = setupWorkspace(t);
+  const subDir = path.join(repoDir, "packages", "core");
+  spawnSync("mkdir", ["-p", subDir]);
+  writeFileSync(path.join(subDir, "mod.mjs"), "export const ok = true;\n");
+
+  const created = initTask({
+    cwd: repoDir,
+    goal: "Fix core module and verify from subdir",
+    teamName: "Standard",
+    preset: {
+      developer: { model: "auto" },
+      planReviewers: [{ model: "auto" }],
+      codeReviewers: [{ model: "auto" }],
+      complexMode: "simple",
+    },
+    requireReview: true,
+    stateRoot,
+  });
+
+  // Running check from a subdirectory produces the exact same workspace fingerprint as repo root
+  assert.equal(
+    computeWorkspaceFingerprint(subDir),
+    computeWorkspaceFingerprint(repoDir),
+  );
+  const ciRes = runCheck(process.execPath, ["-e", "process.exit(0)"], {
+    log: path.join(created.taskDir, "ci-1.log"),
+    cwd: subDir,
+  });
+  assert.equal(ciRes.status, "PASS");
+
+  // Omitting ciLog in recordCandidateDelivery auto-binds the passing ci-1.log sidecar!
+  const delivered = recordCandidateDelivery(created.recordPath, {
+    summary: "Added core/mod.mjs",
+    architectureImpact: "None",
+  });
+  assert.equal(delivered.ci?.log, "ci-1.log");
+
+  registerTaskAgent(created.recordPath, {
+    role: "code-reviewer",
+    slotIndex: 0,
+    agentId: "rev-sha",
+    profile: "claude/claude-opus-5-5",
+    briefSummary: "Spec review",
+  });
+
+  // Even if Coordinator passes a short Git SHA in targetVersionOrCommit, code stage binds workspace fingerprint!
+  recordReviewVerdict(created.recordPath, {
+    stage: "code",
+    agentId: "rev-sha",
+    targetVersionOrCommit: "deadbeef1234",
+    round: 1,
+    verdict: "APPROVE",
+    summary: "Approved",
+  });
+
+  const gate = inspectQualityGate({
+    recordPath: created.recordPath,
+    cwd: repoDir,
+  });
+  assert.equal(gate.status, "READY");
+  assert.equal(gate.checks.ciPassed, true);
+  assert.equal(gate.checks.codeReviewSatisfied, true);
+});

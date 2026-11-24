@@ -42,13 +42,21 @@ function runGitSafe(
   };
 }
 
-// Computes a deterministic 40-char SHA-256 content fingerprint of the workspace
-// (HEAD + tracked diff + non-sensitive untracked file object hashes) without reading .env files.
-export function computeWorkspaceFingerprint(directory: string): string {
+export function resolveGitRoot(directory: string): string {
   const resolved = path.resolve(directory);
   const top = runGitSafe(resolved, ["rev-parse", "--show-toplevel"]);
-  const root = top.ok && top.stdout.trim() ? top.stdout.trim() : resolved;
+  return top.ok && top.stdout.trim() ? top.stdout.trim() : resolved;
+}
 
+function inspectWorkspaceGitState(directory: string): {
+  root: string;
+  head: string;
+  diffStdout: string;
+  stagedDiffStdout: string;
+  untrackedFiles: string[];
+  cleanAtHead: boolean;
+} {
+  const root = resolveGitRoot(directory);
   const headRes = runGitSafe(root, ["rev-parse", "HEAD"]);
   const head = headRes.ok ? headRes.stdout.trim() : "unborn";
 
@@ -85,11 +93,32 @@ export function computeWorkspaceFingerprint(directory: string): string {
         .sort()
     : [];
 
+  const cleanAtHead =
+    head !== "unborn" &&
+    diffRes.ok &&
+    diffRes.stdout === "" &&
+    untrackedFiles.length === 0;
+
+  return {
+    root,
+    head,
+    diffStdout: diffRes.stdout,
+    stagedDiffStdout: stagedDiffRes.stdout,
+    untrackedFiles,
+    cleanAtHead,
+  };
+}
+
+// Computes a deterministic 40-char SHA-256 content fingerprint of the workspace
+// (HEAD + tracked diff + non-sensitive untracked file object hashes) without reading .env files.
+export function computeWorkspaceFingerprint(directory: string): string {
+  const state = inspectWorkspaceGitState(directory);
+
   let untrackedHashes = "";
-  if (untrackedFiles.length > 0) {
-    const regularFiles = untrackedFiles.filter((rel) => {
+  if (state.untrackedFiles.length > 0) {
+    const regularFiles = state.untrackedFiles.filter((rel) => {
       try {
-        const st = lstatSync(path.join(root, rel));
+        const st = lstatSync(path.join(state.root, rel));
         return (
           st.isFile() && !st.isSymbolicLink() && st.size <= 2 * 1024 * 1024
         );
@@ -98,7 +127,7 @@ export function computeWorkspaceFingerprint(directory: string): string {
       }
     });
     if (regularFiles.length > 0) {
-      const hashRes = runGitSafe(root, [
+      const hashRes = runGitSafe(state.root, [
         "hash-object",
         "--no-filters",
         "--",
@@ -112,9 +141,9 @@ export function computeWorkspaceFingerprint(directory: string): string {
   }
 
   return createHash("sha256")
-    .update(`head:${head}\n`)
-    .update(`diff:${diffRes.stdout}\n`)
-    .update(`staged:${stagedDiffRes.stdout}\n`)
+    .update(`head:${state.head}\n`)
+    .update(`diff:${state.diffStdout}\n`)
+    .update(`staged:${state.stagedDiffStdout}\n`)
     .update(`untracked:${untrackedHashes}\n`)
     .digest("hex")
     .slice(0, 40);
@@ -124,8 +153,8 @@ export function computeWorkspaceChangeStats(directory: string): {
   files: number;
   lines: number;
 } {
-  const resolved = path.resolve(directory);
-  const numstat = runGitSafe(resolved, [
+  const root = resolveGitRoot(directory);
+  const numstat = runGitSafe(root, [
     "diff",
     "HEAD",
     "--numstat",
@@ -143,7 +172,7 @@ export function computeWorkspaceChangeStats(directory: string): {
     lines += (Number(added) || 0) + (Number(deleted) || 0);
   }
 
-  const untracked = runGitSafe(resolved, [
+  const untracked = runGitSafe(root, [
     "ls-files",
     "--others",
     "--exclude-standard",
@@ -176,10 +205,31 @@ function readJson(file: string): Record<string, unknown> | null {
 const filled = (value: unknown): value is string =>
   typeof value === "string" && value.trim() !== "";
 
+function matchesAcceptedTarget(
+  value: unknown,
+  acceptedExact: Set<string>,
+  cleanHeadSha: string | null,
+): boolean {
+  if (!filled(value)) return false;
+  const trimmed = value.trim();
+  if (acceptedExact.has(trimmed)) return true;
+  if (
+    cleanHeadSha &&
+    trimmed.length >= 7 &&
+    trimmed.length <= 40 &&
+    /^[0-9a-f]+$/i.test(trimmed) &&
+    cleanHeadSha.toLowerCase().startsWith(trimmed.toLowerCase())
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function verifyReviewerSidecar(
   taskDir: string,
   reviewer: Record<string, unknown>,
-  acceptedTargets: Set<string>,
+  acceptedExact: Set<string>,
+  cleanHeadSha: string | null,
 ): boolean {
   if (!filled(reviewer.sidecar)) {
     return true;
@@ -194,8 +244,7 @@ function verifyReviewerSidecar(
   return (
     sidecar.stage === "code" &&
     sidecar.agentId === reviewer.agentId &&
-    typeof sidecar.commit === "string" &&
-    acceptedTargets.has(sidecar.commit) &&
+    matchesAcceptedTarget(sidecar.commit, acceptedExact, cleanHeadSha) &&
     sidecar.status === "APPROVE"
   );
 }
@@ -214,8 +263,10 @@ export function inspectQualityGate(options: {
       ? record.projectRoot.trim()
       : taskDir;
 
-  const liveFingerprint = computeWorkspaceFingerprint(projectRoot);
-  const change = computeWorkspaceChangeStats(projectRoot);
+  const gitState = inspectWorkspaceGitState(projectRoot);
+  const liveFingerprint = computeWorkspaceFingerprint(gitState.root);
+  const change = computeWorkspaceChangeStats(gitState.root);
+  const cleanHeadSha = gitState.cleanAtHead ? gitState.head : null;
 
   const recordedCandidate = filled(record?.candidate)
     ? record.candidate.trim()
@@ -234,6 +285,9 @@ export function inspectQualityGate(options: {
     record?.status === "done";
 
   const acceptedTargets = new Set<string>([liveFingerprint]);
+  if (cleanHeadSha) {
+    acceptedTargets.add(cleanHeadSha);
+  }
   if (isCompleted && recordedCandidate) {
     acceptedTargets.add(recordedCandidate);
   }
@@ -252,6 +306,9 @@ export function inspectQualityGate(options: {
       ciResult?.status === "PASS" &&
       ((typeof ciResult.fingerprint === "string" &&
         ciResult.fingerprint === liveFingerprint) ||
+        (cleanHeadSha &&
+          ciResult.head === cleanHeadSha &&
+          ciResult.clean === true) ||
         (isCompleted &&
           recordedCandidate &&
           ((typeof ciResult.fingerprint === "string" &&
@@ -280,9 +337,17 @@ export function inspectQualityGate(options: {
         codeReviewers.every(
           (r) =>
             r?.status === "APPROVE" &&
-            typeof r.commit === "string" &&
-            acceptedTargets.has(r.commit) &&
-            verifyReviewerSidecar(taskDir, r, acceptedTargets),
+            matchesAcceptedTarget(
+              r.commit,
+              acceptedTargets,
+              isCompleted ? (cleanHeadSha ?? recordedCandidate) : cleanHeadSha,
+            ) &&
+            verifyReviewerSidecar(
+              taskDir,
+              r,
+              acceptedTargets,
+              isCompleted ? (cleanHeadSha ?? recordedCandidate) : cleanHeadSha,
+            ),
         )
       : codeReview === "waived"
         ? filled(record?.codeReviewReason)

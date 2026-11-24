@@ -118,6 +118,7 @@ export const PipelineNodeViewSchema = z.object({
 });
 
 export const PipelineStageColumnSchema = z.object({
+  stepId: z.string(),
   stageId: z.enum([
     "coordinator",
     "expert",
@@ -126,6 +127,7 @@ export const PipelineStageColumnSchema = z.object({
     "code-review",
     "merge-gate",
   ]),
+  round: z.number().optional(),
   stepNumber: z.number(),
   title: z.string(),
   subtitle: z.string(),

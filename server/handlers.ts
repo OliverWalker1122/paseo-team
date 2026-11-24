@@ -17,6 +17,7 @@ import type {
 import {
   detectPromptLanguage,
   localizeNodeRoleLabel,
+  localizeStepTitle,
   STAGE_LABELS,
   type UiLanguage,
 } from "../shared/i18n.ts";
@@ -312,15 +313,6 @@ async function fetchLiveAgentMap(
   return map;
 }
 
-const STAGE_ORDER: PipelineStageId[] = [
-  "coordinator",
-  "expert",
-  "plan-review",
-  "development",
-  "code-review",
-  "merge-gate",
-];
-
 function humanizeProfileLabel(profile: string, lang: UiLanguage): string {
   if (!profile || profile === "auto" || profile === "Auto") {
     return lang === "en" ? "Auto-matched model" : "自动匹配模型";
@@ -332,6 +324,109 @@ function humanizeProfileLabel(profile: string, lang: UiLanguage): string {
     return lang === "en" ? "Current Chat" : "当前会话";
   }
   return profile;
+}
+
+function computeStageStatus(
+  stageNodes: PipelineNodeViewDto[],
+): PipelineStageColumnDto["stageStatus"] {
+  if (
+    stageNodes.length === 0 ||
+    stageNodes.every((n) => n.visualStatus === "skipped")
+  ) {
+    return "skipped";
+  }
+  if (stageNodes.some((n) => n.visualStatus === "awaiting_permission")) {
+    return "awaiting_permission";
+  }
+  if (
+    stageNodes.some(
+      (n) =>
+        n.visualStatus === "blocked" || n.visualStatus === "changes_requested",
+    )
+  ) {
+    return "blocked";
+  }
+  if (stageNodes.some((n) => n.visualStatus === "running")) {
+    return "running";
+  }
+  if (
+    stageNodes.every(
+      (n) =>
+        n.visualStatus === "approved" ||
+        n.visualStatus === "completed" ||
+        n.visualStatus === "skipped",
+    )
+  ) {
+    return "completed";
+  }
+  return "pending";
+}
+
+function verdictToVisualStatus(
+  verdict: NonNullable<PipelineNodeViewDto["verdict"]>,
+): NodeVisualStatus {
+  return verdict === "APPROVE"
+    ? "approved"
+    : verdict === "REQUEST_CHANGES"
+      ? "changes_requested"
+      : "blocked";
+}
+
+const KNOWN_DEFAULT_COORD_BRIEFS = new Set([
+  "兼任架构设计 · 统筹目标、派发与验收",
+  "Drafts design · Scopes, dispatches & adjudicates",
+  "目标拆解、派发协调与证据裁决",
+  "Scopes goal, dispatches roles & adjudicates by evidence",
+]);
+
+const KNOWN_DEFAULT_DEV_BRIEFS = new Set([
+  "直接在当前工作区实现修改并运行完整测试",
+  "Implements changes & runs full CI in this workspace",
+]);
+
+function localizeNodeBrief(
+  node: TaskRecord["nodes"][number],
+  record: TaskRecord,
+  gateReady: boolean | undefined,
+  lang: UiLanguage,
+): string {
+  const zh = lang === "zh";
+  if (node.role === "gate") {
+    if (record.lifecycleStatus === "completed") {
+      return zh
+        ? "测试/CI、交叉审查与轮次门禁全部通过，已完成验收"
+        : "All CI, cross-review, and round-limit checks verified";
+    }
+    if (gateReady === true) {
+      return zh
+        ? "测试/CI 与交叉审查已就绪，可确认完成验收"
+        : "CI and cross-review checks satisfied — ready to complete";
+    }
+    return zh
+      ? "核对测试/CI 侧车、交叉审查批准与两轮熔断门禁"
+      : "Verifies CI sidecar, cross-review approvals, and 2-round breaker";
+  }
+  if (
+    node.role === "coordinator" &&
+    KNOWN_DEFAULT_COORD_BRIEFS.has(node.briefSummary)
+  ) {
+    return record.complexMode === "simple" && record.isComplex
+      ? zh
+        ? "兼任架构设计 · 统筹目标、派发与验收"
+        : "Drafts design · Scopes, dispatches & adjudicates"
+      : zh
+        ? "目标拆解、派发协调与证据裁决"
+        : "Scopes goal, dispatches roles & adjudicates by evidence";
+  }
+  if (
+    node.role === "developer" &&
+    KNOWN_DEFAULT_DEV_BRIEFS.has(node.briefSummary)
+  ) {
+    return zh
+      ? "直接在当前工作区实现修改并运行完整测试"
+      : "Implements changes & runs full CI in this workspace";
+  }
+  return node.briefSummary;
 }
 
 export function toPipelineSnapshot(
@@ -361,22 +456,33 @@ export function toPipelineSnapshot(
   const totalDevelopers = record.nodes.filter(
     (n) => n.role === "developer",
   ).length;
+  const zh = lang === "zh";
 
-  const nodeViews: PipelineNodeViewDto[] = record.nodes.map((node) => {
+  interface BaseResolvedNode {
+    raw: TaskRecord["nodes"][number];
+    view: PipelineNodeViewDto;
+    rounds: NonNullable<PipelineNodeViewDto["rounds"]>;
+    isLiveActive: boolean;
+  }
+
+  const resolvedNodes: BaseResolvedNode[] = record.nodes.map((node) => {
     const live = node.agentId ? liveMap.get(node.agentId) : undefined;
     let liveState: PipelineNodeViewDto["liveState"] = "not_started";
     let visualStatus: NodeVisualStatus = node.status;
+    let isLiveActive = false;
 
     if (live) {
       if (live.awaitingPermission) {
         liveState = "awaiting_permission";
         visualStatus = "awaiting_permission";
         attentionCount += 1;
+        isLiveActive = true;
       } else {
         liveState = live.status;
         if (live.status === "running" || live.status === "initializing") {
           visualStatus = "running";
           runningCount += 1;
+          isLiveActive = true;
         } else if (live.status === "error") {
           visualStatus = "blocked";
           attentionCount += 1;
@@ -430,131 +536,436 @@ export function toPipelineSnapshot(
       .join(" ");
 
     return {
-      nodeId: node.nodeId,
-      stage: node.stage,
-      role: node.role,
-      slotIndex: node.slotIndex,
-      label: localizeNodeRoleLabel(
-        lang,
-        node.role,
-        node.slotIndex,
-        node.label,
-        false,
-        node.role === "developer" ? totalDevelopers : undefined,
-      ),
-      profile: humanizeProfileLabel(node.profile, lang),
-      ...(modelBadge ? { modelBadge } : {}),
-      ...(node.serverId ? { serverId: node.serverId } : {}),
-      ...(node.agentId ? { agentId: node.agentId } : {}),
-      ...(node.perspective
-        ? { perspectiveLabel: reviewerPerspectiveLabel(node.perspective, lang) }
-        : {}),
-      briefSummary: node.briefSummary,
-      liveState,
-      visualStatus,
-      ...(node.round !== undefined ? { round: node.round } : {}),
-      ...(node.verdict ? { verdict: node.verdict } : {}),
-      ...(node.summary ? { summary: node.summary } : {}),
-      ...(rounds.length > 0 ? { rounds } : {}),
-      updatedAt: node.updatedAt,
+      raw: node,
+      rounds,
+      isLiveActive,
+      view: {
+        nodeId: node.nodeId,
+        stage: node.stage,
+        role: node.role,
+        slotIndex: node.slotIndex,
+        label: localizeNodeRoleLabel(
+          lang,
+          node.role,
+          node.slotIndex,
+          node.label,
+          false,
+          node.role === "developer" ? totalDevelopers : undefined,
+        ),
+        profile: humanizeProfileLabel(node.profile, lang),
+        ...(modelBadge ? { modelBadge } : {}),
+        ...(node.serverId ? { serverId: node.serverId } : {}),
+        ...(node.agentId ? { agentId: node.agentId } : {}),
+        ...(node.perspective
+          ? {
+              perspectiveLabel: reviewerPerspectiveLabel(
+                node.perspective,
+                lang,
+              ),
+            }
+          : {}),
+        briefSummary: localizeNodeBrief(node, record, gateReady, lang),
+        liveState,
+        visualStatus,
+        ...(node.round !== undefined ? { round: node.round } : {}),
+        ...(node.verdict ? { verdict: node.verdict } : {}),
+        ...(node.summary ? { summary: node.summary } : {}),
+        ...(rounds.length > 0 ? { rounds } : {}),
+        updatedAt: node.updatedAt,
+      },
     };
   });
 
+  const isStageSkipped = (list: BaseResolvedNode[]): boolean =>
+    list.length > 0 &&
+    list.every((n) => n.view.visualStatus === "skipped" && !n.view.agentId);
+
   let skippedStageCount = 0;
-  const visibleStageIds = STAGE_ORDER.filter((stageId) => {
-    const stageNodes = nodeViews.filter((n) => n.stage === stageId);
-    if (stageNodes.length === 0) return false;
-    const allSkipped = stageNodes.every(
-      (n) => n.visualStatus === "skipped" && !n.agentId,
-    );
-    if (allSkipped) {
-      skippedStageCount += 1;
-      return false;
-    }
-    return true;
-  });
-
-  const zh = lang === "zh";
-  const stages: PipelineStageColumnDto[] = visibleStageIds.map(
-    (stageId, idx) => {
-      const stageNodes = nodeViews
-        .filter((n) => n.stage === stageId)
-        .sort((a, b) => a.slotIndex - b.slotIndex);
-      const meta = STAGE_LABELS[lang][stageId];
-      let subtitle = meta.subtitle;
-      if (stageId === "plan-review") {
-        subtitle =
-          record.planReview === "required"
-            ? zh
-              ? `第 ${Math.max(1, record.planReviewRound)}/2 轮 · 交叉审核`
-              : `Round ${Math.max(1, record.planReviewRound)}/2 · Cross review`
-            : zh
-              ? "已豁免"
-              : "Waived";
-      } else if (stageId === "code-review") {
-        subtitle =
-          record.codeReview === "required"
-            ? zh
-              ? `第 ${Math.max(1, record.codeReviewRound)}/2 轮`
-              : `Round ${Math.max(1, record.codeReviewRound)}/2`
-            : record.codeReview === "waived"
-              ? zh
-                ? "已豁免"
-                : "Waived"
-              : zh
-                ? "按改动规模自动判定"
-                : "Conditional on diff";
-      } else if (stageId === "merge-gate") {
-        subtitle =
-          record.lifecycleStatus === "completed"
-            ? zh
-              ? "已完成验收"
-              : "Signed off"
-            : gateReady
-              ? zh
-                ? "验收项已就绪"
-                : "Ready to complete"
-              : meta.subtitle;
-      }
-
-      let stageStatus: PipelineStageColumnDto["stageStatus"] = "pending";
-      if (stageNodes.every((n) => n.visualStatus === "skipped")) {
-        stageStatus = "skipped";
-      } else if (
-        stageNodes.some((n) => n.visualStatus === "awaiting_permission")
-      ) {
-        stageStatus = "awaiting_permission";
-      } else if (
-        stageNodes.some(
-          (n) =>
-            n.visualStatus === "blocked" ||
-            n.visualStatus === "changes_requested",
-        )
-      ) {
-        stageStatus = "blocked";
-      } else if (stageNodes.some((n) => n.visualStatus === "running")) {
-        stageStatus = "running";
-      } else if (
-        stageNodes.every(
-          (n) =>
-            n.visualStatus === "approved" ||
-            n.visualStatus === "completed" ||
-            n.visualStatus === "skipped",
-        )
-      ) {
-        stageStatus = "completed";
-      }
-
-      return {
+  const stages: PipelineStageColumnDto[] = [];
+  const pushStep = (
+    stepId: string,
+    stageId: PipelineStageId,
+    nodes: PipelineNodeViewDto[],
+    options?: { round?: number; multiRound?: boolean; subtitle?: string },
+  ) => {
+    if (nodes.length === 0) return;
+    const sorted = [...nodes].sort((a, b) => a.slotIndex - b.slotIndex);
+    const meta = STAGE_LABELS[lang][stageId];
+    stages.push({
+      stepId,
+      stageId,
+      ...(options?.round !== undefined ? { round: options.round } : {}),
+      stepNumber: stages.length + 1,
+      title: localizeStepTitle(
+        lang,
         stageId,
-        stepNumber: idx + 1,
-        title: meta.title,
-        subtitle,
-        stageStatus,
-        nodes: stageNodes,
-      };
-    },
+        options?.round,
+        options?.multiRound,
+      ),
+      subtitle: options?.subtitle ?? meta.subtitle,
+      stageStatus: computeStageStatus(sorted),
+      nodes: sorted,
+    });
+  };
+
+  // 1. Coordinator
+  const coordNodes = resolvedNodes
+    .filter((n) => n.raw.stage === "coordinator")
+    .map((n) => n.view);
+  pushStep("coordinator", "coordinator", coordNodes);
+
+  // 2. Expert + Plan Review (expands dynamically across revision rounds)
+  const expertBase = resolvedNodes.filter((n) => n.raw.stage === "expert");
+  const planRevBase = resolvedNodes.filter(
+    (n) => n.raw.stage === "plan-review",
   );
+  const expertSkipped = isStageSkipped(expertBase);
+  const planRevSkipped = isStageSkipped(planRevBase);
+  if (expertSkipped) skippedStageCount += 1;
+  if (planRevSkipped) skippedStageCount += 1;
+
+  const expertVisible = expertBase.length > 0 && !expertSkipped;
+  const planRevVisible = planRevBase.length > 0 && !planRevSkipped;
+
+  if (expertVisible || planRevVisible) {
+    const recordedPlanRoundSet = new Set<number>();
+    for (const item of planRevBase) {
+      for (const r of item.rounds) recordedPlanRoundSet.add(r.round);
+    }
+    const recordedPlanRounds = [...recordedPlanRoundSet].sort((a, b) => a - b);
+    const maxPlanRecorded =
+      recordedPlanRounds.length > 0 ? Math.max(...recordedPlanRounds) : 0;
+
+    const nextLiveExpertRound =
+      maxPlanRecorded >= 1 && expertBase.some((n) => n.isLiveActive)
+        ? maxPlanRecorded + 1
+        : 0;
+    const nextLivePlanRevRound =
+      maxPlanRecorded >= 1 && planRevBase.some((n) => n.isLiveActive)
+        ? maxPlanRecorded + 1
+        : 0;
+
+    const planCycleRounds = [
+      ...new Set<number>([
+        ...(recordedPlanRounds.length > 0 ? recordedPlanRounds : [1]),
+        ...(nextLiveExpertRound ? [nextLiveExpertRound] : []),
+        ...(nextLivePlanRevRound ? [nextLivePlanRevRound] : []),
+      ]),
+    ].sort((a, b) => a - b);
+    const multiPlan = planCycleRounds.length > 1;
+    const maxPlanCycle = planCycleRounds[planCycleRounds.length - 1] ?? 1;
+
+    for (const r of planCycleRounds) {
+      if (expertVisible) {
+        const expRoundNodes = expertBase.map((item): PipelineNodeViewDto => {
+          const settledEarlier = r < maxPlanCycle || r <= maxPlanRecorded;
+          return {
+            ...item.view,
+            nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
+            label: localizeNodeRoleLabel(
+              lang,
+              "expert",
+              item.raw.slotIndex,
+              item.raw.label,
+              false,
+              expertBase.length,
+              r,
+              multiPlan,
+            ),
+            round: r,
+            visualStatus: settledEarlier ? "completed" : item.view.visualStatus,
+            liveState:
+              settledEarlier && item.isLiveActive
+                ? "idle"
+                : item.view.liveState,
+          };
+        });
+        pushStep(r === 1 ? "expert" : `expert-r${r}`, "expert", expRoundNodes, {
+          round: multiPlan || r > 1 ? r : undefined,
+          multiRound: multiPlan,
+        });
+      }
+
+      const shouldEmitPlanRev =
+        planRevVisible &&
+        (recordedPlanRoundSet.has(r) ||
+          r === nextLivePlanRevRound ||
+          recordedPlanRounds.length === 0);
+
+      if (shouldEmitPlanRev) {
+        const prNodes: PipelineNodeViewDto[] = [];
+        for (const item of planRevBase) {
+          const roundEntry = item.rounds.find((x) => x.round === r);
+          const include =
+            recordedPlanRounds.length === 0 ||
+            Boolean(roundEntry) ||
+            (r === nextLivePlanRevRound && item.isLiveActive);
+          if (!include) continue;
+
+          prNodes.push({
+            ...item.view,
+            nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
+            label: localizeNodeRoleLabel(
+              lang,
+              "plan-reviewer",
+              item.raw.slotIndex,
+              item.raw.label,
+              false,
+              planRevBase.length,
+              r,
+              multiPlan,
+            ),
+            round: r,
+            verdict:
+              roundEntry?.verdict ?? (r === 1 ? item.view.verdict : undefined),
+            summary:
+              roundEntry?.summary ||
+              (recordedPlanRounds.length === 0 ? item.view.summary : undefined),
+            rounds: roundEntry ? [roundEntry] : undefined,
+            visualStatus: roundEntry
+              ? verdictToVisualStatus(roundEntry.verdict)
+              : r === nextLivePlanRevRound && item.isLiveActive
+                ? item.view.visualStatus
+                : item.view.visualStatus,
+            liveState:
+              roundEntry && r < maxPlanCycle && item.isLiveActive
+                ? "idle"
+                : item.view.liveState,
+          });
+        }
+        pushStep(
+          r === 1 ? "plan-review" : `plan-review-r${r}`,
+          "plan-review",
+          prNodes,
+          {
+            round: multiPlan || r > 1 ? r : undefined,
+            multiRound: multiPlan,
+            subtitle:
+              record.planReview === "required"
+                ? zh
+                  ? `第 ${r}/2 轮 · 交叉审核`
+                  : `Round ${r}/2 · Cross review`
+                : zh
+                  ? "已豁免"
+                  : "Waived",
+          },
+        );
+      }
+    }
+  }
+
+  // 3. Development + Code Review (expands dynamically as revisions & re-reviews occur)
+  const devBase = resolvedNodes.filter((n) => n.raw.stage === "development");
+  const codeRevBase = resolvedNodes.filter(
+    (n) => n.raw.stage === "code-review",
+  );
+  const codeRevSkipped = isStageSkipped(codeRevBase);
+  if (codeRevSkipped) skippedStageCount += 1;
+  const codeRevVisible = codeRevBase.length > 0 && !codeRevSkipped;
+
+  const recordedCodeRoundSet = new Set<number>();
+  for (const item of codeRevBase) {
+    for (const r of item.rounds) recordedCodeRoundSet.add(r.round);
+  }
+  const recordedCodeRounds = [...recordedCodeRoundSet].sort((a, b) => a - b);
+  const maxCodeRecorded =
+    recordedCodeRounds.length > 0 ? Math.max(...recordedCodeRounds) : 0;
+
+  const deliveries = record.deliveries ?? [];
+  const recordedDevRoundSet = new Set<number>(deliveries.map((d) => d.round));
+
+  const nextLiveDevRound =
+    maxCodeRecorded >= 1 && devBase.some((n) => n.isLiveActive)
+      ? Math.max(maxCodeRecorded + 1, ...devBase.map((n) => n.raw.round ?? 0))
+      : 0;
+  const nextLiveCodeRound =
+    maxCodeRecorded >= 1 && codeRevBase.some((n) => n.isLiveActive)
+      ? Math.max(
+          maxCodeRecorded + 1,
+          ...codeRevBase.map((n) => n.raw.round ?? 0),
+        )
+      : 0;
+
+  const codeCycleRounds = [
+    ...new Set<number>([
+      ...(recordedCodeRounds.length > 0 ? recordedCodeRounds : [1]),
+      ...recordedDevRoundSet,
+      ...(nextLiveDevRound ? [nextLiveDevRound] : []),
+      ...(nextLiveCodeRound ? [nextLiveCodeRound] : []),
+    ]),
+  ].sort((a, b) => a - b);
+
+  const multiCodeCycle = codeCycleRounds.length > 1;
+  const maxCodeCycle = codeCycleRounds[codeCycleRounds.length - 1] ?? 1;
+
+  for (const r of codeCycleRounds) {
+    if (devBase.length > 0) {
+      const roundDeliveries = deliveries.filter((d) => d.round === r);
+      const settledDevRound =
+        r < maxCodeCycle ||
+        roundDeliveries.length > 0 ||
+        recordedCodeRoundSet.has(r) ||
+        (codeCycleRounds.length === 1 &&
+          (Boolean(record.delivery) ||
+            Boolean(record.candidate) ||
+            record.lifecycleStatus === "completed"));
+
+      const devRoundNodes = devBase.map((item): PipelineNodeViewDto => {
+        const matchedDelivery =
+          roundDeliveries.find((d) => d.agentId === item.raw.agentId) ??
+          (devBase.length === 1 ? roundDeliveries[0] : undefined);
+        const fallbackSummary =
+          matchedDelivery?.summary ??
+          (r === maxCodeCycle
+            ? item.view.summary || record.delivery?.summary
+            : roundDeliveries[0]?.summary);
+
+        return {
+          ...item.view,
+          nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
+          label: localizeNodeRoleLabel(
+            lang,
+            "developer",
+            item.raw.slotIndex,
+            item.raw.label,
+            false,
+            totalDevelopers,
+            multiCodeCycle ? r : undefined,
+            multiCodeCycle,
+          ),
+          ...(multiCodeCycle ? { round: r } : {}),
+          summary:
+            fallbackSummary ||
+            (r > 1 && item.isLiveActive
+              ? undefined
+              : r === 1 && !multiCodeCycle
+                ? item.view.summary
+                : undefined),
+          briefSummary:
+            r > 1 && !matchedDelivery
+              ? zh
+                ? `根据第 ${r - 1} 轮审查意见修订代码并重跑完整测试`
+                : `Revises code for Round ${r - 1} review findings & reruns CI`
+              : item.view.briefSummary,
+          visualStatus:
+            r === nextLiveDevRound &&
+            item.isLiveActive &&
+            roundDeliveries.length === 0
+              ? item.view.visualStatus
+              : settledDevRound
+                ? "completed"
+                : item.view.visualStatus,
+          liveState:
+            settledDevRound && r < maxCodeCycle && item.isLiveActive
+              ? "idle"
+              : item.view.liveState,
+        };
+      });
+
+      pushStep(
+        r === 1 ? "development" : `development-r${r}`,
+        "development",
+        devRoundNodes,
+        {
+          round: multiCodeCycle ? r : undefined,
+          multiRound: multiCodeCycle,
+        },
+      );
+    }
+
+    const shouldEmitCodeRev =
+      codeRevVisible &&
+      (recordedCodeRoundSet.has(r) ||
+        r === nextLiveCodeRound ||
+        (recordedCodeRounds.length === 0 && r === 1));
+
+    if (shouldEmitCodeRev) {
+      const crNodes: PipelineNodeViewDto[] = [];
+      for (const item of codeRevBase) {
+        const roundEntry = item.rounds.find((x) => x.round === r);
+        const include =
+          recordedCodeRounds.length === 0 ||
+          Boolean(roundEntry) ||
+          (r === nextLiveCodeRound &&
+            (item.isLiveActive || item.raw.round === r));
+        if (!include) continue;
+
+        const showRoundTag = multiCodeCycle || r > 1;
+        crNodes.push({
+          ...item.view,
+          nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
+          label: localizeNodeRoleLabel(
+            lang,
+            "code-reviewer",
+            item.raw.slotIndex,
+            item.raw.label,
+            false,
+            codeRevBase.length,
+            showRoundTag ? r : undefined,
+            multiCodeCycle,
+          ),
+          round:
+            roundEntry?.round ??
+            (recordedCodeRounds.length === 0 ? item.view.round : r),
+          verdict:
+            roundEntry?.verdict ??
+            (recordedCodeRounds.length === 0 ? item.view.verdict : undefined),
+          summary:
+            roundEntry?.summary ||
+            (recordedCodeRounds.length === 0 ? item.view.summary : undefined),
+          rounds: roundEntry ? [roundEntry] : undefined,
+          visualStatus: roundEntry
+            ? verdictToVisualStatus(roundEntry.verdict)
+            : r === nextLiveCodeRound && item.isLiveActive
+              ? item.view.visualStatus
+              : item.view.visualStatus,
+          liveState:
+            roundEntry && r < maxCodeCycle && item.isLiveActive
+              ? "idle"
+              : item.view.liveState,
+        });
+      }
+
+      pushStep(
+        r === 1 ? "code-review" : `code-review-r${r}`,
+        "code-review",
+        crNodes,
+        {
+          round: multiCodeCycle || r > 1 ? r : undefined,
+          multiRound: multiCodeCycle,
+          subtitle:
+            record.codeReview === "required"
+              ? zh
+                ? `第 ${r}/2 轮`
+                : `Round ${r}/2`
+              : record.codeReview === "waived"
+                ? zh
+                  ? "已豁免"
+                  : "Waived"
+                : zh
+                  ? "按改动规模自动判定"
+                  : "Conditional on diff",
+        },
+      );
+    }
+  }
+
+  // 4. Quality Gate
+  const gateNodes = resolvedNodes
+    .filter((n) => n.raw.stage === "merge-gate")
+    .map((n) => n.view);
+  pushStep("merge-gate", "merge-gate", gateNodes, {
+    subtitle:
+      record.lifecycleStatus === "completed"
+        ? zh
+          ? "已完成验收"
+          : "Signed off"
+        : gateReady
+          ? zh
+            ? "验收项已就绪"
+            : "Ready to complete"
+          : STAGE_LABELS[lang]["merge-gate"].subtitle,
+  });
 
   const ciStatus: PipelineTaskSnapshotDto["ciStatus"] = record.ci?.waived
     ? "waived"
@@ -749,6 +1160,7 @@ function buildNativeSubagentGraph(
 
   const stages: PipelineStageColumnDto[] = [
     {
+      stepId: "coordinator",
       stageId: "coordinator",
       stepNumber: 1,
       title: zh ? "主对话" : "Main Chat",
@@ -758,6 +1170,7 @@ function buildNativeSubagentGraph(
       nodes: [rootNode],
     },
     {
+      stepId: "development",
       stageId: "development",
       stepNumber: 2,
       title: zh ? "派生子 Agent" : "Subagents",
@@ -789,6 +1202,7 @@ function buildNativeSubagentGraph(
       ),
     );
     stages.push({
+      stepId: "nested-sessions",
       stageId: "code-review",
       stepNumber: 3,
       title: zh ? "二级派生会话" : "Nested Sessions",
@@ -1402,12 +1816,17 @@ export function createCoordinatorTools(
     name: "paseo_team_record_review",
     title: "Record Review Verdict & Circuit Breaker Check",
     description:
-      "Record plan or code review verdict with anti-spoofing sidecar and 2-round circuit breaker enforcement.",
+      "Record plan or code review verdict with anti-spoofing sidecar and 2-round circuit breaker enforcement. Code reviews automatically bind to the live workspace fingerprint.",
     input: z.object({
       stage: z.enum(["plan", "code"]),
       agentId: z.string().min(1),
       profile: z.string().optional(),
-      targetVersionOrCommit: z.string().optional(),
+      targetVersionOrCommit: z
+        .string()
+        .optional()
+        .describe(
+          "Plan version tag (for plan stage only; ignored for code stage).",
+        ),
       round: z.number().int().min(1),
       verdict: z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]),
       summary: z.string().min(1),
@@ -1498,6 +1917,17 @@ export function createDeveloperTools(
         log: logPath,
         cwd: targetCwd,
       });
+      if (result.status === "PASS") {
+        try {
+          const latest = loadTask(recordPath);
+          if (!latest.ci?.waived) {
+            latest.ci = { log: safeBase };
+            saveTask(recordPath, latest);
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
       notifyTaskChanges();
       return {
         text: JSON.stringify(result, null, 2),

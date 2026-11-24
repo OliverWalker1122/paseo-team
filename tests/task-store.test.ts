@@ -232,7 +232,18 @@ test("builds left-to-right pipeline stages, bilingual snapshots, and enforces 2-
     "en",
   );
   assert.equal(snapEn.stages[0].title, "Coordinator");
-  assert.equal(snapEn.stages[5].title, "Quality Gate");
+  assert.equal(snapEn.stages.at(-1)?.title, "Quality Gate");
+  // Multi-round plan review dynamically expands into separate workflow step rows per round
+  assert.deepEqual(
+    snapEn.stages
+      .filter((st) => st.stageId === "plan-review")
+      .map((st) => [st.stepId, st.title]),
+    [
+      ["plan-review", "Plan Review · Round 1"],
+      ["plan-review-r2", "Plan Review · Round 2"],
+      ["plan-review-r3", "Plan Review · Round 3"],
+    ],
+  );
 
   const snapZh = toPipelineSnapshot(
     task1.recordPath,
@@ -241,23 +252,23 @@ test("builds left-to-right pipeline stages, bilingual snapshots, and enforces 2-
     "zh",
   );
   assert.equal(snapZh.stages[0].title, "主控协调");
-  assert.equal(snapZh.stages[5].title, "验收门禁");
+  assert.equal(snapZh.stages.at(-1)?.title, "验收门禁");
 
   assert.equal(snapEn.runningCount, 1);
 
-  // Every review round stays visible, oldest first; the blocked bypass attempt left no record.
-  const planRev = snapEn.stages
+  // Every review round stays visible on its corresponding round workflow node; blocked bypass left no record.
+  const planRevNodesAcrossRounds = snapEn.stages
     .flatMap((st) => st.nodes)
-    .find((n) => n.agentId === "plan-rev-0");
+    .filter((n) => n.agentId === "plan-rev-0");
   assert.deepEqual(
-    planRev?.rounds?.map((r) => [r.round, r.verdict]),
+    planRevNodesAcrossRounds.map((n) => [n.round, n.verdict]),
     [
       [1, "REQUEST_CHANGES"],
       [2, "REQUEST_CHANGES"],
       [3, "APPROVE"],
     ],
   );
-  assert.equal(planRev?.rounds?.[0].findings?.length, 2);
+  assert.equal(planRevNodesAcrossRounds[0].rounds?.[0].findings?.length, 2);
 
   const brief = buildRecoveryBrief(r3Allowed.record);
   assert.match(brief, /Refactor cross-module settlement state machine/);
@@ -399,4 +410,142 @@ test("preserves Paseo-managed worktree directory as workspace root without colla
   assert.equal(created.record.projectRoot, paseoWt);
   assert.equal(created.record.planReview, "not-required");
   assert.equal(created.record.codeReview, "required");
+});
+
+test("dynamically appends Developer Round 2 and Code Review Round 2 workflow steps when changes are requested", (t) => {
+  const { repoDir, stateRoot } = tempGitRepo(t);
+  const created = initTask({
+    cwd: repoDir,
+    goal: "修复并补充边界回归测试",
+    teamName: "Standard",
+    preset: {
+      developer: { model: "codex/gpt-6.1-sol" },
+      planReviewers: [{ model: "claude/claude-opus-5-5" }],
+      codeReviewers: [
+        { model: "claude/claude-opus-5-5" },
+        { model: "codex/gpt-6-astra" },
+      ],
+      complexMode: "simple",
+    },
+    requireReview: true,
+    coordinatorAgentId: "coord-main",
+    stateRoot,
+  });
+
+  registerTaskAgent(created.recordPath, {
+    role: "developer",
+    agentId: "dev-1",
+    profile: "codex/gpt-6.1-sol",
+    briefSummary: "实现修复",
+  });
+  registerTaskAgent(created.recordPath, {
+    role: "code-reviewer",
+    slotIndex: 0,
+    agentId: "rev-1",
+    profile: "claude/claude-opus-5-5",
+    briefSummary: "规格审查",
+  });
+  registerTaskAgent(created.recordPath, {
+    role: "code-reviewer",
+    slotIndex: 1,
+    agentId: "rev-2",
+    profile: "codex/gpt-6-astra",
+    briefSummary: "架构审查",
+  });
+
+  // Round 1 delivery + Round 1 code review (rev-1 APPROVE, rev-2 REQUEST_CHANGES)
+  writeFileSync(path.join(repoDir, "index.js"), "export default 10;\n");
+  recordCandidateDelivery(created.recordPath, {
+    agentId: "dev-1",
+    summary: "首轮修复实现",
+    architectureImpact: "无",
+  });
+  recordReviewVerdict(created.recordPath, {
+    stage: "code",
+    agentId: "rev-1",
+    round: 1,
+    verdict: "APPROVE",
+    summary: "主路径符合预期",
+  });
+  recordReviewVerdict(created.recordPath, {
+    stage: "code",
+    agentId: "rev-2",
+    round: 1,
+    verdict: "REQUEST_CHANGES",
+    summary: "缺少空输入回归断言",
+    findings: ["blocking: index.js 空输入分支缺少回归测试"],
+  });
+
+  // While dev-1 is actively running Round 2 revision, Development Round 2 step grows immediately!
+  const liveDuringDevR2 = new Map([
+    [
+      "dev-1",
+      {
+        status: "running" as const,
+        awaitingPermission: false,
+        provider: "codex",
+        model: "gpt-6.1-sol",
+      },
+    ],
+  ]);
+  const snapMidRevision = toPipelineSnapshot(
+    created.recordPath,
+    loadTask(created.recordPath),
+    liveDuringDevR2,
+    "zh",
+  );
+  assert.deepEqual(
+    snapMidRevision.stages.map((s) => [s.stepId, s.title]),
+    [
+      ["coordinator", "主控协调"],
+      ["development", "开发实现 · 第 1 轮"],
+      ["code-review", "代码审查 · 第 1 轮"],
+      ["development-r2", "开发修订 · 第 2 轮"],
+      ["merge-gate", "验收门禁"],
+    ],
+  );
+  assert.equal(snapMidRevision.stages[1].nodes[0].visualStatus, "completed");
+  assert.equal(snapMidRevision.stages[3].nodes[0].visualStatus, "running");
+
+  // Developer delivers Round 2, and rev-2 approves Round 2 -> Code Review Round 2 step grows below!
+  writeFileSync(path.join(repoDir, "index.js"), "export default 11;\n");
+  recordCandidateDelivery(created.recordPath, {
+    agentId: "dev-1",
+    summary: "补充空输入回归测试",
+    architectureImpact: "无",
+  });
+  const afterR2 = recordReviewVerdict(created.recordPath, {
+    stage: "code",
+    agentId: "rev-2",
+    round: 2,
+    verdict: "APPROVE",
+    summary: "空输入回归测试已覆盖，通过",
+  });
+
+  const snapFinal = toPipelineSnapshot(
+    created.recordPath,
+    afterR2.record,
+    new Map(),
+    "zh",
+  );
+  const parsed = PipelineTaskSnapshotSchema.parse(snapFinal);
+  assert.deepEqual(
+    parsed.stages.map((s) => [s.stepId, s.title, s.nodes.map((n) => n.label)]),
+    [
+      ["coordinator", "主控协调", ["主控 Coordinator"]],
+      ["development", "开发实现 · 第 1 轮", ["Developer · 第 1 轮"]],
+      [
+        "code-review",
+        "代码审查 · 第 1 轮",
+        ["代码审查 #1 · 第 1 轮", "代码审查 #2 · 第 1 轮"],
+      ],
+      ["development-r2", "开发修订 · 第 2 轮", ["Developer · 第 2 轮修订"]],
+      ["code-review-r2", "代码审查 · 第 2 轮", ["代码审查 #2 · 第 2 轮"]],
+      ["merge-gate", "验收门禁", ["验收门禁"]],
+    ],
+  );
+  assert.equal(parsed.stages[1].nodes[0].summary, "首轮修复实现");
+  assert.equal(parsed.stages[3].nodes[0].summary, "补充空输入回归测试");
+  assert.equal(parsed.stages[2].nodes[1].verdict, "REQUEST_CHANGES");
+  assert.equal(parsed.stages[4].nodes[0].verdict, "APPROVE");
 });

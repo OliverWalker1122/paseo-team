@@ -166,6 +166,12 @@ export interface TaskDeliveryInfo {
   deliveredAt: string;
 }
 
+export interface TaskDeliveryRoundEntry extends TaskDeliveryInfo {
+  round: number;
+  agentId?: string;
+  ciLog?: string;
+}
+
 export interface CircuitBreakerInfo {
   stage: "plan" | "code";
   round: number;
@@ -197,6 +203,7 @@ export interface TaskRecord {
   codeReviewers: ReviewerRecordEntry[];
   ci: { log?: string; waived?: string } | null;
   delivery: TaskDeliveryInfo | null;
+  deliveries?: TaskDeliveryRoundEntry[];
   circuitBroken: CircuitBreakerInfo | null;
   nodes: TaskAgentNode[];
   lifecycleStatus: "active" | "completed" | "paused" | "abandoned" | "blocked";
@@ -388,8 +395,8 @@ export function buildInitialNodes(options: {
     label: zh ? "验收门禁" : "Quality Gate",
     profile: "quality-gate",
     briefSummary: zh
-      ? "核对测试通过、代码审查批准、只读完整性与两轮熔断"
-      : "Verifies CI sidecar, review approvals, read-only integrity & breaker",
+      ? "核对测试通过、交叉审查批准与两轮熔断门禁"
+      : "Verifies CI sidecar, cross-review approvals & 2-round breaker",
     status: "pending",
     updatedAt: now,
   });
@@ -900,6 +907,19 @@ function normalizeLoadedTaskRecord(
       typeof (rawObj.delivery as Record<string, unknown>).candidate === "string"
         ? (rawObj.delivery as TaskDeliveryInfo)
         : null,
+    ...(Array.isArray(rawObj.deliveries)
+      ? {
+          deliveries: rawObj.deliveries.filter(
+            (d): d is TaskDeliveryRoundEntry =>
+              Boolean(
+                d &&
+                typeof d === "object" &&
+                typeof (d as Record<string, unknown>).round === "number" &&
+                typeof (d as Record<string, unknown>).summary === "string",
+              ),
+          ),
+        }
+      : {}),
     circuitBroken:
       rawObj.circuitBroken &&
       typeof rawObj.circuitBroken === "object" &&
@@ -1201,10 +1221,9 @@ export function recordReviewVerdict(
   }
 
   const targetRef =
-    input.targetVersionOrCommit?.trim() ||
-    (input.stage === "plan"
-      ? record.planVersion
-      : record.candidate || computeWorkspaceFingerprint(record.projectRoot));
+    input.stage === "plan"
+      ? input.targetVersionOrCommit?.trim() || record.planVersion
+      : computeWorkspaceFingerprint(record.projectRoot);
 
   const taskDir = path.dirname(path.resolve(recordPath));
   const safeAgent = input.agentId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 32);
@@ -1319,6 +1338,37 @@ export function recordReviewVerdict(
   };
 }
 
+function findLatestMatchingCiLog(
+  taskDir: string,
+  fingerprint: string,
+): string | undefined {
+  if (!existsSync(taskDir)) return undefined;
+  let bestName: string | undefined;
+  let bestMtime = -1;
+  for (const name of readdirSync(taskDir)) {
+    if (!name.endsWith(".log.json")) continue;
+    const jsonPath = path.join(taskDir, name);
+    try {
+      const st = lstatSync(jsonPath);
+      if (st.isSymbolicLink() || !st.isFile()) continue;
+      const parsed = JSON.parse(readFileSync(jsonPath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      if (parsed.status === "PASS" && parsed.fingerprint === fingerprint) {
+        const mtime = st.mtimeMs;
+        if (mtime >= bestMtime) {
+          bestMtime = mtime;
+          bestName = name.slice(0, -".json".length);
+        }
+      }
+    } catch {
+      // Ignore unreadable sidecar
+    }
+  }
+  return bestName;
+}
+
 export function recordCandidateDelivery(
   recordPath: string,
   input: {
@@ -1335,17 +1385,33 @@ export function recordCandidateDelivery(
   const record = loadTask(recordPath);
   const now = new Date().toISOString();
   const targetDir = record.projectRoot;
+  const taskDir = path.dirname(path.resolve(recordPath));
 
   const fingerprint =
     input.candidate?.trim() || computeWorkspaceFingerprint(targetDir);
   const stats = computeWorkspaceChangeStats(targetDir);
 
+  const hadPriorDelivery = Boolean(
+    record.delivery || (record.deliveries && record.deliveries.length > 0),
+  );
+  const deliveryRound = hadPriorDelivery
+    ? Math.max(1, record.codeReviewRound + 1)
+    : 1;
+
   record.candidate = fingerprint;
 
+  let resolvedCiLog: string | undefined;
   if (input.ciWaivedUserQuote?.trim()) {
     record.ci = { waived: input.ciWaivedUserQuote.trim() };
   } else if (input.ciLog?.trim()) {
-    record.ci = { log: path.basename(input.ciLog.trim()) };
+    resolvedCiLog = path.basename(input.ciLog.trim());
+    record.ci = { log: resolvedCiLog };
+  } else if (!record.ci?.waived) {
+    const autoLog = findLatestMatchingCiLog(taskDir, fingerprint);
+    if (autoLog) {
+      resolvedCiLog = autoLog;
+      record.ci = { log: autoLog };
+    }
   }
 
   record.delivery = {
@@ -1354,6 +1420,30 @@ export function recordCandidateDelivery(
     architectureImpact: input.architectureImpact.trim(),
     deliveredAt: now,
   };
+
+  const deliveries = Array.isArray(record.deliveries)
+    ? [...record.deliveries]
+    : [];
+  const existingRoundIdx = deliveries.findIndex(
+    (d) =>
+      d.round === deliveryRound &&
+      (d.agentId ?? "") === (input.agentId?.trim() ?? ""),
+  );
+  const roundEntry: TaskDeliveryRoundEntry = {
+    round: deliveryRound,
+    ...(input.agentId?.trim() ? { agentId: input.agentId.trim() } : {}),
+    candidate: fingerprint,
+    ...(resolvedCiLog ? { ciLog: resolvedCiLog } : {}),
+    summary: input.summary.trim(),
+    architectureImpact: input.architectureImpact.trim(),
+    deliveredAt: now,
+  };
+  if (existingRoundIdx >= 0) {
+    deliveries[existingRoundIdx] = roundEntry;
+  } else {
+    deliveries.push(roundEntry);
+  }
+  record.deliveries = deliveries;
 
   const archNonTrivial = !["无", "none", "n/a"].includes(
     input.architectureImpact.trim().toLowerCase(),

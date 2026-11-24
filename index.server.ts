@@ -110,12 +110,13 @@ function stripRolePrefix(title: string | null | undefined): string {
 function extractToolName(req: unknown): string | null {
   if (!req || typeof req !== "object") return null;
   const r = req as Record<string, unknown>;
-  if (typeof r.toolName === "string") return r.toolName;
-  if (typeof r.name === "string") return r.name;
+  if (typeof r.toolName === "string" && r.toolName) return r.toolName;
+  if (typeof r.name === "string" && r.name) return r.name;
   if (r.tool && typeof r.tool === "object") {
     const t = r.tool as Record<string, unknown>;
-    if (typeof t.name === "string") return t.name;
+    if (typeof t.name === "string" && t.name) return t.name;
   }
+  if (typeof r.title === "string" && r.title) return r.title;
   return null;
 }
 
@@ -567,16 +568,34 @@ export default function contribute(server: PluginServerContext) {
       "agent.permission.before",
       async ({ agent, request }, { paseo }) => {
         try {
-          if (request.kind !== "tool") return;
-          const matched = findTaskByAgentId(agent.id);
-          if (!matched) return;
+          if (request.kind !== "tool" && request.kind !== "other") return;
           const toolName = extractToolName(request);
-          if (isAutoAllowedTeamTool(matched.matchedRole, toolName)) {
+          let role = findTaskByAgentId(agent.id)?.matchedRole;
+          if (!role && agent.parentAgentId) {
+            const parentMatch = findTaskByAgentId(agent.parentAgentId);
+            if (
+              parentMatch?.matchedRole === "coordinator" &&
+              parentMatch.record.lifecycleStatus === "active" &&
+              toolName &&
+              /(?:^|__|_|\/|:)paseo_team_run_check$/.test(toolName)
+            ) {
+              role = "developer";
+            }
+          }
+          if (isAutoAllowedTeamTool(role, toolName)) {
+            const allowAction = Array.isArray(request.actions)
+              ? request.actions.find((a) => a.behavior === "allow")
+              : undefined;
             await paseo.agents
               .ref(agent.id)
               .respondToPermission({
                 requestId: request.id,
-                response: { behavior: "allow" },
+                response: {
+                  behavior: "allow",
+                  ...(allowAction?.id
+                    ? { selectedActionId: allowAction.id }
+                    : {}),
+                },
               })
               .catch(() => {});
           }

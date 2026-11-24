@@ -125,6 +125,8 @@ export function localizeNodeRoleLabel(
   fallbackLabel: string,
   isNativeTree?: boolean,
   totalSameRole?: number,
+  round?: number,
+  multiRound?: boolean,
 ): string {
   if (isNativeTree) {
     if (role === "coordinator") {
@@ -132,26 +134,76 @@ export function localizeNodeRoleLabel(
     }
     return fallbackLabel;
   }
+  const showRound = Boolean(round && (multiRound || round > 1));
+  const roundSuffix = showRound
+    ? lang === "en"
+      ? ` · Round ${round}`
+      : role === "developer" || role === "expert"
+        ? round! > 1
+          ? ` · 第 ${round} 轮修订`
+          : ` · 第 1 轮`
+        : ` · 第 ${round} 轮`
+    : "";
+
   switch (role) {
     case "coordinator":
       return lang === "en" ? "Coordinator" : "主控 Coordinator";
     case "expert":
-      return lang === "en" ? "Expert" : "专家 Expert";
-    case "developer":
-      return (totalSameRole ?? 1) > 1
-        ? `Developer #${slotIndex + 1}`
-        : "Developer";
+      return (lang === "en" ? "Expert" : "专家 Expert") + roundSuffix;
+    case "developer": {
+      const base =
+        (totalSameRole ?? 1) > 1 ? `Developer #${slotIndex + 1}` : "Developer";
+      return base + roundSuffix;
+    }
     case "plan-reviewer":
-      return lang === "en"
-        ? `Plan Reviewer #${slotIndex + 1}`
-        : `方案审查 #${slotIndex + 1}`;
+      return (
+        (lang === "en"
+          ? `Plan Reviewer #${slotIndex + 1}`
+          : `方案审查 #${slotIndex + 1}`) + roundSuffix
+      );
     case "code-reviewer":
-      return lang === "en"
-        ? `Code Reviewer #${slotIndex + 1}`
-        : `代码审查 #${slotIndex + 1}`;
+      return (
+        (lang === "en"
+          ? `Code Reviewer #${slotIndex + 1}`
+          : `代码审查 #${slotIndex + 1}`) + roundSuffix
+      );
     case "gate":
       return lang === "en" ? "Quality Gate" : "验收门禁";
   }
+}
+
+export function localizeStepTitle(
+  lang: UiLanguage,
+  stageId:
+    | "coordinator"
+    | "expert"
+    | "plan-review"
+    | "development"
+    | "code-review"
+    | "merge-gate",
+  round?: number,
+  multiRound?: boolean,
+): string {
+  const base = STAGE_LABELS[lang][stageId].title;
+  if (!round || (!multiRound && round <= 1)) {
+    return base;
+  }
+  if (lang === "en") {
+    if (stageId === "development" && round > 1) {
+      return `Development · Round ${round}`;
+    }
+    if (stageId === "expert" && round > 1) {
+      return `Plan Revision · Round ${round}`;
+    }
+    return `${base} · Round ${round}`;
+  }
+  if (stageId === "development") {
+    return round > 1 ? `开发修订 · 第 ${round} 轮` : `开发实现 · 第 1 轮`;
+  }
+  if (stageId === "expert") {
+    return round > 1 ? `方案修订 · 第 ${round} 轮` : `专家方案 · 第 1 轮`;
+  }
+  return `${base} · 第 ${round} 轮`;
 }
 
 export const UI_TEXT = {
@@ -288,7 +340,7 @@ export const UI_TEXT = {
     gateChecklistTitle: "Quality checks",
     emptyTitle: "No subagents in this chat yet",
     emptyDesc:
-      "Each chat has its own graph. Run /paseo-team or spawn subagents here and every session shows up from left to right.",
+      "Each chat has its own workflow graph. Run /paseo-team or spawn subagents here and every step grows downward as work progresses.",
     startPlaceholder: (team: string) =>
       `Describe a task for the team (preset: ${team}; add "with review" to force code review)`,
     startingBtn: "Starting…",
@@ -457,7 +509,7 @@ export const UI_TEXT = {
     gateChecklistTitle: "验收检查项",
     emptyTitle: "当前对话还没有子 Agent",
     emptyDesc:
-      "每个对话有自己的状态图。在这里运行 /paseo-team 或派生子 Agent，所有会话会从左到右展示出来。",
+      "每个对话有自己的工作流状态图。在这里运行 /paseo-team 或派生子 Agent，各执行与审查轮次会按工作流节点向下动态展开。",
     startPlaceholder: (team: string) =>
       `描述要交给团队的任务（预设：${team}；写“需要审查”可强制代码审查）`,
     startingBtn: "启动中…",
