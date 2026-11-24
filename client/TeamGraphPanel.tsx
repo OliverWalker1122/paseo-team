@@ -200,6 +200,9 @@ function taskStatusInfo(
   task: PipelineTaskSnapshotDto,
 ): { label: string; tone: TaskStatusTone } {
   const t = UI_TEXT[lang];
+  if (task.lifecycleStatus === "abandoned") {
+    return { label: t.statusAbandoned, tone: "muted" };
+  }
   if (task.circuitBroken) return { label: t.statusHalted, tone: "danger" };
   if (task.lifecycleStatus === "completed") {
     return { label: t.statusMerged, tone: "success" };
@@ -980,6 +983,7 @@ function TaskFlowCanvas({
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [goalExpanded, setGoalExpanded] = useState(false);
   const [controlling, setControlling] = useState(false);
+  const [confirmAbandon, setConfirmAbandon] = useState(false);
 
   useEffect(() => {
     setSelectedNodeId(null);
@@ -997,7 +1001,11 @@ function TaskFlowCanvas({
   }, [task, selectedNodeId]);
 
   async function handleControl(
-    action: "inspect_gate" | "complete_task" | "authorize_extra_round",
+    action:
+      | "inspect_gate"
+      | "complete_task"
+      | "authorize_extra_round"
+      | "abandon_task",
   ) {
     if (!task.recordPath) return;
     setControlling(true);
@@ -1063,6 +1071,43 @@ function TaskFlowCanvas({
               {task.goal}
             </Text>
           </Pressable>
+          {task.recordPath &&
+          !isNativeTree &&
+          task.lifecycleStatus !== "completed" &&
+          task.lifecycleStatus !== "abandoned" ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t.abandonTask}
+              disabled={controlling}
+              onPress={() => {
+                if (!confirmAbandon) {
+                  setConfirmAbandon(true);
+                  return;
+                }
+                setConfirmAbandon(false);
+                void handleControl("abandon_task");
+              }}
+              style={({ hovered }: HoverState) => ({
+                paddingHorizontal: 9,
+                paddingVertical: 5,
+                borderRadius: 6,
+                backgroundColor: hovered
+                  ? theme.colors.surface2
+                  : "transparent",
+              })}
+            >
+              <Text
+                style={{
+                  color: confirmAbandon
+                    ? theme.colors.statusDanger
+                    : theme.colors.foregroundMuted,
+                  fontSize: 12,
+                }}
+              >
+                {confirmAbandon ? t.abandonConfirm : t.abandonTask}
+              </Text>
+            </Pressable>
+          ) : null}
           {onOpenConfig ? (
             <Pressable
               accessibilityRole="button"

@@ -304,7 +304,12 @@ export const controlTaskRpc = defineRpc({
   name: "paseo_team.tasks.control",
   input: z.object({
     recordPath: z.string().min(1),
-    action: z.enum(["inspect_gate", "complete_task", "authorize_extra_round"]),
+    action: z.enum([
+      "inspect_gate",
+      "complete_task",
+      "authorize_extra_round",
+      "abandon_task",
+    ]),
     note: z.string().optional(),
     language: UiLanguageSchema.optional(),
   }),

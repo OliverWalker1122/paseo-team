@@ -222,6 +222,20 @@ export default function contribute(server: PluginServerContext) {
       const zh = language === "zh";
       const record = loadTask(recordPath);
 
+      if (action === "abandon_task") {
+        if (record.lifecycleStatus !== "completed") {
+          record.lifecycleStatus = "abandoned";
+          saveTask(recordPath, record);
+          notifyTaskChanges();
+        }
+        return {
+          ok: true,
+          message: zh
+            ? "任务已放弃。仍在运行的会话请在 Paseo 中停止。"
+            : "Task abandoned. Stop any session still running from Paseo.",
+        };
+      }
+
       if (action === "authorize_extra_round") {
         // Only grant a round when the breaker actually tripped, so repeated clicks don't stack.
         if (record.circuitBroken) {
@@ -666,6 +680,7 @@ export default function contribute(server: PluginServerContext) {
             match.matchedRole !== "coordinator" &&
             outcome.kind === "completed" &&
             match.record.lifecycleStatus !== "completed" &&
+            match.record.lifecycleStatus !== "abandoned" &&
             checkTurnHandoff(match.recordPath, agent.id) === "remind"
           ) {
             const tool = HANDOFF_TOOL[match.matchedRole];
