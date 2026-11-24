@@ -36,7 +36,6 @@ import {
   type AgentRole,
   checkTurnHandoff,
   findTaskByAgentId,
-  markTurnStarted,
   listTasksForProject,
   loadTask,
   markTaskCompleted,
@@ -656,12 +655,7 @@ export default function contribute(server: PluginServerContext) {
     server.addHook("agent.turn.before", async ({ agent }) => {
       try {
         const match = findTaskByAgentId(agent.id);
-        if (match) {
-          if (match.matchedRole !== "coordinator") {
-            markTurnStarted(match.recordPath, agent.id);
-          }
-          notifyTaskChanges();
-        }
+        if (match) notifyTaskChanges();
       } catch (err) {
         console.error("[paseo-team] agent.turn.before error:", err);
       }

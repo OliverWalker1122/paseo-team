@@ -45,6 +45,7 @@ import { runCheck } from "./run-check.ts";
 import {
   buildRecoveryBrief,
   findTaskByAgentId,
+  handoffOwed,
   initTask,
   listAllRecentTasks,
   listTasksByLauncher,
@@ -1966,7 +1967,8 @@ export function memberOwnsHandoff(
   agentId: string | undefined,
   fallbackRole?: "developer",
 ): string | null {
-  const nodes = loadTask(recordPath).nodes;
+  const record = loadTask(recordPath);
+  const nodes = record.nodes;
   const node = agentId
     ? nodes.find((n) => n.agentId === agentId)
     : nodes.findLast((n) => n.role === fallbackRole && n.agentId);
@@ -1975,10 +1977,7 @@ export function memberOwnsHandoff(
   if (node.reminded) {
     return `${who} was reminded to submit itself and is retrying; wait for its next reply instead of recording for it.`;
   }
-  if (
-    node.submittedAt &&
-    (!node.turnStartedAt || node.submittedAt >= node.turnStartedAt)
-  ) {
+  if (!handoffOwed(record, node)) {
     return `${who} already submitted this handoff itself; nothing to record.`;
   }
   return null;

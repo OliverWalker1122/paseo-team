@@ -15,7 +15,6 @@ import {
   initTask,
   loadTask,
   listTasksByLauncher,
-  markTurnStarted,
   nextReviewRound,
   readReviewRounds,
   recordCandidateDelivery,
@@ -83,8 +82,6 @@ test("turn without submit reminds once, then blocks the node; gate names the age
     profile: "auto",
     briefSummary: "Review",
   });
-
-  markTurnStarted(recordPath, "rev-1");
   assert.equal(checkTurnHandoff(recordPath, "rev-1"), "remind");
   const gate = inspectQualityGate({ recordPath });
   assert.ok(
@@ -93,11 +90,7 @@ test("turn without submit reminds once, then blocks the node; gate names the age
     ),
     gate.missing.join("\n"),
   );
-
-  markTurnStarted(recordPath, "rev-1");
   assert.equal(checkTurnHandoff(recordPath, "rev-1"), "missing");
-
-  markTurnStarted(recordPath, "rev-1");
   recordReviewVerdict(recordPath, {
     stage: "code",
     agentId: "rev-1",
@@ -192,16 +185,11 @@ test("coordinator may record for a member only after its reminder failed", (t) =
     inspectQualityGate({ recordPath }).checks.codeReviewSatisfied,
     false,
   );
-
-  markTurnStarted(recordPath, "rev-1");
   assert.equal(memberOwnsHandoff(recordPath, "rev-1"), null);
   checkTurnHandoff(recordPath, "rev-1"); // first miss: reminder sent
   assert.match(memberOwnsHandoff(recordPath, "rev-1") ?? "", /reminded/);
-  markTurnStarted(recordPath, "rev-1");
   checkTurnHandoff(recordPath, "rev-1"); // second miss: coordinator may act
   assert.equal(memberOwnsHandoff(recordPath, "rev-1"), null);
-
-  markTurnStarted(recordPath, "rev-1");
   recordReviewVerdict(recordPath, {
     stage: "code",
     agentId: "rev-1",
@@ -297,4 +285,33 @@ test("preset phrases are recognized after Chinese punctuation", () => {
     parseInlineTaskDirectives("加 search 命令").teamOverride,
     undefined,
   );
+});
+
+test("follow-up turns after a handoff are not nagged; a rework request is", (t) => {
+  const { make } = setup(t);
+  const { recordPath } = make("Owed handoffs");
+  registerTaskAgent(recordPath, {
+    role: "developer",
+    agentId: "dev-1",
+    profile: "auto",
+    briefSummary: "Build",
+  });
+  recordCandidateDelivery(recordPath, {
+    agentId: "dev-1",
+    summary: "d1",
+    architectureImpact: "None",
+    ciWaivedUserQuote: "user said skip CI for this test",
+  });
+  // Coordinator asks a question afterwards: nothing is owed.
+  assert.equal(checkTurnHandoff(recordPath, "dev-1"), "ok");
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-1",
+    round: 1,
+    verdict: "REQUEST_CHANGES",
+    summary: "fix",
+    findings: ["blocking: a.ts:1 bug"],
+  });
+  // Rework requested: a turn without a new delivery is reminded.
+  assert.equal(checkTurnHandoff(recordPath, "dev-1"), "remind");
 });

@@ -73,7 +73,6 @@ export interface TaskAgentNode {
   summary?: string;
   startedAt?: string;
   /** Handoff bookkeeping written by the turn hooks and submit tools. */
-  turnStartedAt?: string;
   submittedAt?: string;
   reminded?: boolean;
   updatedAt: string;
@@ -1435,13 +1434,43 @@ export function recordPlanSubmission(
   return saveTask(recordPath, record);
 }
 
-/** turn.before: remember when this agent's turn started. */
-export function markTurnStarted(recordPath: string, agentId: string): void {
-  const record = loadTask(recordPath);
-  const node = record.nodes.find((n) => n.agentId === agentId);
-  if (!node) return;
-  node.turnStartedAt = new Date().toISOString();
-  saveTask(recordPath, record);
+/**
+ * Whether this member still owes a handoff: it never submitted, or the pipeline
+ * has moved past its last submission (rework requested, or a newer target to
+ * review). Follow-up turns such as answering the coordinator owe nothing.
+ */
+export function handoffOwed(record: TaskRecord, node: TaskAgentNode): boolean {
+  if (!node.submittedAt) return true;
+  const failed = (list: ReviewerRecordEntry[], round: number) =>
+    list.some((r) => r.round === round && r.status !== "APPROVE");
+  const lastDelivery = Math.max(
+    0,
+    ...(record.deliveries ?? []).map((d) => d.round),
+  );
+  const plans = record.planSubmissions ?? 0;
+  const own = (list: ReviewerRecordEntry[]) =>
+    Math.max(
+      0,
+      ...list.filter((r) => r.agentId === node.agentId).map((r) => r.round),
+    );
+  switch (node.role) {
+    case "developer":
+      return (
+        record.codeReviewRound >= lastDelivery &&
+        failed(record.codeReviewers, record.codeReviewRound)
+      );
+    case "expert":
+      return (
+        record.planReviewRound >= plans &&
+        failed(record.planReviewers, record.planReviewRound)
+      );
+    case "code-reviewer":
+      return lastDelivery > own(record.codeReviewers);
+    case "plan-reviewer":
+      return plans > own(record.planReviewers);
+    default:
+      return false;
+  }
 }
 
 /**
@@ -1462,9 +1491,7 @@ export function checkTurnHandoff(
   ) {
     return "ok";
   }
-  if (node.submittedAt && node.submittedAt >= (node.turnStartedAt ?? "")) {
-    return "ok";
-  }
+  if (!handoffOwed(record, node)) return "ok";
   const now = new Date().toISOString();
   if (!node.reminded) {
     node.reminded = true;
