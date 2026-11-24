@@ -8,6 +8,7 @@ import {
   memberOwnsHandoff,
   parseInlineTaskDirectives,
   reviewInputProblem,
+  toPipelineSnapshot,
 } from "../server/handlers.ts";
 import { inspectQualityGate } from "../server/quality-gate.ts";
 import {
@@ -73,7 +74,7 @@ test("review findings must be tagged and match the verdict", () => {
   );
 });
 
-test("turn without submit reminds once, then blocks the node; gate names the agent", (t) => {
+test("turn without submit reminds once after delivery, then marks pending; gate names the agent", (t) => {
   const { make } = setup(t);
   const { recordPath } = make("Check handoff");
   registerTaskAgent(recordPath, {
@@ -81,6 +82,13 @@ test("turn without submit reminds once, then blocks the node; gate names the age
     agentId: "rev-1",
     profile: "auto",
     briefSummary: "Review",
+  });
+  // Before any delivery exists, submit_review would reject, so do not nag.
+  assert.equal(checkTurnHandoff(recordPath, "rev-1"), "ok");
+  recordCandidateDelivery(recordPath, {
+    summary: "d1",
+    architectureImpact: "None",
+    ciWaivedUserQuote: "user waived CI for test",
   });
   assert.equal(checkTurnHandoff(recordPath, "rev-1"), "remind");
   const gate = inspectQualityGate({ recordPath });
@@ -185,6 +193,11 @@ test("coordinator may record for a member only after its reminder failed", (t) =
     inspectQualityGate({ recordPath }).checks.codeReviewSatisfied,
     false,
   );
+  recordCandidateDelivery(recordPath, {
+    summary: "d1",
+    architectureImpact: "None",
+    ciWaivedUserQuote: "user waived CI for test",
+  });
   assert.equal(memberOwnsHandoff(recordPath, "rev-1"), null);
   checkTurnHandoff(recordPath, "rev-1"); // first miss: reminder sent
   assert.match(memberOwnsHandoff(recordPath, "rev-1") ?? "", /reminded/);
@@ -314,4 +327,114 @@ test("follow-up turns after a handoff are not nagged; a rework request is", (t) 
   });
   // Rework requested: a turn without a new delivery is reminded.
   assert.equal(checkTurnHandoff(recordPath, "dev-1"), "remind");
+});
+
+test("review phrases recognize code/plan modifiers and negations", () => {
+  for (const raw of [
+    "网页端改进；需要代码审查；用 Deepseek 预设",
+    "开启代码审查",
+    "add toggle with code review",
+    "require code review",
+  ]) {
+    const parsed = parseInlineTaskDirectives(raw);
+    assert.equal(parsed.requireReview, true, raw);
+    assert.equal(parsed.skipReviewReason, undefined, raw);
+  }
+  const plan = parseInlineTaskDirectives("需要方案审查");
+  assert.equal(plan.requireReview, true);
+  assert.equal(plan.requirePlanReview, true);
+  for (const raw of [
+    "不需要代码审查",
+    "不要审查",
+    "跳过代码审查",
+    "skip code review",
+    "without review",
+  ]) {
+    const parsed = parseInlineTaskDirectives(raw);
+    assert.ok(parsed.skipReviewReason, raw);
+    assert.equal(parsed.requireReview, undefined, raw);
+  }
+});
+
+test("idle unsubmitted members stay pending and round history shows the latest verdict", (t) => {
+  const { make } = setup(t);
+  const { recordPath } = make("Snapshot honesty");
+  registerTaskAgent(recordPath, {
+    role: "developer",
+    agentId: "dev-1",
+    profile: "auto",
+    briefSummary: "Build",
+  });
+  registerTaskAgent(recordPath, {
+    role: "code-reviewer",
+    agentId: "rev-1",
+    profile: "auto",
+    briefSummary: "Review",
+  });
+  const idleMap = new Map([
+    [
+      "dev-1",
+      { status: "idle" as const, awaitingPermission: false, provider: "codex" },
+    ],
+    [
+      "rev-1",
+      { status: "idle" as const, awaitingPermission: false, provider: "codex" },
+    ],
+  ]);
+  const pendingSnap = toPipelineSnapshot(
+    recordPath,
+    loadTask(recordPath),
+    idleMap,
+    "zh",
+  );
+  const devNode = pendingSnap.stages
+    .flatMap((s) => s.nodes)
+    .find((n) => n.agentId === "dev-1");
+  const revNode = pendingSnap.stages
+    .flatMap((s) => s.nodes)
+    .find((n) => n.agentId === "rev-1");
+  assert.equal(devNode?.visualStatus, "pending");
+  assert.equal(revNode?.visualStatus, "pending");
+
+  // Two verdicts in the same round: snapshot reflects the latest and keeps both.
+  recordCandidateDelivery(recordPath, {
+    agentId: "dev-1",
+    summary: "d1",
+    architectureImpact: "None",
+    ciWaivedUserQuote: "user waived CI",
+  });
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-1",
+    round: 1,
+    verdict: "REQUEST_CHANGES",
+    summary: "first",
+    findings: ["blocking: a.ts:1 bug"],
+  });
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-1",
+    round: 1,
+    verdict: "APPROVE",
+    summary: "second",
+  });
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-1",
+    round: 3,
+    verdict: "APPROVE",
+    summary: "extra",
+    userAuthorizedExtraRound: "user approved extra round",
+  });
+  const finalSnap = toPipelineSnapshot(
+    recordPath,
+    loadTask(recordPath),
+    idleMap,
+    "zh",
+  );
+  const r1Stage = finalSnap.stages.find((s) => s.stepId === "code-review");
+  assert.equal(r1Stage?.nodes[0].verdict, "APPROVE");
+  assert.equal(r1Stage?.nodes[0].rounds?.length, 2);
+  const r3Stage = finalSnap.stages.find((s) => s.stepId === "code-review-r3");
+  assert.equal(r3Stage?.subtitle, "第 3/3 轮");
 });

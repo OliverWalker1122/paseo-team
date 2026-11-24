@@ -125,7 +125,9 @@ export function registerTeamComposerPills(
       teamLabelByAgent.clear();
       for (const task of event.tasks) {
         let badge = `Team · ${task.teamName}`;
-        if (task.circuitBroken) {
+        if (task.lifecycleStatus === "abandoned") {
+          badge = t.pillDefault;
+        } else if (task.circuitBroken) {
           badge = t.pillBreaker;
         } else if (task.attentionCount > 0) {
           badge = t.pillAttention(task.attentionCount);

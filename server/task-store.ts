@@ -1440,6 +1440,8 @@ export function recordPlanSubmission(
  * review). Follow-up turns such as answering the coordinator owe nothing.
  */
 export function handoffOwed(record: TaskRecord, node: TaskAgentNode): boolean {
+  const hasDelivery = Boolean(record.delivery || record.deliveries?.length);
+  if (node.role === "code-reviewer" && !hasDelivery) return false;
   if (!node.submittedAt) return true;
   const failed = (list: ReviewerRecordEntry[], round: number) =>
     list.some((r) => r.round === round && r.status !== "APPROVE");

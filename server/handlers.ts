@@ -495,14 +495,31 @@ export function toPipelineSnapshot(
           visualStatus = "blocked";
           attentionCount += 1;
         } else if (visualStatus === "running") {
-          visualStatus =
-            node.role === "coordinator" && record.lifecycleStatus === "active"
-              ? "running"
-              : "completed";
+          if (node.role === "coordinator") {
+            visualStatus =
+              record.lifecycleStatus === "active"
+                ? "running"
+                : record.lifecycleStatus === "completed"
+                  ? "completed"
+                  : record.lifecycleStatus === "blocked"
+                    ? "blocked"
+                    : "pending";
+          } else {
+            visualStatus =
+              record.lifecycleStatus === "completed" ? "completed" : "pending";
+          }
         }
       }
     } else if (node.role === "coordinator") {
       liveState = "idle";
+      if (visualStatus === "running" && record.lifecycleStatus !== "active") {
+        visualStatus =
+          record.lifecycleStatus === "completed"
+            ? "completed"
+            : record.lifecycleStatus === "blocked"
+              ? "blocked"
+              : "pending";
+      }
     } else if (
       node.nodeId === "merge-gate" &&
       record.lifecycleStatus !== "completed"
@@ -635,6 +652,8 @@ export function toPipelineSnapshot(
   const expertVisible = expertBase.length > 0 && !expertSkipped;
   const planRevVisible = planRevBase.length > 0 && !planRevSkipped;
 
+  const maxRounds = 2 + (record.extraRounds ?? 0);
+
   if (expertVisible || planRevVisible) {
     const recordedPlanRoundSet = new Set<number>();
     for (const item of planRevBase) {
@@ -703,7 +722,8 @@ export function toPipelineSnapshot(
       if (shouldEmitPlanRev) {
         const prNodes: PipelineNodeViewDto[] = [];
         for (const item of planRevBase) {
-          const roundEntry = item.rounds.find((x) => x.round === r);
+          const roundEntries = item.rounds.filter((x) => x.round === r);
+          const roundEntry = roundEntries.at(-1);
           const include =
             recordedPlanRounds.length === 0 ||
             Boolean(roundEntry) ||
@@ -729,7 +749,7 @@ export function toPipelineSnapshot(
             summary:
               roundEntry?.summary ||
               (recordedPlanRounds.length === 0 ? item.view.summary : undefined),
-            rounds: roundEntry ? [roundEntry] : undefined,
+            rounds: roundEntries.length > 0 ? roundEntries : undefined,
             visualStatus: roundEntry
               ? verdictToVisualStatus(roundEntry.verdict)
               : r === nextLivePlanRevRound && item.isLiveActive
@@ -751,8 +771,8 @@ export function toPipelineSnapshot(
             subtitle:
               record.planReview === "required"
                 ? zh
-                  ? `第 ${r}/2 轮 · 交叉审核`
-                  : `Round ${r}/2 · Cross review`
+                  ? `第 ${r}/${maxRounds} 轮 · 交叉审核`
+                  : `Round ${r}/${maxRounds} · Cross review`
                 : zh
                   ? "已豁免"
                   : "Waived",
@@ -890,7 +910,8 @@ export function toPipelineSnapshot(
     if (shouldEmitCodeRev) {
       const crNodes: PipelineNodeViewDto[] = [];
       for (const item of codeRevBase) {
-        const roundEntry = item.rounds.find((x) => x.round === r);
+        const roundEntries = item.rounds.filter((x) => x.round === r);
+        const roundEntry = roundEntries.at(-1);
         const include =
           recordedCodeRounds.length === 0 ||
           Boolean(roundEntry) ||
@@ -921,7 +942,7 @@ export function toPipelineSnapshot(
           summary:
             roundEntry?.summary ||
             (recordedCodeRounds.length === 0 ? item.view.summary : undefined),
-          rounds: roundEntry ? [roundEntry] : undefined,
+          rounds: roundEntries.length > 0 ? roundEntries : undefined,
           visualStatus: roundEntry
             ? verdictToVisualStatus(roundEntry.verdict)
             : r === nextLiveCodeRound && item.isLiveActive
@@ -944,8 +965,8 @@ export function toPipelineSnapshot(
           subtitle:
             record.codeReview === "required"
               ? zh
-                ? `第 ${r}/2 轮`
-                : `Round ${r}/2`
+                ? `第 ${r}/${maxRounds} 轮`
+                : `Round ${r}/${maxRounds}`
               : record.codeReview === "waived"
                 ? zh
                   ? "已豁免"
@@ -1433,10 +1454,14 @@ export function parseInlineTaskDirectives(rawArgs: string): {
     hasModeOverride = true;
   }
 
-  if (/不要审查|跳过审查|免审|\b(?:no|skip)\s+review\b/i.test(text)) {
+  if (
+    /(?:不要|不需要|免除|跳过)(?:代码|方案)?审查|免审|\b(?:no|skip|without)\s+(?:(?:code|plan)\s+)?review\b/i.test(
+      text,
+    )
+  ) {
     skipReviewReason = rawArgs.trim();
   } else if (
-    /需要审查|开启审查|必须审查|方案审查|\b(?:with|require|enable|plan)\s+review\b/i.test(
+    /(?:需要|开启|必须)(?:代码|方案)?审查|方案审查|\b(?:with|require|enable)\s+(?:(?:code|plan)\s+)?review\b|\bplan\s+review\b/i.test(
       text,
     )
   ) {

@@ -46,7 +46,13 @@ function TeamWorkspaceBadge({ workspaceId }: PluginWorkspaceRowBadgeItemProps) {
     setMatchedTask(event.mode === "team_task" ? event.task : null);
   });
 
-  if (!matchedTask) return null;
+  if (
+    !matchedTask ||
+    matchedTask.lifecycleStatus === "abandoned" ||
+    matchedTask.lifecycleStatus === "completed"
+  ) {
+    return null;
+  }
   const t = UI_TEXT[lang];
 
   if (matchedTask.circuitBroken) {

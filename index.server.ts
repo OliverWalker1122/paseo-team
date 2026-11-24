@@ -227,11 +227,16 @@ export default function contribute(server: PluginServerContext) {
           saveTask(recordPath, record);
           notifyTaskChanges();
         }
+        const snap = await listPipelineSnapshots(paseo, {
+          cwd: record.projectRoot,
+          ...(language ? { language } : {}),
+        });
         return {
           ok: true,
           message: zh
             ? "任务已放弃。仍在运行的会话请在 Paseo 中停止。"
             : "Task abandoned. Stop any session still running from Paseo.",
+          task: snap.tasks.find((t) => t.taskId === record.taskId),
         };
       }
 

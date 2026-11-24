@@ -2082,7 +2082,11 @@ export function GlobalTeamGraphScreen({
   const counts = useMemo(() => {
     const all = historyTasks ?? [];
     const done = all.filter((x) => x.lifecycleStatus === "completed").length;
-    return { all: all.length, done, active: all.length - done };
+    const active = all.filter(
+      (x) =>
+        x.lifecycleStatus !== "completed" && x.lifecycleStatus !== "abandoned",
+    ).length;
+    return { all: all.length, done, active };
   }, [historyTasks]);
 
   const visibleTasks = useMemo(() => {
@@ -2091,7 +2095,11 @@ export function GlobalTeamGraphScreen({
       return all.filter((x) => x.lifecycleStatus === "completed");
     }
     if (filter === "active") {
-      return all.filter((x) => x.lifecycleStatus !== "completed");
+      return all.filter(
+        (x) =>
+          x.lifecycleStatus !== "completed" &&
+          x.lifecycleStatus !== "abandoned",
+      );
     }
     return all;
   }, [historyTasks, filter]);
