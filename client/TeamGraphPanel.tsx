@@ -207,6 +207,12 @@ function taskStatusInfo(
   if (task.lifecycleStatus === "completed") {
     return { label: t.statusMerged, tone: "success" };
   }
+  if (task.attentionCount > 0) {
+    return {
+      label: t.statusAttentionCount(task.attentionCount),
+      tone: "danger",
+    };
+  }
   if (task.runningCount > 0) {
     return { label: t.statusRunningCount(task.runningCount), tone: "accent" };
   }
