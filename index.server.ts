@@ -17,6 +17,8 @@ import {
   buildConversationGraph,
   createCoordinatorTools,
   createDeveloperTools,
+  createExpertTools,
+  createReviewerTools,
   listPipelineSnapshots,
   notifyTaskChanges,
   startTeamTask,
@@ -32,13 +34,22 @@ import {
 import { inspectQualityGate } from "./server/quality-gate.ts";
 import {
   type AgentRole,
+  checkTurnHandoff,
   findTaskByAgentId,
+  markTurnStarted,
   listTasksForProject,
   loadTask,
   markTaskCompleted,
   registerTaskAgent,
   saveTask,
 } from "./server/task-store.ts";
+
+const HANDOFF_TOOL: Partial<Record<AgentRole, string>> = {
+  developer: "paseo_team_submit_delivery",
+  expert: "paseo_team_submit_plan",
+  "plan-reviewer": "paseo_team_submit_review",
+  "code-reviewer": "paseo_team_submit_review",
+};
 
 function isAutoAllowedTeamTool(
   role: AgentRole | undefined,
@@ -50,13 +61,21 @@ function isAutoAllowedTeamTool(
       /(?:^|__|_|\/|:)(?:create_agent|send_agent_prompt|list_providers|list_models|inspect_provider|get_agent_status|get_agent_activity|list_agents)$/.test(
         toolName,
       ) ||
-      /(?:^|__|_|\/|:)paseo_team_(?:task_summary|register_agent|record_review|record_delivery|complete)$/.test(
+      /(?:^|__|_|\/|:)paseo_team_(?:task_summary|submit_plan|record_review|record_delivery|complete)$/.test(
         toolName,
       )
     );
   }
   if (role === "developer") {
-    return /(?:^|__|_|\/|:)paseo_team_run_check$/.test(toolName);
+    return /(?:^|__|_|\/|:)paseo_team_(?:run_check|submit_delivery)$/.test(
+      toolName,
+    );
+  }
+  if (role === "expert") {
+    return /(?:^|__|_|\/|:)paseo_team_submit_plan$/.test(toolName);
+  }
+  if (role === "plan-reviewer" || role === "code-reviewer") {
+    return /(?:^|__|_|\/|:)paseo_team_submit_review$/.test(toolName);
   }
   return false;
 }
@@ -517,7 +536,7 @@ export default function contribute(server: PluginServerContext) {
             ],
             tools: [
               ...(request.tools ?? []),
-              ...createDeveloperTools(recordPath),
+              ...createDeveloperTools(recordPath, request.agentId),
             ],
           };
         }
@@ -532,6 +551,10 @@ export default function contribute(server: PluginServerContext) {
                 taskDir,
                 lang: promptLang,
               }),
+            ],
+            tools: [
+              ...(request.tools ?? []),
+              ...createExpertTools(recordPath, request.agentId),
             ],
           };
         }
@@ -552,6 +575,14 @@ export default function contribute(server: PluginServerContext) {
                 perspective,
                 lang: promptLang,
               }),
+            ],
+            tools: [
+              ...(request.tools ?? []),
+              ...createReviewerTools(
+                recordPath,
+                request.agentId,
+                role === "plan-reviewer" ? "plan" : "code",
+              ),
             ],
           };
         }
@@ -610,7 +641,11 @@ export default function contribute(server: PluginServerContext) {
   cleanups.push(
     server.addHook("agent.turn.before", async ({ agent }) => {
       try {
-        if (findTaskByAgentId(agent.id)) {
+        const match = findTaskByAgentId(agent.id);
+        if (match) {
+          if (match.matchedRole !== "coordinator") {
+            markTurnStarted(match.recordPath, agent.id);
+          }
           notifyTaskChanges();
         }
       } catch (err) {
@@ -620,15 +655,38 @@ export default function contribute(server: PluginServerContext) {
   );
 
   cleanups.push(
-    server.addHook("agent.turn.after", async ({ agent }) => {
-      try {
-        if (findTaskByAgentId(agent.id)) {
+    server.addHook(
+      "agent.turn.after",
+      async ({ agent, outcome }, { paseo }) => {
+        try {
+          const match = findTaskByAgentId(agent.id);
+          if (!match) return;
+          // Handoff check: a member's finished turn must end with its submit tool.
+          if (
+            match.matchedRole !== "coordinator" &&
+            outcome.kind === "completed" &&
+            match.record.lifecycleStatus !== "completed" &&
+            checkTurnHandoff(match.recordPath, agent.id) === "remind"
+          ) {
+            const tool = HANDOFF_TOOL[match.matchedRole];
+            const zh = detectPromptLanguage(match.record.goal) === "zh";
+            if (tool) {
+              await paseo.agents
+                .ref(agent.id)
+                .send(
+                  zh
+                    ? `[Team 交接检查] 本轮结束但没有调用 \`${tool}\`。如果工作已完成，请现在调用它提交；如果还没完成，请说明卡在哪里。`
+                    : `[Team handoff check] This turn ended without calling \`${tool}\`. If your work is done, call it now; if not, say what is blocking you.`,
+                )
+                .catch(() => {});
+            }
+          }
           notifyTaskChanges();
+        } catch (err) {
+          console.error("[paseo-team] agent.turn.after error:", err);
         }
-      } catch (err) {
-        console.error("[paseo-team] agent.turn.after error:", err);
-      }
-    }),
+      },
+    ),
   );
 
   return () => {

@@ -72,6 +72,10 @@ export interface TaskAgentNode {
   verdict?: ReviewVerdict;
   summary?: string;
   startedAt?: string;
+  /** Handoff bookkeeping written by the turn hooks and submit tools. */
+  turnStartedAt?: string;
+  submittedAt?: string;
+  reminded?: boolean;
   updatedAt: string;
 }
 
@@ -84,6 +88,8 @@ export interface ReviewerRecordEntry {
   summary: string;
   findings?: string[];
   sidecar: string;
+  /** "coordinator" when the coordinator recorded it on the reviewer's behalf. */
+  source?: "self" | "coordinator";
   updatedAt: string;
 }
 
@@ -188,6 +194,8 @@ export interface TaskRecord {
   team: TeamPreset;
   coordinatorAgentId?: string;
   coordinatorServerId?: string;
+  /** The chat that started this task; one chat can root many task subtrees. */
+  launcherAgentId?: string;
   planReview: "required" | "not-required" | "waived";
   planReviewReason?: string;
   planReviewRound: number;
@@ -203,6 +211,8 @@ export interface TaskRecord {
   circuitBroken: CircuitBreakerInfo | null;
   /** Review rounds the user allowed beyond the default two. */
   extraRounds?: number;
+  /** Plans submitted so far; plan review round N reviews plan vN. */
+  planSubmissions?: number;
   nodes: TaskAgentNode[];
   lifecycleStatus: "active" | "completed" | "paused" | "abandoned" | "blocked";
   completedAt?: string;
@@ -413,6 +423,7 @@ export function initTask(options: {
   skipReviewReason?: string;
   coordinatorAgentId?: string;
   coordinatorServerId?: string;
+  launcherAgentId?: string;
   stateRoot?: string;
 }): {
   recordPath: string;
@@ -461,6 +472,9 @@ export function initTask(options: {
       : {}),
     ...(options.coordinatorServerId
       ? { coordinatorServerId: options.coordinatorServerId }
+      : {}),
+    ...(options.launcherAgentId
+      ? { launcherAgentId: options.launcherAgentId }
       : {}),
     planReview: skipRequested
       ? "waived"
@@ -875,6 +889,9 @@ function normalizeLoadedTaskRecord(
     complexMode,
     team,
     ...(coordinatorAgentId ? { coordinatorAgentId } : {}),
+    ...(asNonEmptyString(rawObj.launcherAgentId)
+      ? { launcherAgentId: asNonEmptyString(rawObj.launcherAgentId)! }
+      : {}),
     ...(asNonEmptyString(rawObj.coordinatorServerId)
       ? { coordinatorServerId: asNonEmptyString(rawObj.coordinatorServerId)! }
       : {}),
@@ -926,6 +943,9 @@ function normalizeLoadedTaskRecord(
         : null,
     ...(typeof rawObj.extraRounds === "number" && rawObj.extraRounds > 0
       ? { extraRounds: rawObj.extraRounds }
+      : {}),
+    ...(typeof rawObj.planSubmissions === "number" && rawObj.planSubmissions > 0
+      ? { planSubmissions: rawObj.planSubmissions }
       : {}),
     nodes,
     lifecycleStatus,
@@ -1014,6 +1034,16 @@ export function listAllRecentTasks(
   }
   out.sort((a, b) => b.record.updatedAt.localeCompare(a.record.updatedAt));
   return out.slice(0, limit);
+}
+
+/** Task subtrees started from one chat, newest first. */
+export function listTasksByLauncher(
+  launcherAgentId: string,
+  stateRoot = defaultStateRoot(),
+): { recordPath: string; record: TaskRecord }[] {
+  return listAllRecentTasks(stateRoot, 100)
+    .filter((item) => item.record.launcherAgentId === launcherAgentId)
+    .sort((a, b) => b.record.createdAt.localeCompare(a.record.createdAt));
 }
 
 export function findTaskByAgentId(
@@ -1176,6 +1206,7 @@ export function recordReviewVerdict(
     verdict: ReviewVerdict;
     summary: string;
     findings?: string[];
+    source?: "self" | "coordinator";
     userAuthorizedExtraRound?: string;
   },
 ): {
@@ -1238,6 +1269,7 @@ export function recordReviewVerdict(
     summary: input.summary,
     ...(input.findings?.length ? { findings: input.findings } : {}),
     sidecar: sidecarName,
+    ...(input.source ? { source: input.source } : {}),
     updatedAt: now,
   };
   if (existingIdx >= 0) {
@@ -1260,6 +1292,8 @@ export function recordReviewVerdict(
     node.round = input.round;
     node.verdict = input.verdict;
     node.summary = input.summary;
+    node.submittedAt = now;
+    node.reminded = false;
     node.status =
       input.verdict === "APPROVE"
         ? "approved"
@@ -1327,6 +1361,103 @@ function findLatestCiLog(taskDir: string): string | undefined {
   return bestName;
 }
 
+/** Round of the next delivery: a delivery after code review N starts round N + 1. */
+export function nextDeliveryRound(record: TaskRecord): number {
+  const hadPriorDelivery = Boolean(
+    record.delivery || (record.deliveries && record.deliveries.length > 0),
+  );
+  return hadPriorDelivery ? Math.max(1, record.codeReviewRound + 1) : 1;
+}
+
+/** Round a new review belongs to, derived from deliveries or plan submissions. */
+export function nextReviewRound(
+  record: TaskRecord,
+  stage: "plan" | "code",
+): number {
+  if (stage === "plan") return Math.max(1, record.planSubmissions ?? 0);
+  const rounds = (record.deliveries ?? []).map((d) => d.round);
+  return Math.max(1, ...rounds);
+}
+
+export function recordPlanSubmission(
+  recordPath: string,
+  input: { agentId?: string; planFile: string; summary: string },
+): TaskRecord {
+  const record = loadTask(recordPath);
+  const taskDir = path.dirname(path.resolve(recordPath));
+  const file = path.resolve(taskDir, input.planFile.trim());
+  if (path.dirname(file) !== taskDir) {
+    throw new Error(
+      "The plan file must be directly in the task evidence directory.",
+    );
+  }
+  const st = existsSync(file) ? lstatSync(file) : null;
+  if (!st?.isFile() || st.size === 0) {
+    throw new Error(
+      `Plan file ${path.basename(file)} is missing or empty; write it first.`,
+    );
+  }
+  const now = new Date().toISOString();
+  const n = (record.planSubmissions ?? 0) + 1;
+  record.planSubmissions = n;
+  record.planVersion = `v${n}`;
+  const node = input.agentId
+    ? record.nodes.find((x) => x.agentId === input.agentId)
+    : undefined;
+  if (node) {
+    node.status = "completed";
+    node.summary = input.summary.trim();
+    node.submittedAt = now;
+    node.reminded = false;
+    node.updatedAt = now;
+  }
+  return saveTask(recordPath, record);
+}
+
+/** turn.before: remember when this agent's turn started. */
+export function markTurnStarted(recordPath: string, agentId: string): void {
+  const record = loadTask(recordPath);
+  const node = record.nodes.find((n) => n.agentId === agentId);
+  if (!node) return;
+  node.turnStartedAt = new Date().toISOString();
+  saveTask(recordPath, record);
+}
+
+/**
+ * turn.after: did this turn end with the role's submit tool? Returns "remind"
+ * once, then "missing" (node flagged in the graph) so reminders never loop.
+ */
+export function checkTurnHandoff(
+  recordPath: string,
+  agentId: string,
+): "ok" | "remind" | "missing" {
+  const record = loadTask(recordPath);
+  const node = record.nodes.find((n) => n.agentId === agentId);
+  if (
+    !node ||
+    !["developer", "expert", "plan-reviewer", "code-reviewer"].includes(
+      node.role,
+    )
+  ) {
+    return "ok";
+  }
+  if (node.submittedAt && node.submittedAt >= (node.turnStartedAt ?? "")) {
+    return "ok";
+  }
+  const now = new Date().toISOString();
+  if (!node.reminded) {
+    node.reminded = true;
+    saveTask(recordPath, record);
+    return "remind";
+  }
+  node.reminded = false;
+  node.status = "blocked";
+  node.summary = "Turn ended without the required submit tool call";
+  node.updatedAt = now;
+  saveTask(recordPath, record);
+  return "missing";
+}
+
 export function recordCandidateDelivery(
   recordPath: string,
   input: {
@@ -1344,12 +1475,7 @@ export function recordCandidateDelivery(
   const now = new Date().toISOString();
   const taskDir = path.dirname(path.resolve(recordPath));
 
-  const hadPriorDelivery = Boolean(
-    record.delivery || (record.deliveries && record.deliveries.length > 0),
-  );
-  const deliveryRound = hadPriorDelivery
-    ? Math.max(1, record.codeReviewRound + 1)
-    : 1;
+  const deliveryRound = nextDeliveryRound(record);
 
   // A readable delivery label, not a content hash.
   const candidate = input.candidate?.trim() || `delivery-r${deliveryRound}`;
@@ -1418,6 +1544,8 @@ export function recordCandidateDelivery(
     if (devNode) {
       devNode.status = "completed";
       devNode.summary = input.summary.trim();
+      devNode.submittedAt = now;
+      devNode.reminded = false;
       devNode.updatedAt = now;
     }
   } else {

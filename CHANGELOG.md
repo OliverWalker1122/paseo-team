@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- Each team task now runs in a new coordinator session that inherits the launching chat's model, so one chat can start several tasks. The chat's graph shows each task as a subtree.
+- Members hand off through their own submit tools (`paseo_team_submit_delivery`, `paseo_team_submit_plan`, `paseo_team_submit_review`), which validate the input; a turn that ends without a submission gets one reminder, then the node is marked blocked. The coordinator's record tools remain as a fallback.
+- A blocked quality gate lists each missing item, including dispatched reviewers that never submitted.
+- One Developer writes at a time; parallel Developers are no longer suggested.
 - Quality gate no longer fingerprints the workspace. It checks that the latest CI run passed after the previous rework round and that the latest review round approved, so user edits and commits no longer block it.
 - The two-round review limit is soft: verdicts are always recorded, and the task is flagged for a user decision instead of rejecting the record. Authorizing an extra round now actually allows it.
 - Code review is no longer forced by diff size or architecture-impact wording; the coordinator decides, and delivery reports diff size as advice.
@@ -13,6 +17,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Removed
 
+- `paseo_team_register_agent`; the plugin registers member sessions itself.
 - Workspace content fingerprints, review anti-spoofing sidecar checks, `substantialChange` and `rawOutput` review inputs.
 
 ## [6.0.0] - 2026-11-25

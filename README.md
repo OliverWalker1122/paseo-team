@@ -6,7 +6,7 @@ English | [简体中文](./README.zh-CN.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Paseo](https://img.shields.io/badge/paseo-%3E%3D0.17.3-informational)](https://paseo.sh)
 
-A [Paseo](https://paseo.sh) plugin that turns one chat into a small engineering team. A coordinator scopes the work and makes the calls, a developer writes the code, and two code reviewers check it from opposing angles before a quality gate signs off.
+A [Paseo](https://paseo.sh) plugin that turns one chat into a small engineering team. Each task gets its own coordinator session that scopes the work and makes the calls, a developer writes the code, and two code reviewers check it from opposing angles before a quality gate signs off.
 
 ## Why
 
@@ -14,13 +14,14 @@ When one agent writes code and then judges its own work, it tends to approve its
 
 ## Features
 
-- **Separated roles, flexible dispatch.** The Coordinator scopes the task and dispatches one or more Developers as needed. Reviewers do not edit product code, while remaining free to run tests or reproduction checks to verify edge cases.
+- **Separated roles.** A new coordinator session per task scopes the work and dispatches one Developer at a time. Reviewers do not edit product code, while remaining free to run tests or reproduction checks to verify edge cases.
+- **Checked handoffs.** Every member hands off through its own submit tool (delivery, plan or review). The tool rejects malformed input or a delivery without a passing check, and the plugin reminds a member once if its turn ends without submitting.
 - **Cross review.** Two reviewers examine each change independently from opposing angles (requirements and real edge cases vs. architecture and simpler alternatives). Neither sees the other's verdict.
 - **Two-round limit.** If review still fails after two rounds, the team stops and asks you instead of patching endlessly.
-- **Quality gate.** A task completes only when five checks pass against the code currently in your workspace (see [Quality gate](#quality-gate)).
+- **Quality gate.** A task completes only when four evidence checks pass, and a blocked gate lists exactly what is missing and from whom (see [Quality gate](#quality-gate)).
 - **Your workspace, your commits.** Agents work in the Paseo workspace you opened: a project folder or a Paseo-managed worktree. The plugin never creates hidden worktrees and never commits or merges, so every edit shows up in Paseo's Changes panel and you decide when to commit.
 - **Pick models per role.** Choose provider, model and reasoning effort for each role, or leave it on Auto. Auto gives the reviewers a different provider than the Developer.
-- **Live graph per chat.** Each chat has its own graph of agent sessions. History keeps every task, including each review round and its findings.
+- **Live graph per chat.** A chat can start several team tasks; its graph shows each one as a subtree under that chat. History keeps every task, including each review round and its findings.
 - **English and Chinese.** The UI follows the Paseo app language. Agent prompts follow the language of your task goal.
 
 ## Requirements
@@ -61,11 +62,11 @@ After editing a local clone, run `paseo plugin reload paseo-team`.
 
 ### Commands
 
-| Command                   | What it does                                     |
-| ------------------------- | ------------------------------------------------ |
-| `/paseo-team <task goal>` | Starts a team task with this chat as coordinator |
-| `/paseo-team setup`       | Opens model and preset setup                     |
-| `/paseo-team status`      | Opens this chat's team graph                     |
+| Command                   | What it does                                    |
+| ------------------------- | ----------------------------------------------- |
+| `/paseo-team <task goal>` | Starts a team task in a new coordinator session |
+| `/paseo-team setup`       | Opens model and preset setup                    |
+| `/paseo-team status`      | Opens this chat's team graph                    |
 
 ### Phrases you can add to the goal
 
@@ -86,7 +87,7 @@ Without `with review`, the coordinator decides whether code review is needed; it
 
 ```mermaid
 flowchart LR
-  C["Coordinator (this chat)"] --> E["Expert plan (complex tasks only)"]
+  C["Coordinator (new session per task)"] --> E["Expert plan (complex tasks only)"]
   E --> P["Plan review (optional)"]
   C --> D["Developer"]
   P --> D
@@ -100,7 +101,7 @@ flowchart LR
 | --------------------- | --------------- | ------------------------------------------------------------------------------------ |
 | Coordinator           | No              | Sets scope and acceptance criteria, dispatches agents, rules on findings, signs off  |
 | Expert (optional)     | Task notes only | Writes the design and root-cause analysis for complex work                           |
-| Developer(s)          | Yes             | Implements changes (single or parallel, as coordinated) and runs the full test suite |
+| Developer             | Yes             | Implements changes, runs the full test suite and submits the delivery                |
 | Code Reviewer #1 / #2 | No              | Review from opposing angles; can run tests or reproduction checks to verify findings |
 
 ### Quality gate
@@ -112,7 +113,7 @@ flowchart LR
 | Plan review       | Every plan reviewer in the latest round approved, or plan review was not needed     |
 | Code review       | Every reviewer in the latest round approved, or code review was not needed          |
 
-The gate checks recorded evidence only; it never hashes the workspace, so your own edits or commits do not block it. When a review fails its second round, the task is flagged and the coordinator asks you to decide; **Allow one more round** in the graph grants one more.
+Reviewers that were dispatched but never submitted also block the gate. The gate checks recorded evidence only; it never hashes the workspace, so your own edits or commits do not block it. When a review fails its second round, the task is flagged and the coordinator asks you to decide; **Allow one more round** in the graph grants one more.
 
 ## Configuration
 

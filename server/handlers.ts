@@ -34,10 +34,10 @@ import {
 import {
   assignReviewerPerspective,
   buildCoordinatorSystemPrompt,
-  getSafetyRulesText,
   reviewerPerspectiveLabel,
 } from "./prompts.ts";
 import {
+  ciProblem,
   computeWorkspaceChangeStats,
   inspectQualityGate,
 } from "./quality-gate.ts";
@@ -47,15 +47,18 @@ import {
   findTaskByAgentId,
   initTask,
   listAllRecentTasks,
+  listTasksByLauncher,
   listTasksForProject,
   loadTask,
   markTaskCompleted,
   type NodeVisualStatus,
+  nextDeliveryRound,
+  nextReviewRound,
   readReviewRounds,
   type PipelineStageId,
   recordCandidateDelivery,
+  recordPlanSubmission,
   recordReviewVerdict,
-  registerTaskAgent,
   saveTask,
   type TaskRecord,
 } from "./task-store.ts";
@@ -1300,6 +1303,19 @@ export async function buildConversationGraph(
     cur = liveMap.get(cur)?.parentAgentId ?? null;
   }
 
+  const launched = listTasksByLauncher(viewerAgentId);
+  if (launched.length > 0) {
+    return {
+      mode: "launcher",
+      viewerAgentId,
+      rootAgentId,
+      task: null,
+      tasks: launched.map((item) =>
+        toPipelineSnapshot(item.recordPath, item.record, liveMap, lang),
+      ),
+    };
+  }
+
   const candidateIds = [
     ...collectSubtreeIds(viewerAgentId, liveMap),
     ...collectSubtreeIds(rootAgentId, liveMap),
@@ -1566,7 +1582,7 @@ export async function startTeamTask(
     requireReview: input.requireReview ?? parsed.requireReview,
     requirePlanReview: parsed.requirePlanReview,
     skipReviewReason: parsed.skipReviewReason,
-    coordinatorAgentId: input.agentId,
+    ...(input.agentId ? { launcherAgentId: input.agentId } : {}),
   });
 
   const devLaunch = resolveRoleLaunchSpec({
@@ -1619,73 +1635,65 @@ export async function startTeamTask(
     );
   });
 
+  // Task-specific facts only; the protocol and safety rules arrive through the
+  // coordinator's system prompt (agent.open.before), so nothing is sent twice.
   const kickoffPrompt = zh
     ? [
         `[Team 任务启动] task_id=\`${created.record.taskId}\``,
         `任务目标：${parsed.goal}`,
-        `任务记录文件：\`${created.recordPath}\``,
         `生效预设：\`${eff.teamName}\`（模式：\`${eff.preset.complexMode}\`）`,
         "",
-        "### 直连模型派发参数",
+        "### 成员派发参数（create_agent 直接使用）",
         ...rosterLines,
         "",
-        "### 执行步骤",
-        "1. 明确目标、范围与验收标准（保存到任务证据目录）。",
-        `2. 通过 Paseo \`create_agent\` 派发成员时直接使用上方 \`provider\` 与 \`settings\`（不传其他 workspaceId，共用当前工作区），附带 \`labels: { "task": "${created.record.taskId}", "role": "developer|plan-reviewer|code-reviewer|expert" }\` 及下方安全红线原文；返回后**立即调用 \`paseo_team_register_agent\`** 更新可视化状态流图。`,
-        "3. 等待完成通知（禁止轮询），收到回报后调用 `paseo_team_record_delivery` / `paseo_team_record_review`，全部通过后调用 `paseo_team_complete` 完成验收。",
-        "",
-        getSafetyRulesText("zh"),
+        "按系统提示中的协调协议执行。",
       ].join("\n")
     : [
         `[Team Kickoff] task_id=\`${created.record.taskId}\``,
         `Goal: ${parsed.goal}`,
-        `Task Record: \`${created.recordPath}\``,
         `Active Preset: \`${eff.teamName}\` (mode: \`${eff.preset.complexMode}\`)`,
         "",
-        "### Direct Role Model Routing",
+        "### Member Routing (use as-is in create_agent)",
         ...rosterLines,
         "",
-        "### Execution Steps",
-        "1. Define scope and acceptance criteria in the task evidence directory.",
-        `2. Dispatch subagents via Paseo \`create_agent\` using the exact \`provider\` and \`settings\` above (stay in this workspace), passing \`labels: { "task": "${created.record.taskId}", "role": "developer|plan-reviewer|code-reviewer|expert" }\` and the verbatim security rules below; **immediately call \`paseo_team_register_agent\`** after each \`create_agent\`.`,
-        "3. Wait for completion notifications (never poll), record delivery/reviews via `paseo_team_record_delivery` / `paseo_team_record_review`, and call `paseo_team_complete` once ready.",
-        "",
-        getSafetyRulesText("en"),
+        "Follow the coordinator protocol in your system prompt.",
       ].join("\n");
 
-  let coordinatorAgentId = input.agentId;
+  if (!input.workspaceId) {
+    throw new Error("A workspace is required to start a team task.");
+  }
 
-  if (coordinatorAgentId) {
-    const handle = paseo.agents.ref(coordinatorAgentId);
-    try {
-      await handle.setMetadata({
-        "paseo-team.task": {
-          taskId: created.record.taskId,
-          recordPath: created.recordPath,
-          role: "coordinator",
-        },
-      });
-      const refreshed = await handle.refresh();
-      if (refreshed?.agent.status === "idle") {
-        await handle.reload({
-          requestId: `paseo-team-init-${created.record.taskId}`,
-        });
-      }
-      await handle.send(kickoffPrompt);
-    } catch (err) {
-      throw new Error(
-        `Failed to send kickoff to coordinator: ${err instanceof Error ? err.message : String(err)}`,
-      );
+  // Each task gets its own new coordinator session, so one chat can start
+  // several tasks; the coordinator inherits the launching chat's model.
+  let coordSpec: RoleModelSpec = { model: AUTO_MODEL };
+  if (input.agentId) {
+    const launcher = (
+      await paseo.agents
+        .ref(input.agentId)
+        .refresh()
+        .catch(() => null)
+    )?.agent as Record<string, unknown> | undefined;
+    if (typeof launcher?.provider === "string") {
+      coordSpec = {
+        model:
+          typeof launcher.model === "string" && launcher.model
+            ? `${launcher.provider}/${launcher.model}`
+            : launcher.provider,
+        ...(typeof launcher.thinkingOptionId === "string"
+          ? { thinking: launcher.thinkingOptionId }
+          : {}),
+      };
     }
-  } else if (input.workspaceId) {
-    const ws = paseo.workspaces.ref(input.workspaceId);
-    const coordLaunch = resolveRoleLaunchSpec({
-      role: "coordinator",
-      spec: { model: AUTO_MODEL },
-      catalog: providers,
-      readyProviders,
-    });
-    const createdAgent = await ws.agents.create({
+  }
+  const coordLaunch = resolveRoleLaunchSpec({
+    role: "coordinator",
+    spec: coordSpec,
+    catalog: providers,
+    readyProviders,
+  });
+  const createdAgent = await paseo.workspaces
+    .ref(input.workspaceId)
+    .agents.create({
       config: {
         provider: coordLaunch.providerArg,
         ...(coordLaunch.modeId ? { modeId: coordLaunch.modeId } : {}),
@@ -1704,19 +1712,18 @@ export async function startTeamTask(
       },
       prompt: kickoffPrompt,
     });
-    coordinatorAgentId = createdAgent.id;
-    const updated = loadTask(created.recordPath);
-    updated.coordinatorAgentId = coordinatorAgentId;
-    const coordNode = updated.nodes.find((n) => n.nodeId === "coordinator");
-    if (coordNode) coordNode.agentId = coordinatorAgentId;
-    saveTask(created.recordPath, updated);
-  }
+  const coordinatorAgentId = createdAgent.id;
+  const updated = loadTask(created.recordPath);
+  updated.coordinatorAgentId = coordinatorAgentId;
+  const coordNode = updated.nodes.find((n) => n.nodeId === "coordinator");
+  if (coordNode) coordNode.agentId = coordinatorAgentId;
+  saveTask(created.recordPath, updated);
 
   notifyTaskChanges();
   return {
     taskId: created.record.taskId,
     recordPath: created.recordPath,
-    ...(coordinatorAgentId ? { coordinatorAgentId } : {}),
+    coordinatorAgentId,
     teamName: eff.teamName,
     message: zh ? "已启动团队协作流水线。" : "Team pipeline started.",
   };
@@ -1747,49 +1754,11 @@ export function createCoordinatorTools(
     },
   });
 
-  const registerAgentTool = defineAgentTool({
-    name: "paseo_team_register_agent",
-    title: "Register Team Subagent Node",
-    description:
-      "Call immediately after creating expert, plan-reviewer, developer, or code-reviewer to update the live visual graph and capture read-only snapshots.",
-    input: z.object({
-      role: z.enum(["expert", "plan-reviewer", "developer", "code-reviewer"]),
-      slotIndex: z.number().int().min(0).optional(),
-      agentId: z.string().min(1),
-      serverId: z.string().optional(),
-      profile: z.string().min(1),
-      provider: z.string().optional(),
-      model: z.string().optional(),
-      thinkingOptionId: z.string().optional(),
-      briefSummary: z.string().min(1),
-      round: z.number().int().min(1).optional(),
-    }),
-    async execute(args) {
-      const updated = registerTaskAgent(recordPath, {
-        role: args.role,
-        slotIndex: args.slotIndex,
-        agentId: args.agentId,
-        serverId: args.serverId,
-        profile: args.profile,
-        provider: args.provider,
-        model: args.model,
-        thinkingOptionId: args.thinkingOptionId,
-        briefSummary: args.briefSummary,
-        round: args.round,
-      });
-      notifyTaskChanges();
-      return {
-        text: `Registered ${args.role} node (${args.agentId}).`,
-        structuredContent: { taskId: updated.taskId, agentId: args.agentId },
-      };
-    },
-  });
-
   const recordDeliveryTool = defineAgentTool({
     name: "paseo_team_record_delivery",
     title: "Record Developer Delivery",
     description:
-      "Record Developer's change summary, CI log filename (e.g. ci-1.log), and architecture impact.",
+      "Fallback: record a delivery on the Developer's behalf (or a user-quoted CI waiver) when it did not call paseo_team_submit_delivery itself.",
     input: z.object({
       agentId: z.string().min(1).optional(),
       summary: z.string().min(1),
@@ -1800,23 +1769,7 @@ export function createCoordinatorTools(
       codeReviewReason: z.string().optional(),
     }),
     async execute(args) {
-      const updated = recordCandidateDelivery(recordPath, args);
-      const change = computeWorkspaceChangeStats(updated.projectRoot);
-      const advice =
-        updated.codeReview !== "required" &&
-        (change.files > 5 || change.lines > 200)
-          ? ` Diff is ${change.files} files / ${change.lines} lines; consider code review.`
-          : "";
-      notifyTaskChanges();
-      return {
-        text: `Recorded delivery (codeReview=${updated.codeReview}).${advice}`,
-        structuredContent: {
-          delivery: updated.candidate,
-          change,
-          codeReview: updated.codeReview,
-          codeReviewReason: updated.codeReviewReason,
-        },
-      };
+      return deliveryResult(recordCandidateDelivery(recordPath, args));
     },
   });
 
@@ -1824,7 +1777,7 @@ export function createCoordinatorTools(
     name: "paseo_team_record_review",
     title: "Record Review Verdict & Circuit Breaker Check",
     description:
-      "Record a plan or code review verdict. The verdict is always saved; past the round limit (default 2) the task is flagged for a user decision.",
+      "Fallback: record a reviewer's verdict on its behalf when it did not call paseo_team_submit_review. The round is derived automatically; past the limit (default 2) the task is flagged for a user decision.",
     input: z.object({
       stage: z.enum(["plan", "code"]),
       agentId: z.string().min(1),
@@ -1835,30 +1788,17 @@ export function createCoordinatorTools(
         .describe(
           "Plan version tag (for plan stage only; ignored for code stage).",
         ),
-      round: z.number().int().min(1),
-      verdict: z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]),
+      round: z.number().int().min(1).optional(),
+      verdict: verdictSchema,
       summary: z.string().min(1),
-      findings: z
-        .array(z.string().min(1))
-        .max(30)
-        .optional()
-        .describe(
-          'Individual issues, one per item, prefixed "blocking:" or "advice:".',
-        ),
+      findings: findingsSchema,
       userAuthorizedExtraRound: z.string().optional(),
     }),
     async execute(args) {
-      const res = recordReviewVerdict(recordPath, args);
-      notifyTaskChanges();
-      return {
-        text: res.message,
-        structuredContent: {
-          status: res.status,
-          round: res.round,
-          maxRounds: res.maxRounds,
-          sidecar: res.sidecar,
-        },
-      };
+      return submitReview(recordPath, {
+        ...args,
+        source: "coordinator",
+      });
     },
   });
 
@@ -1877,7 +1817,12 @@ export function createCoordinatorTools(
       }
       notifyTaskChanges();
       return {
-        text: JSON.stringify(rep, null, 2),
+        text:
+          rep.status === "READY"
+            ? args.inspectOnly
+              ? "Quality gate READY."
+              : "Quality gate READY; task completed."
+            : `Quality gate BLOCKED:\n${rep.missing.map((m) => `- ${m}`).join("\n")}`,
         structuredContent: rep,
         isError: rep.status !== "READY",
       };
@@ -1886,15 +1831,169 @@ export function createCoordinatorTools(
 
   return [
     summaryTool,
-    registerAgentTool,
+    createSubmitPlanTool(recordPath),
     recordDeliveryTool,
     recordReviewTool,
     completeTool,
   ];
 }
 
+const verdictSchema = z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]);
+const findingsSchema = z
+  .array(z.string().min(1))
+  .max(30)
+  .optional()
+  .describe('One issue per item, prefixed "blocking:" or "advice:".');
+
+/** Handoff format check for a review: finding prefixes must match the verdict. */
+export function reviewInputProblem(
+  verdict: z.infer<typeof verdictSchema>,
+  findings: string[] = [],
+): string | null {
+  const bad = findings.find(
+    (f) => !/^(?:blocking|advice)\s*[:：]\s*\S/i.test(f.trim()),
+  );
+  if (bad) {
+    return `Each finding must start with "blocking:" or "advice:" (got "${bad.trim().slice(0, 60)}").`;
+  }
+  const blocking = findings.filter((f) => /^blocking/i.test(f.trim())).length;
+  if (verdict === "APPROVE" && blocking > 0) {
+    return "APPROVE cannot carry blocking findings: use REQUEST_CHANGES, or downgrade them to advice.";
+  }
+  if (verdict !== "APPROVE" && blocking === 0) {
+    return `${verdict} needs at least one "blocking:" finding with file:line and the concrete failure path.`;
+  }
+  return null;
+}
+
+function submitReview(
+  recordPath: string,
+  input: {
+    stage: "plan" | "code";
+    agentId: string;
+    verdict: z.infer<typeof verdictSchema>;
+    summary: string;
+    findings?: string[];
+    round?: number;
+    profile?: string;
+    targetVersionOrCommit?: string;
+    userAuthorizedExtraRound?: string;
+    source: "self" | "coordinator";
+  },
+) {
+  const problem = reviewInputProblem(input.verdict, input.findings);
+  if (problem) return { text: problem, isError: true };
+  const record = loadTask(recordPath);
+  if (
+    input.stage === "code" &&
+    !record.delivery &&
+    !record.deliveries?.length
+  ) {
+    return {
+      text: "No delivery is recorded yet, so there is nothing to review.",
+      isError: true,
+    };
+  }
+  const res = recordReviewVerdict(recordPath, {
+    ...input,
+    round: input.round ?? nextReviewRound(record, input.stage),
+  });
+  notifyTaskChanges();
+  return {
+    text: res.message,
+    structuredContent: {
+      status: res.status,
+      round: res.round,
+      maxRounds: res.maxRounds,
+    },
+  };
+}
+
+function deliveryResult(updated: TaskRecord) {
+  const change = computeWorkspaceChangeStats(updated.projectRoot);
+  const advice =
+    updated.codeReview !== "required" &&
+    (change.files > 5 || change.lines > 200)
+      ? ` Diff is ${change.files} files / ${change.lines} lines; consider code review.`
+      : "";
+  notifyTaskChanges();
+  return {
+    text: `Recorded delivery (codeReview=${updated.codeReview}).${advice}`,
+    structuredContent: {
+      delivery: updated.candidate,
+      change,
+      codeReview: updated.codeReview,
+      codeReviewReason: updated.codeReviewReason,
+    },
+  };
+}
+
+function createSubmitPlanTool(recordPath: string, agentId?: string) {
+  return defineAgentTool({
+    name: "paseo_team_submit_plan",
+    title: "Submit Plan",
+    description:
+      "Hand off a finished plan or root-cause analysis. The file must already exist in the task evidence directory; each submission is the next plan version reviewers judge.",
+    input: z.object({
+      planFile: z
+        .string()
+        .min(1)
+        .describe("File name in the task evidence directory, e.g. plan.md"),
+      summary: z.string().min(1),
+    }),
+    async execute(args) {
+      try {
+        const updated = recordPlanSubmission(recordPath, { ...args, agentId });
+        notifyTaskChanges();
+        return { text: `Recorded plan ${updated.planVersion}.` };
+      } catch (err) {
+        return {
+          text: err instanceof Error ? err.message : String(err),
+          isError: true,
+        };
+      }
+    },
+  });
+}
+
+export function createExpertTools(
+  recordPath: string,
+  agentId: string,
+): AgentToolDefinition[] {
+  return [createSubmitPlanTool(recordPath, agentId)];
+}
+
+export function createReviewerTools(
+  recordPath: string,
+  agentId: string,
+  stage: "plan" | "code",
+): AgentToolDefinition[] {
+  return [
+    defineAgentTool({
+      name: "paseo_team_submit_review",
+      title: "Submit Review Verdict",
+      description:
+        'Hand off your verdict when the review is finished. REQUEST_CHANGES/BLOCKED need at least one "blocking:" finding; APPROVE allows only "advice:" findings. The round is derived automatically.',
+      input: z.object({
+        verdict: verdictSchema,
+        summary: z.string().min(1),
+        findings: findingsSchema,
+      }),
+      async execute(args) {
+        return submitReview(recordPath, {
+          ...args,
+          stage,
+          agentId,
+          source: "self",
+        });
+      },
+    }),
+  ];
+}
+
 export function createDeveloperTools(
   recordPath: string,
+  agentId: string,
 ): AgentToolDefinition[] {
   const taskDir = path.dirname(path.resolve(recordPath));
 
@@ -1943,7 +2042,39 @@ export function createDeveloperTools(
     },
   });
 
-  return [runCheckTool];
+  const submitDeliveryTool = defineAgentTool({
+    name: "paseo_team_submit_delivery",
+    title: "Submit Delivery",
+    description:
+      "Hand off finished work. Requires a passing paseo_team_run_check that ran after the previous round's delivery.",
+    input: z.object({
+      summary: z.string().min(1),
+      architectureImpact: z
+        .string()
+        .min(1)
+        .describe('Architecture/performance impact, or "None".'),
+      ciLog: z.string().optional(),
+    }),
+    async execute(args) {
+      const record = loadTask(recordPath);
+      const problem = ciProblem(
+        taskDir,
+        record as unknown as Record<string, unknown>,
+        nextDeliveryRound(record),
+      );
+      if (problem) {
+        return {
+          text: `${problem} Run the full project checks with paseo_team_run_check, then submit again.`,
+          isError: true,
+        };
+      }
+      return deliveryResult(
+        recordCandidateDelivery(recordPath, { ...args, agentId }),
+      );
+    },
+  });
+
+  return [runCheckTool, submitDeliveryTool];
 }
 
 export { buildCoordinatorSystemPrompt };

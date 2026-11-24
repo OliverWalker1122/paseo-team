@@ -281,7 +281,7 @@ export const UI_TEXT = {
     errCannotDeleteDefault: "Pick another default before deleting this preset.",
     errNoWorkspaceCwd: "Can't detect the current workspace directory.",
     errEnterTaskGoal: "Enter a task goal.",
-    toastTaskStarted: "Team started in this chat",
+    toastTaskStarted: "Team task started in a new coordinator session",
 
     // History
     filterAll: "All",
@@ -342,7 +342,10 @@ export const UI_TEXT = {
     startPlaceholder: (team: string) =>
       `Describe a task for the team (preset: ${team}; add "with review" to force code review)`,
     startingBtn: "Starting…",
-    startBtn: "Start in this chat",
+    startBtn: "Start task",
+    startAnotherTitle: "Start another task from this chat",
+    launcherRoot: (n: number) =>
+      `This chat · ${n} team task${n === 1 ? "" : "s"}`,
     blueprintPreviewTitle: (team: string) => `How preset "${team}" runs`,
     blueprintCoord: "Coordinator",
     blueprintThisChat: "This chat",
@@ -451,7 +454,7 @@ export const UI_TEXT = {
     errCannotDeleteDefault: "请先把其他预设设为默认，再删除这个。",
     errNoWorkspaceCwd: "无法识别当前工作区目录。",
     errEnterTaskGoal: "请输入任务目标。",
-    toastTaskStarted: "已在当前对话启动团队协作",
+    toastTaskStarted: "已在新的主控会话中启动团队任务",
 
     // History
     filterAll: "全部",
@@ -511,7 +514,9 @@ export const UI_TEXT = {
     startPlaceholder: (team: string) =>
       `描述要交给团队的任务（预设：${team}；写“需要审查”可强制代码审查）`,
     startingBtn: "启动中…",
-    startBtn: "在此对话启动",
+    startBtn: "启动任务",
+    startAnotherTitle: "从本对话再开一个任务",
+    launcherRoot: (n: number) => `本对话 · ${n} 个团队任务`,
     blueprintPreviewTitle: (team: string) => `预设「${team}」的执行流程`,
     blueprintCoord: "主控协调",
     blueprintThisChat: "当前对话",

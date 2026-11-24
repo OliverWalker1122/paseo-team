@@ -186,10 +186,12 @@ export const PipelineTaskSnapshotSchema = z.object({
 });
 
 export const ConversationGraphPayloadSchema = z.object({
-  mode: z.enum(["team_task", "native_subagents", "empty"]),
+  mode: z.enum(["team_task", "launcher", "native_subagents", "empty"]),
   viewerAgentId: z.string().nullable(),
   rootAgentId: z.string().nullable(),
   task: PipelineTaskSnapshotSchema.nullable(),
+  /** mode "launcher": every task subtree this chat started, newest first. */
+  tasks: z.array(PipelineTaskSnapshotSchema).optional(),
 });
 
 export type RoleModelSpecDto = z.infer<typeof RoleModelSpecSchema>;

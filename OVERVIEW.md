@@ -4,7 +4,7 @@ Role-separated multi-agent orchestration, direct model routing (zero external Ag
 
 - **Zero-Friction Direct Model Setup**: Pick `Developer` and `Code Reviewer #1 / #2` models and reasoning effort directly from connected Paseo providers in a compact 3-row table, with no need to pre-create Paseo Agent Profiles.
 - **Native Paseo Workspace Integration**: Subagents work directly inside your chosen Paseo Workspace (project directory or Paseo-managed worktree), keeping live file diffs and commits inside Paseo's native UI without hidden plugin worktrees.
-- **1 Conversation = 1 Live Left-to-Right Graph**: Visualize Coordinator, single or parallel Developers, two cross-reviewing Code Reviewers, and the Quality Gate (plus native Paseo subagent trees) with one-click session switching.
+- **1 Conversation = 1 Live Left-to-Right Graph**: One chat can start several tasks, each drawn as its own subtree: Coordinator, Developer, two cross-reviewing Code Reviewers, and the Quality Gate (plus native Paseo subagent trees) with one-click session switching.
 - **Evidence-Based Quality Gate**: Credential-isolated CI runs (`SKIP_DOTENV=true`), latest-round review approvals, and a 2-round review limit that hands the decision back to you.
 - **Follows the Paseo App Language**: Chinese when Paseo is set to Chinese, English otherwise; subagent prompts match your task language.
 

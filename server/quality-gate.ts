@@ -10,6 +10,8 @@ export interface QualityGateReport {
     planReviewSatisfied: boolean;
     codeReviewSatisfied: boolean;
   };
+  /** Human-readable reasons for every failed check, naming the agent to chase. */
+  missing: string[];
 }
 
 function isSensitiveRelativePath(relPath: string): boolean {
@@ -101,8 +103,10 @@ const filled = (value: unknown): value is string =>
   typeof value === "string" && value.trim() !== "";
 
 // The newest check sidecar (by write time) in the task directory, i.e. the last run.
-function latestCheck(taskDir: string): { passed: boolean; at: number } | null {
-  let best: { passed: boolean; at: number } | null = null;
+function latestCheck(
+  taskDir: string,
+): { name: string; passed: boolean; at: number } | null {
+  let best: { name: string; passed: boolean; at: number } | null = null;
   let names: string[];
   try {
     names = readdirSync(taskDir);
@@ -115,7 +119,11 @@ function latestCheck(taskDir: string): { passed: boolean; at: number } | null {
     try {
       const st = lstatSync(file);
       if (!st.isFile() || (best && st.mtimeMs < best.at)) continue;
-      best = { passed: readJson(file)?.status === "PASS", at: st.mtimeMs };
+      best = {
+        name: name.slice(0, -".json".length),
+        passed: readJson(file)?.status === "PASS",
+        at: st.mtimeMs,
+      };
     } catch {
       // Ignore unreadable sidecar
     }
@@ -125,13 +133,69 @@ function latestCheck(taskDir: string): { passed: boolean; at: number } | null {
 
 const asList = (value: unknown): Record<string, unknown>[] =>
   Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
+const roundOf = (r: Record<string, unknown>) => Number(r?.round) || 1;
 
-// Reviewers of the newest round must all approve; older rounds are superseded.
-function latestRoundApproved(reviewers: Record<string, unknown>[]): boolean {
-  const roundOf = (r: Record<string, unknown>) => Number(r?.round) || 0;
-  const latest = Math.max(0, ...reviewers.map(roundOf));
-  const current = reviewers.filter((r) => roundOf(r) === latest);
-  return current.length > 0 && current.every((r) => r?.status === "APPROVE");
+/**
+ * Why CI does not count for `round` (default: the latest delivery round), or
+ * null when it does. A rework round needs a check newer than the previous
+ * round's delivery.
+ */
+export function ciProblem(
+  taskDir: string,
+  record: Record<string, unknown> | null,
+  round?: number,
+): string | null {
+  const ci =
+    record?.ci && typeof record.ci === "object"
+      ? (record.ci as Record<string, unknown>)
+      : null;
+  if (filled(ci?.waived)) return null;
+  const deliveries = asList(record?.deliveries);
+  const current = round ?? Math.max(1, ...deliveries.map(roundOf));
+  const previousDeliveryAt = Math.max(
+    0,
+    ...deliveries
+      .filter((d) => roundOf(d) < current)
+      .map((d) => Date.parse(String(d?.deliveredAt)) || 0),
+  );
+  const check = latestCheck(taskDir);
+  if (!check) return "No paseo_team_run_check result in the task directory.";
+  if (!check.passed) return `Latest check ${check.name} did not pass.`;
+  if (check.at <= previousDeliveryAt) {
+    return `Latest check ${check.name} predates the round ${current - 1} delivery; rerun paseo_team_run_check after the rework.`;
+  }
+  return null;
+}
+
+// Reviewers of the newest round must all approve, and every dispatched
+// reviewer must have submitted; older rounds are superseded.
+function reviewProblems(
+  stage: "plan" | "code",
+  reviewers: Record<string, unknown>[],
+  nodes: Record<string, unknown>[],
+): string[] {
+  const role = stage === "plan" ? "plan-reviewer" : "code-reviewer";
+  const submitted = new Set(reviewers.map((r) => r?.agentId));
+  const problems = nodes
+    .filter(
+      (n) => n?.role === role && filled(n.agentId) && !submitted.has(n.agentId),
+    )
+    .map(
+      (n) =>
+        `${String(n.label ?? role)} (${String(n.agentId)}) has not submitted a ${stage} verdict via paseo_team_submit_review.`,
+    );
+  if (reviewers.length === 0) {
+    return problems.length > 0 ? problems : [`No ${stage} review submitted.`];
+  }
+  const latest = Math.max(...reviewers.map(roundOf));
+  for (const r of reviewers) {
+    if (roundOf(r) === latest && r?.status !== "APPROVE") {
+      problems.push(
+        `${stage} reviewer ${String(r?.agentId)} round ${latest}: ${String(r?.status)}.`,
+      );
+    }
+  }
+  return problems;
 }
 
 // Evidence-only gate: no workspace hashing, so user edits or commits never invalidate it.
@@ -141,52 +205,43 @@ export function inspectQualityGate(options: {
   const file = path.resolve(options.recordPath);
   const taskDir = path.dirname(file);
   const record = readJson(file);
+  const nodes = asList(record?.nodes);
 
-  const deliveries = asList(record?.deliveries);
   const deliveryRecorded =
     Boolean(record?.delivery && typeof record.delivery === "object") ||
     filled(record?.candidate) ||
-    deliveries.length > 0;
+    asList(record?.deliveries).length > 0;
+  const deliveryProblems = deliveryRecorded
+    ? []
+    : ["No delivery: the Developer must call paseo_team_submit_delivery."];
 
-  // A rework round must be re-verified: the last check has to run after the
-  // previous round's delivery.
-  const roundOf = (d: Record<string, unknown>) => Number(d?.round) || 1;
-  const currentRound = Math.max(1, ...deliveries.map(roundOf));
-  const previousDeliveryAt = Math.max(
-    0,
-    ...deliveries
-      .filter((d) => roundOf(d) < currentRound)
-      .map((d) => Date.parse(String(d?.deliveredAt)) || 0),
-  );
-  const ci =
-    record?.ci && typeof record.ci === "object"
-      ? (record.ci as Record<string, unknown>)
-      : null;
-  const check = latestCheck(taskDir);
-  const ciPassed =
-    filled(ci?.waived) ||
-    Boolean(check?.passed && check.at > previousDeliveryAt);
-
-  const planReviewSatisfied =
-    record?.planReview !== "required" ||
-    latestRoundApproved(asList(record?.planReviewers));
-
-  const codeReviewSatisfied =
+  const ciIssue = ciProblem(taskDir, record);
+  const planProblems =
+    record?.planReview === "required"
+      ? reviewProblems("plan", asList(record?.planReviewers), nodes)
+      : [];
+  const codeProblems =
     record?.codeReview === "required"
-      ? latestRoundApproved(asList(record?.codeReviewers))
-      : record?.codeReview === "waived"
-        ? filled(record?.codeReviewReason)
-        : true;
+      ? reviewProblems("code", asList(record?.codeReviewers), nodes)
+      : record?.codeReview === "waived" && !filled(record?.codeReviewReason)
+        ? ["Code review waived without a reason."]
+        : [];
 
   const checks = {
     deliveryRecorded,
-    ciPassed,
-    planReviewSatisfied,
-    codeReviewSatisfied,
+    ciPassed: !ciIssue,
+    planReviewSatisfied: planProblems.length === 0,
+    codeReviewSatisfied: codeProblems.length === 0,
   };
 
   return {
     status: Object.values(checks).every(Boolean) ? "READY" : "BLOCKED",
     checks,
+    missing: [
+      ...deliveryProblems,
+      ...(ciIssue ? [ciIssue] : []),
+      ...planProblems,
+      ...codeProblems,
+    ],
   };
 }
