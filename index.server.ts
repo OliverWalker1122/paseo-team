@@ -204,6 +204,10 @@ export default function contribute(server: PluginServerContext) {
       const record = loadTask(recordPath);
 
       if (action === "authorize_extra_round") {
+        // Only grant a round when the breaker actually tripped, so repeated clicks don't stack.
+        if (record.circuitBroken) {
+          record.extraRounds = (record.extraRounds ?? 0) + 1;
+        }
         record.circuitBroken = null;
         if (record.lifecycleStatus === "blocked") {
           record.lifecycleStatus = "active";
@@ -238,13 +242,10 @@ export default function contribute(server: PluginServerContext) {
         };
       }
 
-      const rep = inspectQualityGate({
-        recordPath,
-        cwd: record.projectRoot,
-      });
+      const rep = inspectQualityGate({ recordPath });
 
       if (action === "complete_task" && rep.status === "READY") {
-        markTaskCompleted(recordPath, rep.fingerprint);
+        markTaskCompleted(recordPath);
       }
 
       notifyTaskChanges();

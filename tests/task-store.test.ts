@@ -191,6 +191,8 @@ test("builds left-to-right pipeline stages, bilingual snapshots, and enforces 2-
     summary: "Attempt bypass round 3",
   });
   assert.equal(r3Blocked.status, "CIRCUIT_BROKEN");
+  // Soft breaker: the over-limit verdict is still recorded.
+  assert.equal(r3Blocked.record.planReviewers[0].round, 3);
 
   const r3Allowed = recordReviewVerdict(task1.recordPath, {
     stage: "plan",
@@ -275,7 +277,7 @@ test("builds left-to-right pipeline stages, bilingual snapshots, and enforces 2-
   assert.match(brief, /plan-rev-0/);
 });
 
-test("auto-triggers code review on architecture impact", (t) => {
+test("code review is the coordinator's call, not forced by architecture wording", (t) => {
   const { repoDir, stateRoot } = tempGitRepo(t);
   const preset = {
     developer: { model: "auto" },
@@ -299,8 +301,15 @@ test("auto-triggers code review on architecture impact", (t) => {
     summary: "Added reconciliation state table",
     architectureImpact: "Added persistent reconciliation table",
   });
-  assert.equal(delivered.codeReview, "required");
-  assert.equal(delivered.candidate?.length, 40);
+  assert.equal(delivered.codeReview, "not-required");
+  assert.equal(delivered.candidate, "delivery-r1");
+
+  const requested = recordCandidateDelivery(taskB.recordPath, {
+    summary: "Added reconciliation state table",
+    architectureImpact: "Added persistent reconciliation table",
+    requireCodeReview: true,
+  });
+  assert.equal(requested.codeReview, "required");
 });
 
 test("normalizes legacy v1-v5 task.json records without nodes so hooks and UI never crash", (t) => {

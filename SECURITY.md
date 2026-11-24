@@ -20,7 +20,5 @@ You can expect an acknowledgement within 7 days. Once a fix is ready, we will pu
 
 Of particular interest:
 
-- unreviewed file modifications bypassing workspace fingerprint invalidation on the quality gate
-- forged review or CI records being accepted by the quality gate
 - credentials, `.env` contents or command arguments leaking into logs, task records or prompts
 - task record paths escaping the plugin's state directory

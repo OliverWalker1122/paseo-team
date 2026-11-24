@@ -80,7 +80,7 @@ After editing a local clone, run `paseo plugin reload paseo-team`.
 
 Chinese equivalents are recognized too; see the [Chinese README](./README.zh-CN.md).
 
-Without `with review`, code review starts automatically when a change touches more than 5 files, exceeds 200 lines, or affects the architecture.
+Without `with review`, the coordinator decides whether code review is needed; it is told to start one when a change touches more than 5 files, exceeds 200 lines, or affects the architecture.
 
 ## How it works
 
@@ -105,15 +105,14 @@ flowchart LR
 
 ### Quality gate
 
-| Check              | Passes when                                                                              |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| Delivery recorded  | The Developer's change summary is on file                                                |
-| CI passed          | The full test run passed on exactly the code now in the workspace                        |
-| Plan review        | Every plan reviewer approved, or plan review was not needed                              |
-| Code review        | Every required reviewer approved the current code, with a matching review record on file |
-| Within round limit | Review has not hit the two-round limit                                                   |
+| Check             | Passes when                                                                         |
+| ----------------- | ----------------------------------------------------------------------------------- |
+| Delivery recorded | The Developer's change summary is on file                                           |
+| CI passed         | The latest full test run passed, and ran after the previous rework round's delivery |
+| Plan review       | Every plan reviewer in the latest round approved, or plan review was not needed     |
+| Code review       | Every reviewer in the latest round approved, or code review was not needed          |
 
-CI results and review verdicts are bound to a fingerprint of the workspace contents. Edit a file after review and the gate drops back to blocked until CI and review run again.
+The gate checks recorded evidence only; it never hashes the workspace, so your own edits or commits do not block it. When a review fails its second round, the task is flagged and the coordinator asks you to decide; **Allow one more round** in the graph grants one more.
 
 ## Configuration
 

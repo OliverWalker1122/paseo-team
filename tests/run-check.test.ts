@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -156,19 +155,8 @@ test(
   },
 );
 
-test("the result file records commit and workspace state without command arguments", (t) => {
+test("the result file records only the outcome, never command arguments", (t) => {
   const { dir, log } = fixture(t);
-  const git = (...args: string[]) =>
-    spawnSync(
-      "git",
-      ["-c", "user.name=F", "-c", "user.email=f@example.invalid", ...args],
-      {
-        cwd: dir,
-        encoding: "utf8",
-      },
-    );
-  git("init", "-q");
-  git("commit", "-q", "--allow-empty", "-m", "base");
   const result = runCheck(process.execPath, ["-e", "", "secret-like-arg"], {
     log,
     cwd: dir,
@@ -179,8 +167,5 @@ test("the result file records commit and workspace state without command argumen
   const parsed = JSON.parse(saved) as Record<string, unknown>;
   assert.equal(parsed.status, "PASS");
   assert.equal(parsed.processExitCode, 0);
-  assert.equal(parsed.head, git("rev-parse", "HEAD").stdout.trim());
-  assert.equal(parsed.clean, false);
-  assert.equal(typeof parsed.fingerprint, "string");
-  assert.equal((parsed.fingerprint as string).length, 40);
+  assert.deepEqual(Object.keys(parsed).sort(), ["processExitCode", "status"]);
 });

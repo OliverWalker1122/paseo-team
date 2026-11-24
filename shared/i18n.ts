@@ -82,17 +82,15 @@ export const STAGE_LABELS: Record<
 export const GATE_CHECK_LABELS: Record<UiLanguage, Record<string, string>> = {
   en: {
     deliveryRecorded: "Developer delivery recorded",
-    ciPassed: "Full CI passed on current code",
+    ciPassed: "Latest CI run passed",
     planReviewSatisfied: "Plan review satisfied",
-    codeReviewSatisfied: "Code review approvals verified",
-    notCircuitBroken: "Within 2-round breaker limit",
+    codeReviewSatisfied: "Code review approved (latest round)",
   },
   zh: {
     deliveryRecorded: "已登记开发交付摘要",
-    ciPassed: "当前代码完整测试/CI 通过",
+    ciPassed: "最近一次完整测试/CI 通过",
     planReviewSatisfied: "方案审查已通过或无需开启",
-    codeReviewSatisfied: "代码审查批准与防伪侧车齐全",
-    notCircuitBroken: "未处于两轮审查熔断态",
+    codeReviewSatisfied: "代码审查最新一轮已批准",
   },
 };
 

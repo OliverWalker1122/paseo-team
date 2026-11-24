@@ -1,4 +1,5 @@
 import path from "node:path";
+import { existsSync } from "node:fs";
 import type { PaseoApi } from "@getpaseo/client";
 import {
   defineAgentTool,
@@ -36,7 +37,10 @@ import {
   getSafetyRulesText,
   reviewerPerspectiveLabel,
 } from "./prompts.ts";
-import { inspectQualityGate } from "./quality-gate.ts";
+import {
+  computeWorkspaceChangeStats,
+  inspectQualityGate,
+} from "./quality-gate.ts";
 import { runCheck } from "./run-check.ts";
 import {
   buildRecoveryBrief,
@@ -394,8 +398,8 @@ function localizeNodeBrief(
   if (node.role === "gate") {
     if (record.lifecycleStatus === "completed") {
       return zh
-        ? "测试/CI、交叉审查与轮次门禁全部通过，已完成验收"
-        : "All CI, cross-review, and round-limit checks verified";
+        ? "最新测试/CI 与所需审查均已通过，已完成验收"
+        : "Latest CI run and required reviews verified";
     }
     if (gateReady === true) {
       return zh
@@ -403,8 +407,8 @@ function localizeNodeBrief(
         : "CI and cross-review checks satisfied — ready to complete";
     }
     return zh
-      ? "核对测试/CI 侧车、交叉审查批准与两轮熔断门禁"
-      : "Verifies CI sidecar, cross-review approvals, and 2-round breaker";
+      ? "核对最新一次测试/CI 与最新一轮审查批准"
+      : "Verifies latest CI run and latest-round review approvals";
   }
   if (
     node.role === "coordinator" &&
@@ -440,10 +444,7 @@ export function toPipelineSnapshot(
 
   if (record.delivery || record.candidate || record.ci) {
     try {
-      const report = inspectQualityGate({
-        recordPath,
-        cwd: record.projectRoot,
-      });
+      const report = inspectQualityGate({ recordPath });
       gateChecks = report.checks;
       gateReady = report.status === "READY";
     } catch {
@@ -1800,11 +1801,18 @@ export function createCoordinatorTools(
     }),
     async execute(args) {
       const updated = recordCandidateDelivery(recordPath, args);
+      const change = computeWorkspaceChangeStats(updated.projectRoot);
+      const advice =
+        updated.codeReview !== "required" &&
+        (change.files > 5 || change.lines > 200)
+          ? ` Diff is ${change.files} files / ${change.lines} lines; consider code review.`
+          : "";
       notifyTaskChanges();
       return {
-        text: `Recorded delivery (codeReview=${updated.codeReview}).`,
+        text: `Recorded delivery (codeReview=${updated.codeReview}).${advice}`,
         structuredContent: {
-          fingerprint: updated.candidate,
+          delivery: updated.candidate,
+          change,
           codeReview: updated.codeReview,
           codeReviewReason: updated.codeReviewReason,
         },
@@ -1816,7 +1824,7 @@ export function createCoordinatorTools(
     name: "paseo_team_record_review",
     title: "Record Review Verdict & Circuit Breaker Check",
     description:
-      "Record plan or code review verdict with anti-spoofing sidecar and 2-round circuit breaker enforcement. Code reviews automatically bind to the live workspace fingerprint.",
+      "Record a plan or code review verdict. The verdict is always saved; past the round limit (default 2) the task is flagged for a user decision.",
     input: z.object({
       stage: z.enum(["plan", "code"]),
       agentId: z.string().min(1),
@@ -1837,8 +1845,6 @@ export function createCoordinatorTools(
         .describe(
           'Individual issues, one per item, prefixed "blocking:" or "advice:".',
         ),
-      rawOutput: z.string().optional(),
-      substantialChange: z.boolean().optional(),
       userAuthorizedExtraRound: z.string().optional(),
     }),
     async execute(args) {
@@ -1852,7 +1858,6 @@ export function createCoordinatorTools(
           maxRounds: res.maxRounds,
           sidecar: res.sidecar,
         },
-        isError: res.status === "CIRCUIT_BROKEN",
       };
     },
   });
@@ -1861,18 +1866,14 @@ export function createCoordinatorTools(
     name: "paseo_team_complete",
     title: "Verify Quality Gate & Complete Task",
     description:
-      "Verify CI sidecar, required code review approvals, read-only integrity, and 2-round circuit breaker, then mark the task completed.",
+      "Verify the latest CI run passed and required reviews approved in their latest round, then mark the task completed.",
     input: z.object({
       inspectOnly: z.boolean().optional(),
     }),
     async execute(args) {
-      const record = loadTask(recordPath);
-      const rep = inspectQualityGate({
-        recordPath,
-        cwd: record.projectRoot,
-      });
+      const rep = inspectQualityGate({ recordPath });
       if (rep.status === "READY" && !args.inspectOnly) {
-        markTaskCompleted(recordPath, rep.fingerprint);
+        markTaskCompleted(recordPath);
       }
       notifyTaskChanges();
       return {
@@ -1901,7 +1902,7 @@ export function createDeveloperTools(
     name: "paseo_team_run_check",
     title: "Run Credential-Isolated Full CI Check",
     description:
-      "Run full tests/CI in the workspace with SKIP_DOTENV=true and write the fingerprint-bound .log.json sidecar.",
+      "Run full tests/CI in the workspace with SKIP_DOTENV=true and write the .log plus a .log.json result sidecar.",
     input: z.object({
       logFileName: z.string().min(5),
       command: z.string().min(1),
@@ -1910,23 +1911,28 @@ export function createDeveloperTools(
     }),
     async execute(args) {
       const record = loadTask(recordPath);
-      const safeBase = path.basename(args.logFileName.trim());
+      // Never overwrite a previous run: ci-1.log -> ci-1-2.log, ci-1-3.log, ...
+      const requested = path.basename(args.logFileName.trim());
+      const stem = requested.replace(/\.log$/i, "");
+      let safeBase = `${stem}.log`;
+      for (let n = 2; existsSync(path.join(taskDir, safeBase)); n += 1) {
+        safeBase = `${stem}-${n}.log`;
+      }
       const logPath = path.join(taskDir, safeBase);
       const targetCwd = args.cwd?.trim() || record.projectRoot;
       const result = runCheck(args.command, args.args, {
         log: logPath,
         cwd: targetCwd,
       });
-      if (result.status === "PASS") {
-        try {
-          const latest = loadTask(recordPath);
-          if (!latest.ci?.waived) {
-            latest.ci = { log: safeBase };
-            saveTask(recordPath, latest);
-          }
-        } catch {
-          // Non-fatal
+      // Track the latest run (pass or fail) so the UI matches what the gate checks.
+      try {
+        const latest = loadTask(recordPath);
+        if (!latest.ci?.waived) {
+          latest.ci = { log: safeBase };
+          saveTask(recordPath, latest);
         }
+      } catch {
+        // Non-fatal
       }
       notifyTaskChanges();
       return {

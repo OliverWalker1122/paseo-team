@@ -24,10 +24,6 @@ import {
   type ReviewerPerspective,
   reviewerPerspectiveLabel,
 } from "./prompts.ts";
-import {
-  computeWorkspaceChangeStats,
-  computeWorkspaceFingerprint,
-} from "./quality-gate.ts";
 
 export type PipelineStageId =
   | "coordinator"
@@ -205,6 +201,8 @@ export interface TaskRecord {
   delivery: TaskDeliveryInfo | null;
   deliveries?: TaskDeliveryRoundEntry[];
   circuitBroken: CircuitBreakerInfo | null;
+  /** Review rounds the user allowed beyond the default two. */
+  extraRounds?: number;
   nodes: TaskAgentNode[];
   lifecycleStatus: "active" | "completed" | "paused" | "abandoned" | "blocked";
   completedAt?: string;
@@ -395,8 +393,8 @@ export function buildInitialNodes(options: {
     label: zh ? "验收门禁" : "Quality Gate",
     profile: "quality-gate",
     briefSummary: zh
-      ? "核对测试通过、交叉审查批准与两轮熔断门禁"
-      : "Verifies CI sidecar, cross-review approvals & 2-round breaker",
+      ? "核对最新一次测试通过与最新一轮审查批准"
+      : "Verifies latest CI run and latest-round review approvals",
     status: "pending",
     updatedAt: now,
   });
@@ -926,6 +924,9 @@ function normalizeLoadedTaskRecord(
       !Array.isArray(rawObj.circuitBroken)
         ? (rawObj.circuitBroken as CircuitBreakerInfo)
         : null,
+    ...(typeof rawObj.extraRounds === "number" && rawObj.extraRounds > 0
+      ? { extraRounds: rawObj.extraRounds }
+      : {}),
     nodes,
     lifecycleStatus,
     ...((asNonEmptyString(rawObj.completedAt) ??
@@ -1175,8 +1176,6 @@ export function recordReviewVerdict(
     verdict: ReviewVerdict;
     summary: string;
     findings?: string[];
-    rawOutput?: string;
-    substantialChange?: boolean;
     userAuthorizedExtraRound?: string;
   },
 ): {
@@ -1188,42 +1187,22 @@ export function recordReviewVerdict(
   record: TaskRecord;
 } {
   const record = loadTask(recordPath);
-  const maxRounds = 2;
   const now = new Date().toISOString();
 
-  if (
-    (record.circuitBroken?.stage === input.stage || input.round > maxRounds) &&
-    !input.userAuthorizedExtraRound?.trim()
-  ) {
-    const reason = `Round ${input.round} exceeds the ${maxRounds}-round circuit breaker. Stop patching and escalate trade-off options to the user.`;
-    record.circuitBroken = {
-      stage: input.stage,
-      round: input.round,
-      reason,
-      triggeredAt: now,
-    };
-    record.lifecycleStatus = "blocked";
-    saveTask(recordPath, record);
-    return {
-      status: "CIRCUIT_BROKEN",
-      round: input.round,
-      maxRounds,
-      message: reason,
-      record,
-    };
-  }
-
   if (input.userAuthorizedExtraRound?.trim()) {
+    record.extraRounds = Math.max(record.extraRounds ?? 0, input.round - 2);
     record.circuitBroken = null;
     if (record.lifecycleStatus === "blocked") {
       record.lifecycleStatus = "active";
     }
   }
+  const maxRounds = 2 + (record.extraRounds ?? 0);
 
+  // Code reviews are tagged with the delivery they reviewed; informational only.
   const targetRef =
     input.stage === "plan"
       ? input.targetVersionOrCommit?.trim() || record.planVersion
-      : computeWorkspaceFingerprint(record.projectRoot);
+      : input.targetVersionOrCommit?.trim() || record.candidate || "workspace";
 
   const taskDir = path.dirname(path.resolve(recordPath));
   const safeAgent = input.agentId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 32);
@@ -1240,23 +1219,11 @@ export function recordReviewVerdict(
     status: input.verdict,
     summary: input.summary,
     ...(input.findings?.length ? { findings: input.findings } : {}),
-    rawOutputSha256: createHash("sha256")
-      .update(input.rawOutput ?? input.summary)
-      .digest("hex"),
     recordedAt: now,
   });
 
   const list =
     input.stage === "plan" ? record.planReviewers : record.codeReviewers;
-
-  if (input.substantialChange) {
-    for (const entry of list) {
-      if (entry.agentId !== input.agentId && entry.commit !== targetRef) {
-        entry.status = "BLOCKED";
-        entry.summary = "Prior approval invalidated by substantial code change";
-      }
-    }
-  }
 
   const existingIdx = list.findIndex((r) => r.agentId === input.agentId);
   const entry: ReviewerRecordEntry = {
@@ -1302,28 +1269,30 @@ export function recordReviewVerdict(
     node.updatedAt = now;
   }
 
-  const saved = saveTask(recordPath, record);
-
-  if (
-    input.round >= maxRounds &&
-    !input.userAuthorizedExtraRound?.trim() &&
-    (input.verdict === "REQUEST_CHANGES" || input.verdict === "BLOCKED")
-  ) {
-    const reason = `Round ${input.round} ${input.stage} review ended with ${input.verdict}. Hard 2-round circuit breaker triggered — stop patching and present trade-off options to the user.`;
-    saved.circuitBroken = {
+  // Soft breaker: the verdict is always recorded; the flag only asks for a user decision.
+  const overLimit =
+    input.round > maxRounds ||
+    (input.round === maxRounds && input.verdict !== "APPROVE");
+  if (overLimit) {
+    const reason = `Round ${input.round}/${maxRounds} ${input.stage} review ended with ${input.verdict}. Verdict recorded; stop patching and present trade-off options to the user.`;
+    record.circuitBroken = {
       stage: input.stage,
       round: input.round,
       reason,
       triggeredAt: now,
     };
-    saved.lifecycleStatus = "blocked";
-    saveTask(recordPath, saved);
+    record.lifecycleStatus = "blocked";
+  }
+
+  const saved = saveTask(recordPath, record);
+
+  if (overLimit) {
     return {
       status: "CIRCUIT_BROKEN",
       round: input.round,
       maxRounds,
       sidecar: sidecarName,
-      message: reason,
+      message: saved.circuitBroken!.reason,
       record: saved,
     };
   }
@@ -1338,29 +1307,18 @@ export function recordReviewVerdict(
   };
 }
 
-function findLatestMatchingCiLog(
-  taskDir: string,
-  fingerprint: string,
-): string | undefined {
+// Newest check log in the task directory, matching what the quality gate verifies.
+function findLatestCiLog(taskDir: string): string | undefined {
   if (!existsSync(taskDir)) return undefined;
   let bestName: string | undefined;
   let bestMtime = -1;
   for (const name of readdirSync(taskDir)) {
     if (!name.endsWith(".log.json")) continue;
-    const jsonPath = path.join(taskDir, name);
     try {
-      const st = lstatSync(jsonPath);
-      if (st.isSymbolicLink() || !st.isFile()) continue;
-      const parsed = JSON.parse(readFileSync(jsonPath, "utf8")) as Record<
-        string,
-        unknown
-      >;
-      if (parsed.status === "PASS" && parsed.fingerprint === fingerprint) {
-        const mtime = st.mtimeMs;
-        if (mtime >= bestMtime) {
-          bestMtime = mtime;
-          bestName = name.slice(0, -".json".length);
-        }
+      const st = lstatSync(path.join(taskDir, name));
+      if (st.isFile() && st.mtimeMs >= bestMtime) {
+        bestMtime = st.mtimeMs;
+        bestName = name.slice(0, -".json".length);
       }
     } catch {
       // Ignore unreadable sidecar
@@ -1384,12 +1342,7 @@ export function recordCandidateDelivery(
 ): TaskRecord {
   const record = loadTask(recordPath);
   const now = new Date().toISOString();
-  const targetDir = record.projectRoot;
   const taskDir = path.dirname(path.resolve(recordPath));
-
-  const fingerprint =
-    input.candidate?.trim() || computeWorkspaceFingerprint(targetDir);
-  const stats = computeWorkspaceChangeStats(targetDir);
 
   const hadPriorDelivery = Boolean(
     record.delivery || (record.deliveries && record.deliveries.length > 0),
@@ -1398,7 +1351,9 @@ export function recordCandidateDelivery(
     ? Math.max(1, record.codeReviewRound + 1)
     : 1;
 
-  record.candidate = fingerprint;
+  // A readable delivery label, not a content hash.
+  const candidate = input.candidate?.trim() || `delivery-r${deliveryRound}`;
+  record.candidate = candidate;
 
   let resolvedCiLog: string | undefined;
   if (input.ciWaivedUserQuote?.trim()) {
@@ -1407,7 +1362,7 @@ export function recordCandidateDelivery(
     resolvedCiLog = path.basename(input.ciLog.trim());
     record.ci = { log: resolvedCiLog };
   } else if (!record.ci?.waived) {
-    const autoLog = findLatestMatchingCiLog(taskDir, fingerprint);
+    const autoLog = findLatestCiLog(taskDir);
     if (autoLog) {
       resolvedCiLog = autoLog;
       record.ci = { log: autoLog };
@@ -1415,7 +1370,7 @@ export function recordCandidateDelivery(
   }
 
   record.delivery = {
-    candidate: fingerprint,
+    candidate,
     summary: input.summary.trim(),
     architectureImpact: input.architectureImpact.trim(),
     deliveredAt: now,
@@ -1432,7 +1387,7 @@ export function recordCandidateDelivery(
   const roundEntry: TaskDeliveryRoundEntry = {
     round: deliveryRound,
     ...(input.agentId?.trim() ? { agentId: input.agentId.trim() } : {}),
-    candidate: fingerprint,
+    candidate,
     ...(resolvedCiLog ? { ciLog: resolvedCiLog } : {}),
     summary: input.summary.trim(),
     architectureImpact: input.architectureImpact.trim(),
@@ -1445,22 +1400,10 @@ export function recordCandidateDelivery(
   }
   record.deliveries = deliveries;
 
-  const archNonTrivial = !["无", "none", "n/a"].includes(
-    input.architectureImpact.trim().toLowerCase(),
-  );
-  const sizeTriggered = stats.files > 5 || stats.lines > 200;
-  if (
-    (input.requireCodeReview || archNonTrivial || sizeTriggered) &&
-    record.codeReview !== "waived"
-  ) {
+  // The coordinator decides on review; diff size is only reported back as advice.
+  if (input.requireCodeReview && record.codeReview !== "waived") {
     record.codeReview = "required";
-    record.codeReviewReason =
-      input.codeReviewReason?.trim() ||
-      (archNonTrivial
-        ? "non-trivial architecture impact"
-        : sizeTriggered
-          ? `diff size (${stats.files} files, ${stats.lines} lines)`
-          : "requested");
+    record.codeReviewReason = input.codeReviewReason?.trim() || "requested";
   } else if (
     input.codeReviewReason?.trim() &&
     record.codeReview === "not-required"
@@ -1502,17 +1445,12 @@ export function recordCandidateDelivery(
   return saveTask(recordPath, record);
 }
 
-export function markTaskCompleted(
-  recordPath: string,
-  fingerprint?: string,
-): TaskRecord {
+export function markTaskCompleted(recordPath: string): TaskRecord {
   const record = loadTask(recordPath);
   const now = new Date().toISOString();
   record.lifecycleStatus = "completed";
   record.completedAt = now;
-  if (fingerprint) {
-    record.candidate = fingerprint;
-  }
+  record.circuitBroken = null;
   const gateNode = record.nodes.find((n) => n.nodeId === "merge-gate");
   if (gateNode) {
     gateNode.status = "approved";
@@ -1533,7 +1471,7 @@ export function buildRecoveryBrief(record: TaskRecord): string {
     `# Task Recovery Brief [${record.taskId}] (${record.lifecycleStatus})`,
     `- Goal: ${record.goal}`,
     `- Preset/Mode: ${record.teamName} (${record.complexMode}) | Workspace: ${record.projectRoot}`,
-    `- Reviews: planReview=${record.planReview}(R${record.planReviewRound}/2) | codeReview=${record.codeReview}(R${record.codeReviewRound}/2)`,
+    `- Reviews: planReview=${record.planReview}(R${record.planReviewRound}/${2 + (record.extraRounds ?? 0)}) | codeReview=${record.codeReview}(R${record.codeReviewRound}/${2 + (record.extraRounds ?? 0)})`,
   ];
   if (record.circuitBroken) {
     lines.push(`- Circuit Breaker: ${record.circuitBroken.reason}`);
