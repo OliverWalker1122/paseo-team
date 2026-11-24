@@ -32,7 +32,6 @@ import {
 import { inspectQualityGate } from "./server/quality-gate.ts";
 import {
   type AgentRole,
-  checkAgentReadOnlyIntegrity,
   findTaskByAgentId,
   listTasksForProject,
   loadTask,
@@ -80,16 +79,20 @@ function inferChildRole(options: {
   }
   const title = (options.title ?? "").trim();
   if (!title) return null;
-  if (/^\[(?:Developer|Handoff|开发)\]/i.test(title)) {
+  if (/^\[(?:Developer|Handoff|开发)(?:\s*#\d+)?\]/i.test(title)) {
     return "developer";
   }
-  if (/^\[(?:Expert|Architect|专家)\]/i.test(title)) {
+  if (/^\[(?:Expert|Architect|专家)(?:\s*#\d+)?\]/i.test(title)) {
     return "expert";
   }
-  if (/^\[(?:Plan\s*Reviewer|方案审查)\]/i.test(title)) {
+  if (/^\[(?:Plan\s*Reviewer|方案审查)(?:\s*#\d+)?\]/i.test(title)) {
     return "plan-reviewer";
   }
-  if (/^\[(?:Code\s*Reviewer|Reviewer|Advisor|代码审查|审查)\]/i.test(title)) {
+  if (
+    /^\[(?:Code\s*Reviewer|Reviewer|Advisor|代码审查|审查)(?:\s*#\d+)?\]/i.test(
+      title,
+    )
+  ) {
     if (options.planReviewRequired && !options.hasDelivery) {
       return "plan-reviewer";
     }
@@ -318,42 +321,6 @@ export default function contribute(server: PluginServerContext) {
   });
 
   cleanups.push(
-    server.addHook("agent.create.before", async ({ request }) => {
-      try {
-        const meta = request.metadata?.["paseo-team.task"];
-        const metaRole =
-          meta && typeof meta === "object" && !Array.isArray(meta)
-            ? String((meta as Record<string, unknown>).role ?? "")
-            : "";
-        const title = request.config.title ?? "";
-        const isReadOnlyReviewer =
-          metaRole === "plan-reviewer" ||
-          metaRole === "code-reviewer" ||
-          /^\[(?:Advisor|Code\s*Reviewer|Plan\s*Reviewer|Reviewer|代码审查|方案审查|审查)\]/i.test(
-            title,
-          );
-
-        if (isReadOnlyReviewer && request.config.provider === "codex") {
-          return {
-            ...request,
-            config: {
-              ...request.config,
-              providerOptions: {
-                ...request.config.providerOptions,
-                sandbox_mode: "read-only",
-              },
-            },
-          };
-        }
-        return undefined;
-      } catch (err) {
-        console.error("[paseo-team] agent.create.before error:", err);
-        return undefined;
-      }
-    }),
-  );
-
-  cleanups.push(
     server.addHook("agent.create.after", async ({ agent }) => {
       try {
         if (!agent.parentAgentId || findTaskByAgentId(agent.id)) return;
@@ -382,7 +349,6 @@ export default function contribute(server: PluginServerContext) {
           profile: "auto",
           provider: agent.provider,
           briefSummary: stripRolePrefix(agent.title) || `Running ${childRole}`,
-          captureReadOnlyCwd: agent.cwd || parentMatch.record.projectRoot,
         });
         notifyTaskChanges();
       } catch (err) {
@@ -490,7 +456,6 @@ export default function contribute(server: PluginServerContext) {
               profile: "auto",
               provider: request.provider,
               briefSummary: stripRolePrefix(request.title) || `Running ${role}`,
-              captureReadOnlyCwd: request.cwd || record.projectRoot,
             });
             notifyTaskChanges();
           } catch {
@@ -637,16 +602,9 @@ export default function contribute(server: PluginServerContext) {
   cleanups.push(
     server.addHook("agent.turn.after", async ({ agent }) => {
       try {
-        const matched = findTaskByAgentId(agent.id);
-        if (!matched) return;
-        if (
-          matched.matchedRole === "expert" ||
-          matched.matchedRole === "plan-reviewer" ||
-          matched.matchedRole === "code-reviewer"
-        ) {
-          checkAgentReadOnlyIntegrity(matched.recordPath, agent.id, agent.cwd);
+        if (findTaskByAgentId(agent.id)) {
+          notifyTaskChanges();
         }
-        notifyTaskChanges();
       } catch (err) {
         console.error("[paseo-team] agent.turn.after error:", err);
       }

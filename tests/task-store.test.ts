@@ -15,7 +15,6 @@ import {
 import { toPipelineSnapshot } from "../server/handlers.ts";
 import {
   buildRecoveryBrief,
-  checkAgentReadOnlyIntegrity,
   findTaskByAgentId,
   initTask,
   listAllRecentTasks,
@@ -156,7 +155,6 @@ test("builds left-to-right pipeline stages, bilingual snapshots, and enforces 2-
     model: "claude-opus-5-5",
     briefSummary: "Review settlement plan boundaries",
     round: 1,
-    captureReadOnlyCwd: repoDir,
   });
 
   const r1 = recordReviewVerdict(task1.recordPath, {
@@ -266,7 +264,7 @@ test("builds left-to-right pipeline stages, bilingual snapshots, and enforces 2-
   assert.match(brief, /plan-rev-0/);
 });
 
-test("auto-triggers code review on architecture impact and detects read-only workspace tampering", (t) => {
+test("auto-triggers code review on architecture impact", (t) => {
   const { repoDir, stateRoot } = tempGitRepo(t);
   const preset = {
     developer: { model: "auto" },
@@ -292,33 +290,6 @@ test("auto-triggers code review on architecture impact and detects read-only wor
   });
   assert.equal(delivered.codeReview, "required");
   assert.equal(delivered.candidate?.length, 40);
-
-  // Reviewer snapshot captures the workspace with Developer's uncommitted edits
-  registerTaskAgent(taskB.recordPath, {
-    role: "code-reviewer",
-    agentId: "rev-ro",
-    profile: "codex/gpt-6-astra",
-    briefSummary: "Read-only review",
-    captureReadOnlyCwd: repoDir,
-  });
-
-  // No violation when reviewer leaves Developer's uncommitted edits untouched
-  const cleanRo = checkAgentReadOnlyIntegrity(
-    taskB.recordPath,
-    "rev-ro",
-    repoDir,
-  );
-  assert.equal(cleanRo.violated, false);
-
-  // Violation detected if reviewer modifies or adds files
-  writeFileSync(path.join(repoDir, "unwanted.txt"), "oops\n");
-  const dirtyRo = checkAgentReadOnlyIntegrity(
-    taskB.recordPath,
-    "rev-ro",
-    repoDir,
-  );
-  assert.equal(dirtyRo.violated, true);
-  assert.equal(dirtyRo.record.readOnlyViolations.length, 1);
 });
 
 test("normalizes legacy v1-v5 task.json records without nodes so hooks and UI never crash", (t) => {

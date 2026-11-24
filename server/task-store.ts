@@ -25,11 +25,8 @@ import {
   reviewerPerspectiveLabel,
 } from "./prompts.ts";
 import {
-  captureRepoSnapshot,
   computeWorkspaceChangeStats,
   computeWorkspaceFingerprint,
-  type RepoSnapshot,
-  verifyReadOnlySnapshot,
 } from "./quality-gate.ts";
 
 export type PipelineStageId =
@@ -201,13 +198,6 @@ export interface TaskRecord {
   ci: { log?: string; waived?: string } | null;
   delivery: TaskDeliveryInfo | null;
   circuitBroken: CircuitBreakerInfo | null;
-  readOnlySnapshots: Record<string, RepoSnapshot>;
-  readOnlyViolations: {
-    agentId: string;
-    role: string;
-    cwd: string;
-    detectedAt: string;
-  }[];
   nodes: TaskAgentNode[];
   lifecycleStatus: "active" | "completed" | "paused" | "abandoned" | "blocked";
   completedAt?: string;
@@ -493,8 +483,6 @@ export function initTask(options: {
     ci: null,
     delivery: null,
     circuitBroken: null,
-    readOnlySnapshots: {},
-    readOnlyViolations: [],
     nodes: buildInitialNodes({
       preset: options.preset,
       isComplex,
@@ -918,15 +906,6 @@ function normalizeLoadedTaskRecord(
       !Array.isArray(rawObj.circuitBroken)
         ? (rawObj.circuitBroken as CircuitBreakerInfo)
         : null,
-    readOnlySnapshots:
-      rawObj.readOnlySnapshots &&
-      typeof rawObj.readOnlySnapshots === "object" &&
-      !Array.isArray(rawObj.readOnlySnapshots)
-        ? (rawObj.readOnlySnapshots as Record<string, RepoSnapshot>)
-        : {},
-    readOnlyViolations: Array.isArray(rawObj.readOnlyViolations)
-      ? (rawObj.readOnlyViolations as TaskRecord["readOnlyViolations"])
-      : [],
     nodes,
     lifecycleStatus,
     ...((asNonEmptyString(rawObj.completedAt) ??
@@ -1046,7 +1025,6 @@ export function registerTaskAgent(
     thinkingOptionId?: string;
     briefSummary: string;
     round?: number;
-    captureReadOnlyCwd?: string;
   },
 ): TaskRecord {
   const record = loadTask(recordPath);
@@ -1071,20 +1049,34 @@ export function registerTaskAgent(
   const existingByAgent = record.nodes.find(
     (n) => n.agentId && n.agentId === input.agentId,
   );
-  const slotIndex =
-    input.slotIndex ??
-    existingByAgent?.slotIndex ??
-    record.nodes.filter((n) => n.role === input.role && Boolean(n.agentId))
-      .length;
-  const nodeId =
-    input.role === "expert" || input.role === "developer"
-      ? input.role
-      : `${input.role}-${slotIndex}`;
+  const sameRoleNodes = record.nodes.filter((n) => n.role === input.role);
+  const unassigned =
+    input.slotIndex === undefined
+      ? sameRoleNodes.find((n) => !n.agentId)
+      : sameRoleNodes.find(
+          (n) => n.slotIndex === input.slotIndex && !n.agentId,
+        );
 
-  let node = existingByAgent ?? record.nodes.find((n) => n.nodeId === nodeId);
+  const slotIndex =
+    existingByAgent?.slotIndex ??
+    input.slotIndex ??
+    unassigned?.slotIndex ??
+    Math.max(-1, ...sameRoleNodes.map((n) => n.slotIndex)) + 1;
+
+  const nodeId =
+    input.role === "expert"
+      ? "expert"
+      : input.role === "developer" && slotIndex === 0
+        ? "developer"
+        : `${input.role}-${slotIndex}`;
+
+  let node =
+    existingByAgent ??
+    unassigned ??
+    record.nodes.find((n) => n.nodeId === nodeId && !n.agentId);
+
   if (!node) {
-    const totalSameRole =
-      record.nodes.filter((n) => n.role === input.role).length + 1;
+    const totalSameRole = sameRoleNodes.length + 1;
     node = {
       nodeId,
       stage,
@@ -1097,7 +1089,7 @@ export function registerTaskAgent(
             ? `Code Reviewer #${slotIndex + 1}`
             : input.role === "expert"
               ? "Expert"
-              : "Developer",
+              : `Developer #${slotIndex + 1}`,
       profile: input.profile,
       ...(input.role === "plan-reviewer" || input.role === "code-reviewer"
         ? { perspective: assignReviewerPerspective(slotIndex, totalSameRole) }
@@ -1106,11 +1098,18 @@ export function registerTaskAgent(
       status: "running",
       updatedAt: now,
     };
-    const gateIdx = record.nodes.findIndex((n) => n.nodeId === "merge-gate");
-    if (gateIdx >= 0) {
-      record.nodes.splice(gateIdx, 0, node);
+    const lastSameIdx = record.nodes.findLastIndex(
+      (n) => n.role === input.role,
+    );
+    if (lastSameIdx >= 0) {
+      record.nodes.splice(lastSameIdx + 1, 0, node);
     } else {
-      record.nodes.push(node);
+      const gateIdx = record.nodes.findIndex((n) => n.nodeId === "merge-gate");
+      if (gateIdx >= 0) {
+        record.nodes.splice(gateIdx, 0, node);
+      } else {
+        record.nodes.push(node);
+      }
     }
   } else {
     if (input.profile && (input.profile !== "auto" || !node.profile)) {
@@ -1133,62 +1132,16 @@ export function registerTaskAgent(
   if (input.round !== undefined) node.round = input.round;
   node.startedAt = node.startedAt ?? now;
 
-  const targetRoDir = input.captureReadOnlyCwd ?? record.projectRoot;
-  if (
-    targetRoDir &&
-    (input.role === "expert" ||
-      input.role === "plan-reviewer" ||
-      input.role === "code-reviewer")
-  ) {
-    try {
-      record.readOnlySnapshots[input.agentId] =
-        captureRepoSnapshot(targetRoDir);
-    } catch {
-      // Ignore non-git directory
+  if (input.role === "developer") {
+    const devs = record.nodes.filter((n) => n.role === "developer");
+    if (devs.length > 1) {
+      for (const d of devs) {
+        d.label = `Developer #${d.slotIndex + 1}`;
+      }
     }
   }
 
   return saveTask(recordPath, record);
-}
-
-export function checkAgentReadOnlyIntegrity(
-  recordPath: string,
-  agentId: string,
-  cwd?: string,
-): { ok: boolean; violated: boolean; record: TaskRecord } {
-  const record = loadTask(recordPath);
-  const snapshot = record.readOnlySnapshots[agentId];
-  if (!snapshot) {
-    return { ok: true, violated: false, record };
-  }
-  const targetDir = snapshot.root || cwd;
-  if (!targetDir) {
-    return { ok: true, violated: false, record };
-  }
-  const check = verifyReadOnlySnapshot(targetDir, snapshot);
-  if (!check.ok) {
-    const node = record.nodes.find((n) => n.agentId === agentId);
-    const alreadyRecorded = record.readOnlyViolations.some(
-      (v) => v.agentId === agentId,
-    );
-    if (!alreadyRecorded) {
-      record.readOnlyViolations.push({
-        agentId,
-        role: node?.role ?? "unknown",
-        cwd: targetDir,
-        detectedAt: new Date().toISOString(),
-      });
-    }
-    if (node) {
-      node.status = "blocked";
-      node.summary =
-        "Read-only role modified workspace files — halted by Quality Gate";
-      node.updatedAt = new Date().toISOString();
-    }
-    saveTask(recordPath, record);
-    return { ok: false, violated: true, record };
-  }
-  return { ok: true, violated: false, record };
 }
 
 export function recordReviewVerdict(
@@ -1330,9 +1283,7 @@ export function recordReviewVerdict(
     node.updatedAt = now;
   }
 
-  saveTask(recordPath, record);
-  const integrity = checkAgentReadOnlyIntegrity(recordPath, input.agentId);
-  const saved = integrity.record;
+  const saved = saveTask(recordPath, record);
 
   if (
     input.round >= maxRounds &&
@@ -1371,6 +1322,7 @@ export function recordReviewVerdict(
 export function recordCandidateDelivery(
   recordPath: string,
   input: {
+    agentId?: string;
     candidate?: string;
     ciLog?: string;
     ciWaivedUserQuote?: string;
@@ -1426,11 +1378,23 @@ export function recordCandidateDelivery(
     record.codeReviewReason = input.codeReviewReason.trim();
   }
 
-  const devNode = record.nodes.find((n) => n.role === "developer");
-  if (devNode) {
-    devNode.status = "completed";
-    devNode.summary = input.summary.trim();
-    devNode.updatedAt = now;
+  if (input.agentId?.trim()) {
+    const devNode = record.nodes.find(
+      (n) => n.role === "developer" && n.agentId === input.agentId!.trim(),
+    );
+    if (devNode) {
+      devNode.status = "completed";
+      devNode.summary = input.summary.trim();
+      devNode.updatedAt = now;
+    }
+  } else {
+    for (const devNode of record.nodes.filter((n) => n.role === "developer")) {
+      devNode.status = "completed";
+      if (!devNode.summary) {
+        devNode.summary = input.summary.trim();
+      }
+      devNode.updatedAt = now;
+    }
   }
 
   if (record.codeReview === "not-required" || record.codeReview === "waived") {
@@ -1483,11 +1447,6 @@ export function buildRecoveryBrief(record: TaskRecord): string {
   ];
   if (record.circuitBroken) {
     lines.push(`- Circuit Breaker: ${record.circuitBroken.reason}`);
-  }
-  if (record.readOnlyViolations.length > 0) {
-    lines.push(
-      `- Read-Only Violations: ${record.readOnlyViolations.map((v) => `${v.role}(${v.agentId})`).join(", ")}`,
-    );
   }
   const activeAgents = record.nodes.filter((n) => n.agentId);
   if (activeAgents.length > 0) {

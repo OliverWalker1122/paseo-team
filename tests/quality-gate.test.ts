@@ -10,7 +10,6 @@ import {
 } from "../server/quality-gate.ts";
 import { runCheck } from "../server/run-check.ts";
 import {
-  checkAgentReadOnlyIntegrity,
   initTask,
   markTaskCompleted,
   recordCandidateDelivery,
@@ -101,14 +100,13 @@ test("verifies uncompressed uncommitted workspace changes end-to-end without req
   });
   assert.equal(delivered.candidate, fp1);
 
-  // 4. Both Code Reviewers inspect workspace in read-only mode & APPROVE
+  // 4. Both Code Reviewers inspect workspace & APPROVE
   registerTaskAgent(created.recordPath, {
     role: "code-reviewer",
     slotIndex: 0,
     agentId: "rev-1",
     profile: "claude/claude-opus-5-5",
     briefSummary: "Spec review",
-    captureReadOnlyCwd: repoDir,
   });
   registerTaskAgent(created.recordPath, {
     role: "code-reviewer",
@@ -116,7 +114,6 @@ test("verifies uncompressed uncommitted workspace changes end-to-end without req
     agentId: "rev-2",
     profile: "codex/gpt-6-astra",
     briefSummary: "Architecture review",
-    captureReadOnlyCwd: repoDir,
   });
 
   recordReviewVerdict(created.recordPath, {
@@ -145,7 +142,6 @@ test("verifies uncompressed uncommitted workspace changes end-to-end without req
     ciPassed: true,
     planReviewSatisfied: true,
     codeReviewSatisfied: true,
-    readOnlyClean: true,
     notCircuitBroken: true,
   });
 
@@ -184,11 +180,11 @@ test("verifies uncompressed uncommitted workspace changes end-to-end without req
   assert.equal(gateArchived.status, "READY");
 });
 
-test("anti-spoofing sidecar check rejects forged task.json approvals and read-only violations block Quality Gate", (t) => {
+test("supports multiple parallel developers registered by coordinator and invalidates gate on unreviewed edits", (t) => {
   const { repoDir, stateRoot } = setupWorkspace(t);
   const created = initTask({
     cwd: repoDir,
-    goal: "Fix edge case",
+    goal: "Parallel backend and frontend changes",
     teamName: "Standard",
     preset: {
       developer: { model: "auto" },
@@ -200,6 +196,27 @@ test("anti-spoofing sidecar check rejects forged task.json approvals and read-on
     stateRoot,
   });
 
+  registerTaskAgent(created.recordPath, {
+    role: "developer",
+    agentId: "dev-1",
+    profile: "codex/gpt-6.1-sol",
+    briefSummary: "Backend slice",
+  });
+  const withTwoDevs = registerTaskAgent(created.recordPath, {
+    role: "developer",
+    agentId: "dev-2",
+    profile: "codex/gpt-6.1-sol",
+    briefSummary: "Frontend slice",
+  });
+  const devs = withTwoDevs.nodes.filter((n) => n.role === "developer");
+  assert.deepEqual(
+    devs.map((n) => [n.nodeId, n.label]),
+    [
+      ["developer", "Developer #1"],
+      ["developer-1", "Developer #2"],
+    ],
+  );
+
   writeFileSync(path.join(repoDir, "app.mjs"), "export const v = 3;\n");
   runCheck(process.execPath, ["-e", "process.exit(0)"], {
     log: path.join(created.taskDir, "ci-1.log"),
@@ -207,33 +224,41 @@ test("anti-spoofing sidecar check rejects forged task.json approvals and read-on
   });
   recordCandidateDelivery(created.recordPath, {
     ciLog: "ci-1.log",
-    summary: "Updated v=3",
+    summary: "Completed both slices",
     architectureImpact: "None",
   });
 
   registerTaskAgent(created.recordPath, {
     role: "code-reviewer",
     slotIndex: 0,
-    agentId: "rev-tamper",
+    agentId: "rev-1",
     profile: "auto",
-    briefSummary: "Blind review",
-    captureReadOnlyCwd: repoDir,
+    briefSummary: "Cross review",
   });
   recordReviewVerdict(created.recordPath, {
     stage: "code",
-    agentId: "rev-tamper",
+    agentId: "rev-1",
     round: 1,
     verdict: "APPROVE",
     summary: "Approved",
   });
 
-  // Reviewer tampers with workspace after snapshot -> readOnlyClean fails!
+  // Reviewer runs temporary repro file then cleans it up -> gate stays READY!
+  const tmpRepro = path.join(repoDir, ".tmp-repro.mjs");
+  writeFileSync(tmpRepro, "console.log('ok');\n");
+  rmSync(tmpRepro);
+  assert.equal(
+    inspectQualityGate({ recordPath: created.recordPath, cwd: repoDir }).status,
+    "READY",
+  );
+
+  // Leftover unreviewed file changes workspace fingerprint -> gate drops to BLOCKED!
   writeFileSync(path.join(repoDir, "rogue.txt"), "rogue\n");
-  checkAgentReadOnlyIntegrity(created.recordPath, "rev-tamper", repoDir);
   const blocked = inspectQualityGate({
     recordPath: created.recordPath,
     cwd: repoDir,
   });
   assert.equal(blocked.status, "BLOCKED");
-  assert.equal(blocked.checks.readOnlyClean, false);
+  assert.equal(blocked.checks.ciPassed, false);
+  assert.equal(blocked.checks.codeReviewSatisfied, false);
 });

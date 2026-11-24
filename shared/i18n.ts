@@ -48,7 +48,7 @@ export const STAGE_LABELS: Record<
     },
     "merge-gate": {
       title: "Quality Gate",
-      subtitle: "CI, review & read-only check",
+      subtitle: "CI, review & round limit",
     },
   },
   zh: {
@@ -74,7 +74,7 @@ export const STAGE_LABELS: Record<
     },
     "merge-gate": {
       title: "验收门禁",
-      subtitle: "CI、审查与只读防篡改校验",
+      subtitle: "CI、审查与轮次门禁",
     },
   },
 };
@@ -85,7 +85,6 @@ export const GATE_CHECK_LABELS: Record<UiLanguage, Record<string, string>> = {
     ciPassed: "Full CI passed on current code",
     planReviewSatisfied: "Plan review satisfied",
     codeReviewSatisfied: "Code review approvals verified",
-    readOnlyClean: "Read-only reviewers zero edits",
     notCircuitBroken: "Within 2-round breaker limit",
   },
   zh: {
@@ -93,7 +92,6 @@ export const GATE_CHECK_LABELS: Record<UiLanguage, Record<string, string>> = {
     ciPassed: "当前代码完整测试/CI 通过",
     planReviewSatisfied: "方案审查已通过或无需开启",
     codeReviewSatisfied: "代码审查批准与防伪侧车齐全",
-    readOnlyClean: "只读角色零工作区篡改",
     notCircuitBroken: "未处于两轮审查熔断态",
   },
 };
@@ -126,6 +124,7 @@ export function localizeNodeRoleLabel(
   slotIndex: number,
   fallbackLabel: string,
   isNativeTree?: boolean,
+  totalSameRole?: number,
 ): string {
   if (isNativeTree) {
     if (role === "coordinator") {
@@ -139,7 +138,9 @@ export function localizeNodeRoleLabel(
     case "expert":
       return lang === "en" ? "Expert" : "专家 Expert";
     case "developer":
-      return "Developer";
+      return (totalSameRole ?? 1) > 1
+        ? `Developer #${slotIndex + 1}`
+        : "Developer";
     case "plan-reviewer":
       return lang === "en"
         ? `Plan Reviewer #${slotIndex + 1}`

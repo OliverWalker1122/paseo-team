@@ -1,16 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
-
-export interface RepoSnapshot {
-  root: string;
-  head: string;
-  fingerprint: string;
-  statusPorcelain: string;
-  clean: boolean;
-  capturedAt: string;
-}
 
 export interface QualityGateReport {
   status: "READY" | "BLOCKED";
@@ -21,7 +12,6 @@ export interface QualityGateReport {
     ciPassed: boolean;
     planReviewSatisfied: boolean;
     codeReviewSatisfied: boolean;
-    readOnlyClean: boolean;
     notCircuitBroken: boolean;
   };
 }
@@ -171,54 +161,6 @@ export function computeWorkspaceChangeStats(directory: string): {
   };
 }
 
-export function captureRepoSnapshot(directory: string): RepoSnapshot {
-  const resolved = path.resolve(directory);
-  const top = runGitSafe(resolved, ["rev-parse", "--show-toplevel"]);
-  const root =
-    top.ok && top.stdout.trim()
-      ? realpathSync(top.stdout.trim())
-      : realpathSync(resolved);
-  const headRes = runGitSafe(root, ["rev-parse", "HEAD"]);
-  const head = headRes.ok ? headRes.stdout.trim() : "";
-  const statusRes = runGitSafe(root, [
-    "status",
-    "--porcelain=v1",
-    "--untracked-files=normal",
-  ]);
-  const statusPorcelain = statusRes.stdout.trim();
-  const fingerprint = computeWorkspaceFingerprint(root);
-  return {
-    root,
-    head,
-    fingerprint,
-    statusPorcelain,
-    clean: statusPorcelain === "",
-    capturedAt: new Date().toISOString(),
-  };
-}
-
-export function verifyReadOnlySnapshot(
-  directory: string,
-  before: RepoSnapshot,
-): {
-  ok: boolean;
-  headUnchanged: boolean;
-  statusUnchanged: boolean;
-  after: RepoSnapshot;
-} {
-  const after = captureRepoSnapshot(directory);
-  const headUnchanged = after.head === before.head;
-  const fingerprintUnchanged = before.fingerprint
-    ? after.fingerprint === before.fingerprint
-    : after.statusPorcelain === before.statusPorcelain;
-  return {
-    ok: headUnchanged && fingerprintUnchanged,
-    headUnchanged,
-    statusUnchanged: fingerprintUnchanged,
-    after,
-  };
-}
-
 function readJson(file: string): Record<string, unknown> | null {
   try {
     if (lstatSync(file).isSymbolicLink()) return null;
@@ -348,10 +290,6 @@ export function inspectQualityGate(options: {
           !sizeTriggered &&
           filled(record?.codeReviewReason);
 
-  const violations = Array.isArray(record?.readOnlyViolations)
-    ? record.readOnlyViolations
-    : [];
-  const readOnlyClean = violations.length === 0;
   const notCircuitBroken = !record?.circuitBroken;
 
   const checks = {
@@ -359,7 +297,6 @@ export function inspectQualityGate(options: {
     ciPassed,
     planReviewSatisfied,
     codeReviewSatisfied,
-    readOnlyClean,
     notCircuitBroken,
   };
 

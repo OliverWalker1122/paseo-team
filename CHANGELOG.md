@@ -11,7 +11,7 @@ First public release as a native Paseo plugin.
 - Team tasks started from any chat with `/paseo-team`, with this chat as the coordinator.
 - Separate Developer, Code Reviewer and optional Expert and Plan Reviewer sessions, each with only the permissions its role needs.
 - Cross review by two reviewers from opposing angles, limited to two rounds before the team asks you to decide.
-- Quality gate with six checks, bound to a fingerprint of the current workspace contents.
+- Quality gate with five checks, bound to a fingerprint of the current workspace contents.
 - Credential-isolated CI runner that records results without command arguments.
 - Setup screen to choose provider, model and reasoning effort per role, with saved presets.
 - Live team graph for each chat, and a history view with every review round and its findings.

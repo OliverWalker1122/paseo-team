@@ -14,10 +14,10 @@ When one agent writes code and then judges its own work, it tends to approve its
 
 ## Features
 
-- **Separated roles.** Only the Developer edits files. Reviewers run read-only, and a workspace snapshot proves they changed nothing.
+- **Separated roles, flexible dispatch.** The Coordinator scopes the task and dispatches one or more Developers as needed. Reviewers do not edit product code, while remaining free to run tests or reproduction checks to verify edge cases.
 - **Cross review.** Two reviewers examine each change independently from opposing angles (requirements and real edge cases vs. architecture and simpler alternatives). Neither sees the other's verdict.
 - **Two-round limit.** If review still fails after two rounds, the team stops and asks you instead of patching endlessly.
-- **Quality gate.** A task completes only when six checks pass against the code currently in your workspace (see [Quality gate](#quality-gate)).
+- **Quality gate.** A task completes only when five checks pass against the code currently in your workspace (see [Quality gate](#quality-gate)).
 - **Your workspace, your commits.** Agents work in the Paseo workspace you opened: a project folder or a Paseo-managed worktree. The plugin never creates hidden worktrees and never commits or merges, so every edit shows up in Paseo's Changes panel and you decide when to commit.
 - **Pick models per role.** Choose provider, model and reasoning effort for each role, or leave it on Auto. Auto gives the reviewers a different provider than the Developer.
 - **Live graph per chat.** Each chat has its own graph of agent sessions. History keeps every task, including each review round and its findings.
@@ -96,23 +96,22 @@ flowchart LR
   R2 --> G
 ```
 
-| Role                  | Can edit files  | Job                                                                                 |
-| --------------------- | --------------- | ----------------------------------------------------------------------------------- |
-| Coordinator           | No              | Sets scope and acceptance criteria, dispatches agents, rules on findings, signs off |
-| Expert (optional)     | Task notes only | Writes the design and root-cause analysis for complex work                          |
-| Developer             | Yes             | Implements the change and runs the full test suite                                  |
-| Code Reviewer #1 / #2 | No (verified)   | Review independently from opposing angles                                           |
+| Role                  | Can edit files  | Job                                                                                  |
+| --------------------- | --------------- | ------------------------------------------------------------------------------------ |
+| Coordinator           | No              | Sets scope and acceptance criteria, dispatches agents, rules on findings, signs off  |
+| Expert (optional)     | Task notes only | Writes the design and root-cause analysis for complex work                           |
+| Developer(s)          | Yes             | Implements changes (single or parallel, as coordinated) and runs the full test suite |
+| Code Reviewer #1 / #2 | No              | Review from opposing angles; can run tests or reproduction checks to verify findings |
 
 ### Quality gate
 
-| Check                      | Passes when                                                                              |
-| -------------------------- | ---------------------------------------------------------------------------------------- |
-| Delivery recorded          | The Developer's change summary is on file                                                |
-| CI passed                  | The full test run passed on exactly the code now in the workspace                        |
-| Plan review                | Every plan reviewer approved, or plan review was not needed                              |
-| Code review                | Every required reviewer approved the current code, with a matching review record on file |
-| Reviewers stayed read-only | No reviewer changed the workspace                                                        |
-| Within round limit         | Review has not hit the two-round limit                                                   |
+| Check              | Passes when                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| Delivery recorded  | The Developer's change summary is on file                                                |
+| CI passed          | The full test run passed on exactly the code now in the workspace                        |
+| Plan review        | Every plan reviewer approved, or plan review was not needed                              |
+| Code review        | Every required reviewer approved the current code, with a matching review record on file |
+| Within round limit | Review has not hit the two-round limit                                                   |
 
 CI results and review verdicts are bound to a fingerprint of the workspace contents. Edit a file after review and the gate drops back to blocked until CI and review run again.
 

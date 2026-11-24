@@ -358,6 +358,9 @@ export function toPipelineSnapshot(
 
   let runningCount = 0;
   let attentionCount = 0;
+  const totalDevelopers = record.nodes.filter(
+    (n) => n.role === "developer",
+  ).length;
 
   const nodeViews: PipelineNodeViewDto[] = record.nodes.map((node) => {
     const live = node.agentId ? liveMap.get(node.agentId) : undefined;
@@ -390,7 +393,7 @@ export function toPipelineSnapshot(
       node.nodeId === "merge-gate" &&
       record.lifecycleStatus !== "completed"
     ) {
-      if (record.circuitBroken || record.readOnlyViolations.length > 0) {
+      if (record.circuitBroken) {
         visualStatus = "blocked";
       } else if (gateReady === true) {
         visualStatus = "completed";
@@ -437,6 +440,7 @@ export function toPipelineSnapshot(
         node.slotIndex,
         node.label,
         false,
+        node.role === "developer" ? totalDevelopers : undefined,
       ),
       profile: humanizeProfileLabel(node.profile, lang),
       ...(modelBadge ? { modelBadge } : {}),
@@ -1346,7 +1350,6 @@ export function createCoordinatorTools(
       round: z.number().int().min(1).optional(),
     }),
     async execute(args) {
-      const current = loadTask(recordPath);
       const updated = registerTaskAgent(recordPath, {
         role: args.role,
         slotIndex: args.slotIndex,
@@ -1358,7 +1361,6 @@ export function createCoordinatorTools(
         thinkingOptionId: args.thinkingOptionId,
         briefSummary: args.briefSummary,
         round: args.round,
-        captureReadOnlyCwd: current.projectRoot,
       });
       notifyTaskChanges();
       return {
@@ -1374,6 +1376,7 @@ export function createCoordinatorTools(
     description:
       "Record Developer's change summary, CI log filename (e.g. ci-1.log), and architecture impact.",
     input: z.object({
+      agentId: z.string().min(1).optional(),
       summary: z.string().min(1),
       ciLog: z.string().optional(),
       ciWaivedUserQuote: z.string().optional(),

@@ -41,6 +41,7 @@ export function buildCoordinatorSystemPrompt(options: {
       "## 1. 角色分离与原生工作区协作",
       "- **主控只做高判断价值决策**：定目标、划范围、写验收标准、派发子会话、按证据裁决审查分歧、执行最终验收门禁。严禁主控自己改业务代码或跑测试套件。",
       "- **共用当前 Paseo 工作区**：所有子会话直接继承当前工作区目录（不自建 `.worktrees`、不切分支、不强行 `git commit` 或 `merge`，让代码改动直接呈现在 Paseo 原生更改面板中，交由用户自行决定何时提交）。",
+      "- **单人或多人并行开发由主控按需把握**：普通改动派 1 名 Developer 即可；若任务适合按独立模块/文件拆开并行开发，主控可自行划清职责并派发多名 Developer（如 `[Developer #1]`、`[Developer #2]`），全部完成后确保在合并后的工作区上跑过一次完整 `paseo_team_run_check`。",
       `- **复杂任务模式（${options.complexMode}）**：跨模块、涉并发/数据迁移或根因不明时，${
         options.complexMode === "expert"
           ? "派发独立 `expert` 子会话起草方案与根因分析。"
@@ -71,6 +72,7 @@ export function buildCoordinatorSystemPrompt(options: {
     "## 1. Role Separation & Native Paseo Workspace Flow",
     "- **Coordinator owns high-judgment decisions only**: define scope & acceptance criteria, dispatch subagents, adjudicate review findings by evidence, and sign off via the Quality Gate. Never write product code or run test suites directly.",
     "- **Work directly in the current Paseo Workspace**: all subagents inherit this workspace directory. Never ask Developer to create `.worktrees`, switch Git branches, or run `git commit` / `git merge` unless explicitly requested by the user — keep edits directly in the workspace so Paseo's native Changes/Diff panel shows them live.",
+    "- **Single or parallel Developers at your discretion**: dispatch 1 Developer for normal tasks, or split modular work across multiple parallel Developers (`[Developer #1]`, `[Developer #2]`, ...) with clear module boundaries as you see fit, running a final full `paseo_team_run_check` once all edits are in.",
     `- **Complex tasks (mode: ${options.complexMode})**: for cross-module refactors, concurrency/state migrations, or unclear root causes, ${
       options.complexMode === "expert"
         ? "spawn a dedicated `expert` subagent to draft the design/RCA in the evidence directory."
@@ -103,7 +105,7 @@ export function buildDeveloperPrompt(options: {
   if (lang === "zh") {
     return [
       `# Paseo Team Developer 指引（任务 ${options.taskId}）`,
-      `你是本任务代码的唯一写入者，不再派生子 agent。任务证据目录：\`${options.taskDir}\`。`,
+      `按主控简报划定的范围实现代码（如有同伴并行开发，不要改动他人负责的无关模块），不再派生子 agent。任务证据目录：\`${options.taskDir}\`。`,
       "",
       "## 1. 直接在当前工作区实现（不自建 Worktree、不擅自提交）",
       "- 直接在当前工作目录修改代码（Paseo 已在工作区层处理目录与 Worktree 隔离）。**严禁新建 `.worktrees`、严禁切换 Git 分支、严禁擅自执行 `git commit` / `git merge` / `git push`**（除非简报明确转达了用户的提交要求），让改动保留在当前工作区供 Paseo 原生面板展示与后续代码审查读取。",
@@ -120,7 +122,7 @@ export function buildDeveloperPrompt(options: {
 
   return [
     `# Paseo Team Developer Guide (Task ${options.taskId})`,
-    `You are the sole code writer for this task; do not spawn subagents. Evidence dir: \`${options.taskDir}\`.`,
+    `Implement the scope assigned in the Coordinator's brief (avoid touching unrelated modules if peers are working in parallel); do not spawn subagents. Evidence dir: \`${options.taskDir}\`.`,
     "",
     "## 1. Work Directly in the Current Workspace",
     "- Edit files directly in your current working directory (Paseo manages workspace/worktree isolation natively). **Do NOT create `.worktrees`, do NOT switch Git branches, and do NOT run `git commit`, `git merge`, or `git push`** unless explicitly requested by the user — leave edits in the working tree so Paseo's native Changes panel and Code Reviewers can inspect them directly.",
@@ -195,7 +197,7 @@ export function buildReviewerPrompt(options: {
 
     return [
       `# Paseo Team 独立代码审查指引（任务 ${options.taskId}）`,
-      "- **严格只读**：严禁修改、创建或删除任何文件，严禁运行写操作或改变工作区状态的命令（可通过 `git status`、`git diff` 与只读文件阅读检视当前工作区改动），不再派生子 agent。",
+      "- **只审不改业务代码，允许运行验证**：不要直接替 Developer 修改项目业务源码，不再派生子 agent；除阅读代码与 `git diff` 外，可按需运行现有测试或临时最小复现命令核实可疑边界（若有临时产物，结束前清理干净）。",
       focusLine,
       "- **阻断意见准入制**：阻断问题必须写明精确位置（`file:line`）+ 真实场景下的具体出错路径（或更简替代方案）。纯理论担忧归入“建议（不阻断）”。",
       "- **标准输出格式**（在回复末尾输出）：",
@@ -220,7 +222,7 @@ export function buildReviewerPrompt(options: {
 
   return [
     `# Paseo Team Independent Code Reviewer Guide (Task ${options.taskId})`,
-    "- **Strictly Read-Only**: never create, modify, or delete any file, never run state-mutating commands (inspect current workspace changes via `git status`, `git diff`, and read-only file reads), and never spawn subagents.",
+    "- **Review Without Editing Product Code (Dynamic Verification Allowed)**: do not edit project source files to fix issues yourself, and do not spawn subagents. Beyond reading code and `git diff`, you may freely run existing tests or temporary reproduction commands to verify suspected edge cases (clean up any temporary artifacts afterward).",
     focusLine,
     "- **Evidence Bar for Blocking**: every blocking issue must cite an exact `file:line` plus a concrete real-world failure path or a concretely simpler alternative. Put hypothetical nitpicks under Non-blocking Suggestions.",
     "- **Required Output Footer**:",
