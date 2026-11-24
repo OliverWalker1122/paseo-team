@@ -1471,9 +1471,11 @@ export function checkTurnHandoff(
     saveTask(recordPath, record);
     return "remind";
   }
+  // A member may legitimately be waiting (e.g. told to hold for plan review), so
+  // this is not an error: its reply explains why, and the coordinator decides.
   node.reminded = false;
-  node.status = "blocked";
-  node.summary = "Turn ended without the required submit tool call";
+  node.summary =
+    "Handoff pending: reminded once without a submission; see its reply.";
   node.updatedAt = now;
   saveTask(recordPath, record);
   return "missing";

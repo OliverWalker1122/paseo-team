@@ -198,7 +198,7 @@ test("coordinator may record for a member only after its reminder failed", (t) =
   checkTurnHandoff(recordPath, "rev-1"); // first miss: reminder sent
   assert.match(memberOwnsHandoff(recordPath, "rev-1") ?? "", /reminded/);
   markTurnStarted(recordPath, "rev-1");
-  checkTurnHandoff(recordPath, "rev-1"); // second miss: node blocked
+  checkTurnHandoff(recordPath, "rev-1"); // second miss: coordinator may act
   assert.equal(memberOwnsHandoff(recordPath, "rev-1"), null);
 
   markTurnStarted(recordPath, "rev-1");

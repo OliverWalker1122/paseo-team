@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Changed
 
 - Each team task now runs in a new coordinator session that inherits the launching chat's model, so one chat can start several tasks. The chat's graph shows each task as a subtree.
-- Members hand off through their own submit tools (`paseo_team_submit_delivery`, `paseo_team_submit_plan`, `paseo_team_submit_review`), which validate the input; a turn that ends without a submission gets one reminder, then the node is marked blocked. The coordinator's record tools remain as a fallback.
+- Members hand off through their own submit tools (`paseo_team_submit_delivery`, `paseo_team_submit_plan`, `paseo_team_submit_review`), which validate the input; a turn that ends without a submission gets one reminder; if the member still does not submit, the coordinator may record on its behalf. Recording is refused while a reminder is pending or after the member submitted, so a handoff is never recorded twice.
 - A blocked quality gate lists each missing item, including dispatched reviewers that never submitted.
 - One Developer writes at a time; parallel Developers are no longer suggested.
 - Quality gate no longer fingerprints the workspace. It checks that the latest CI run passed after the previous rework round and that the latest review round approved, so user edits and commits no longer block it.
