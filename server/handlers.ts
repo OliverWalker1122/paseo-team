@@ -1630,6 +1630,24 @@ export async function startTeamTask(
     rosterLines.push(`- Expert: ${formatLaunchLine(expLaunch)}`);
   }
 
+  if (created.record.planReview === "required" || created.record.isComplex) {
+    eff.preset.planReviewers.forEach((spec, idx) => {
+      const launch = resolveRoleLaunchSpec({
+        role: "plan-reviewer",
+        spec,
+        catalog: providers,
+        readyProviders,
+      });
+      const persp = assignReviewerPerspective(
+        idx,
+        eff.preset.planReviewers.length,
+      );
+      rosterLines.push(
+        `- Plan Reviewer #${idx + 1} (${reviewerPerspectiveLabel(persp, promptLang)}): ${formatLaunchLine(launch)}`,
+      );
+    });
+  }
+
   eff.preset.codeReviewers.forEach((spec, idx) => {
     const persp = assignReviewerPerspective(
       idx,
