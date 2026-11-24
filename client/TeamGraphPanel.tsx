@@ -928,6 +928,20 @@ function NodeInspector({
               </Text>
             </View>
           ))}
+          {task.gateMissing?.map((item) => (
+            <Text
+              key={item}
+              selectable
+              style={{
+                color: theme.colors.foregroundMuted,
+                fontSize: 11,
+                lineHeight: 15,
+                paddingLeft: 20,
+              }}
+            >
+              · {item}
+            </Text>
+          ))}
         </View>
       ) : null}
     </View>

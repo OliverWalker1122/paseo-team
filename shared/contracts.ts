@@ -170,6 +170,7 @@ export const PipelineTaskSnapshotSchema = z.object({
     .nullable(),
   gateChecks: z.record(z.string(), z.boolean()).optional(),
   gateReady: z.boolean().optional(),
+  gateMissing: z.array(z.string()).optional(),
   lifecycleStatus: z.enum([
     "active",
     "completed",

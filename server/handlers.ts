@@ -444,12 +444,14 @@ export function toPipelineSnapshot(
 ): PipelineTaskSnapshotDto {
   let gateChecks: Record<string, boolean> | undefined;
   let gateReady: boolean | undefined;
+  let gateMissing: string[] | undefined;
 
   if (record.delivery || record.candidate || record.ci) {
     try {
       const report = inspectQualityGate({ recordPath });
       gateChecks = report.checks;
       gateReady = report.status === "READY";
+      gateMissing = report.missing;
     } catch {
       // Non-fatal
     }
@@ -1008,6 +1010,7 @@ export function toPipelineSnapshot(
     circuitBroken: record.circuitBroken,
     ...(gateChecks ? { gateChecks } : {}),
     ...(gateReady !== undefined ? { gateReady } : {}),
+    ...(gateMissing?.length ? { gateMissing } : {}),
     lifecycleStatus: record.lifecycleStatus,
     runningCount,
     attentionCount,
