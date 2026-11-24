@@ -601,6 +601,9 @@ function normalizeLegacyReviewers(
       summary,
       ...(findings.length > 0 ? { findings } : {}),
       sidecar: asNonEmptyString(r.sidecar) ?? "",
+      ...(r.source === "self" || r.source === "coordinator"
+        ? { source: r.source }
+        : {}),
       updatedAt: asNonEmptyString(r.updatedAt) ?? fallbackNow,
     });
   }

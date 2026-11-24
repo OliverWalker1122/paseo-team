@@ -3,7 +3,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { reviewInputProblem } from "../server/handlers.ts";
+import {
+  buildConversationGraph,
+  memberOwnsHandoff,
+  reviewInputProblem,
+} from "../server/handlers.ts";
 import { inspectQualityGate } from "../server/quality-gate.ts";
 import {
   checkTurnHandoff,
@@ -140,4 +144,89 @@ test("lists only the tasks started from one launcher chat", (t) => {
     [a.record.taskId, b.record.taskId].sort(),
   );
   assert.equal(listTasksByLauncher("nobody", stateRoot).length, 0);
+});
+
+test("a launcher chat that also coordinated an old task shows both as subtrees", async (t) => {
+  const baseDir = mkdtempSync(path.join(os.tmpdir(), "paseo-team-graph-"));
+  const prevState = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = baseDir;
+  t.after(() => {
+    if (prevState === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = prevState;
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+  const cwd = path.join(baseDir, "workspace");
+  mkdirSync(cwd);
+  const base = { cwd, teamName: "Standard", preset };
+  initTask({ ...base, goal: "Old task", coordinatorAgentId: "chat-1" });
+  initTask({ ...base, goal: "New task", launcherAgentId: "chat-1" });
+
+  const paseo = { agents: { list: async () => ({ entries: [] }) } };
+  const graph = await buildConversationGraph(
+    paseo as unknown as Parameters<typeof buildConversationGraph>[0],
+    { agentId: "chat-1" },
+  );
+  assert.equal(graph.mode, "launcher");
+  assert.deepEqual(graph.tasks?.map((x) => x.goal).sort(), [
+    "New task",
+    "Old task",
+  ]);
+});
+
+test("coordinator may record for a member only after its reminder failed", (t) => {
+  const { make } = setup(t);
+  const { recordPath } = make("Guard duplicate handoffs");
+  registerTaskAgent(recordPath, {
+    role: "code-reviewer",
+    agentId: "rev-1",
+    profile: "auto",
+    briefSummary: "Review",
+  });
+
+  // Dispatched but unsubmitted reviewer blocks the gate even without "with review".
+  assert.equal(
+    inspectQualityGate({ recordPath }).checks.codeReviewSatisfied,
+    false,
+  );
+
+  markTurnStarted(recordPath, "rev-1");
+  assert.equal(memberOwnsHandoff(recordPath, "rev-1"), null);
+  checkTurnHandoff(recordPath, "rev-1"); // first miss: reminder sent
+  assert.match(memberOwnsHandoff(recordPath, "rev-1") ?? "", /reminded/);
+  markTurnStarted(recordPath, "rev-1");
+  checkTurnHandoff(recordPath, "rev-1"); // second miss: node blocked
+  assert.equal(memberOwnsHandoff(recordPath, "rev-1"), null);
+
+  markTurnStarted(recordPath, "rev-1");
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-1",
+    round: 1,
+    verdict: "APPROVE",
+    summary: "ok",
+    source: "self",
+  });
+  assert.match(
+    memberOwnsHandoff(recordPath, "rev-1") ?? "",
+    /already submitted/,
+  );
+  // A later write must not strip the earlier entry's source.
+  registerTaskAgent(recordPath, {
+    role: "code-reviewer",
+    agentId: "rev-2",
+    profile: "auto",
+    briefSummary: "Review",
+  });
+  const rec = recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-2",
+    round: 1,
+    verdict: "APPROVE",
+    summary: "ok",
+    source: "self",
+  }).record;
+  assert.deepEqual(
+    rec.codeReviewers.map((r) => r.source),
+    ["self", "self"],
+  );
 });

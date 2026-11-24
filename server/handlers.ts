@@ -1282,6 +1282,28 @@ export async function buildConversationGraph(
 
   const rootAgentId = resolveRootAgentId(viewerAgentId, liveMap);
 
+  // A chat that launched tasks shows them as subtrees, plus any task it
+  // coordinates itself (older tasks used the launching chat as coordinator).
+  const launched = listTasksByLauncher(viewerAgentId);
+  if (launched.length > 0) {
+    const own = findTaskByAgentId(viewerAgentId);
+    const items =
+      own && !launched.some((x) => x.recordPath === own.recordPath)
+        ? [...launched, own].sort((a, b) =>
+            b.record.createdAt.localeCompare(a.record.createdAt),
+          )
+        : launched;
+    return {
+      mode: "launcher",
+      viewerAgentId,
+      rootAgentId,
+      task: null,
+      tasks: items.map((item) =>
+        toPipelineSnapshot(item.recordPath, item.record, liveMap, lang),
+      ),
+    };
+  }
+
   let cur: string | null = viewerAgentId;
   const seenAncestors = new Set<string>();
   while (cur && !seenAncestors.has(cur)) {
@@ -1301,19 +1323,6 @@ export async function buildConversationGraph(
       };
     }
     cur = liveMap.get(cur)?.parentAgentId ?? null;
-  }
-
-  const launched = listTasksByLauncher(viewerAgentId);
-  if (launched.length > 0) {
-    return {
-      mode: "launcher",
-      viewerAgentId,
-      rootAgentId,
-      task: null,
-      tasks: launched.map((item) =>
-        toPipelineSnapshot(item.recordPath, item.record, liveMap, lang),
-      ),
-    };
   }
 
   const candidateIds = [
@@ -1769,6 +1778,8 @@ export function createCoordinatorTools(
       codeReviewReason: z.string().optional(),
     }),
     async execute(args) {
+      const owned = memberOwnsHandoff(recordPath, args.agentId, "developer");
+      if (owned) return { text: owned, isError: true };
       return deliveryResult(recordCandidateDelivery(recordPath, args));
     },
   });
@@ -1795,6 +1806,8 @@ export function createCoordinatorTools(
       userAuthorizedExtraRound: z.string().optional(),
     }),
     async execute(args) {
+      const owned = memberOwnsHandoff(recordPath, args.agentId);
+      if (owned) return { text: owned, isError: true };
       return submitReview(recordPath, {
         ...args,
         source: "coordinator",
@@ -1907,6 +1920,35 @@ function submitReview(
       maxRounds: res.maxRounds,
     },
   };
+}
+
+/**
+ * Paseo forwards a member's final reply to the coordinator while the turn.after
+ * hook reminds the member, so both could record the same handoff. The member
+ * owns it until the reminder has failed (node blocked); only then may the
+ * coordinator record on its behalf.
+ */
+export function memberOwnsHandoff(
+  recordPath: string,
+  agentId: string | undefined,
+  fallbackRole?: "developer",
+): string | null {
+  const nodes = loadTask(recordPath).nodes;
+  const node = agentId
+    ? nodes.find((n) => n.agentId === agentId)
+    : nodes.findLast((n) => n.role === fallbackRole && n.agentId);
+  if (!node) return null;
+  const who = `${node.label} (${node.agentId})`;
+  if (node.reminded) {
+    return `${who} was reminded to submit itself and is retrying; wait for its next reply instead of recording for it.`;
+  }
+  if (
+    node.submittedAt &&
+    (!node.turnStartedAt || node.submittedAt >= node.turnStartedAt)
+  ) {
+    return `${who} already submitted this handoff itself; nothing to record.`;
+  }
+  return null;
 }
 
 function deliveryResult(updated: TaskRecord) {

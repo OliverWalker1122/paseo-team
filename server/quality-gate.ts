@@ -216,12 +216,15 @@ export function inspectQualityGate(options: {
     : ["No delivery: the Developer must call paseo_team_submit_delivery."];
 
   const ciIssue = ciProblem(taskDir, record);
+  // Dispatching a reviewer makes its stage required, so an unsubmitted one always blocks.
+  const dispatched = (role: string) =>
+    nodes.some((n) => n?.role === role && filled(n.agentId));
   const planProblems =
-    record?.planReview === "required"
+    record?.planReview === "required" || dispatched("plan-reviewer")
       ? reviewProblems("plan", asList(record?.planReviewers), nodes)
       : [];
   const codeProblems =
-    record?.codeReview === "required"
+    record?.codeReview === "required" || dispatched("code-reviewer")
       ? reviewProblems("code", asList(record?.codeReviewers), nodes)
       : record?.codeReview === "waived" && !filled(record?.codeReviewReason)
         ? ["Code review waived without a reason."]
