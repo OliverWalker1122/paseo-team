@@ -3,7 +3,9 @@
 English | [简体中文](./README.zh-CN.md)
 
 [![CI](https://github.com/OliverWalker1122/paseo-team/actions/workflows/ci.yml/badge.svg)](https://github.com/OliverWalker1122/paseo-team/actions/workflows/ci.yml)
+[![Coverage](./.github/badges/coverage.svg)](https://github.com/OliverWalker1122/paseo-team/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg)](./package.json)
 [![Paseo](https://img.shields.io/badge/paseo-%3E%3D0.17.3-informational)](https://paseo.sh)
 
 A [Paseo](https://paseo.sh) plugin that turns one chat into a small engineering team. Each task gets its own coordinator session that scopes the work and makes the calls, a developer writes the code, and two code reviewers check it from opposing angles before a quality gate signs off.
@@ -160,6 +162,8 @@ npm ci
 npm run ci               # format check, Markdown lint, typecheck, plugin audit, L1 + L2 tests
 npm run test:unit        # L1: unit & prompt contract tests (offline, <1s)
 npm run test:integration # L2: full 5-hook & tool pipeline integration tests (mock Paseo, <1s)
+npm run test:coverage    # L1 + L2 with Node native coverage report and 80% line gate
+npm run coverage:badge   # regenerate .github/badges/coverage.svg from measured coverage
 npm run test:e2e         # L3: live Paseo daemon E2E acceptance (opt-in, real providers/models)
 npm run format           # apply Prettier
 ```
@@ -178,7 +182,7 @@ Client code must stay cross-platform: React Native primitives only, no DOM and n
 
 ## Contributing
 
-Issues and pull requests are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) first.
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) and our [Code of Conduct](./CODE_OF_CONDUCT.md) first.
 
 ## License
 

@@ -3,7 +3,9 @@
 [English](./README.md) | 简体中文
 
 [![CI](https://github.com/OliverWalker1122/paseo-team/actions/workflows/ci.yml/badge.svg)](https://github.com/OliverWalker1122/paseo-team/actions/workflows/ci.yml)
+[![Coverage](./.github/badges/coverage.svg)](https://github.com/OliverWalker1122/paseo-team/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg)](./package.json)
 [![Paseo](https://img.shields.io/badge/paseo-%3E%3D0.17.3-informational)](https://paseo.sh)
 
 一个 [Paseo](https://paseo.sh) 插件，把一个对话变成一支小型开发团队：每个任务有自己的主控会话负责定范围、做决定，Developer 写代码，两位代码审查员从对立的角度检查，最后由验收门禁确认完成。
@@ -160,6 +162,8 @@ npm ci
 npm run ci               # 格式检查、Markdown 检查、类型检查、插件审计、L1 + L2 测试
 npm run test:unit        # L1：单元测试与提示词全量契约验收（离线，<1s）
 npm run test:integration # L2：全部 5 个钩子与工具闭环集成测试（内存模拟 Paseo，<1s）
+npm run test:coverage    # 运行 L1 + L2 原生覆盖率报告并校核 80% 行覆盖率门槛
+npm run coverage:badge   # 根据实测覆盖率更新 .github/badges/coverage.svg 徽章
 npm run test:e2e         # L3：最高级别真实 Paseo 实跑验收（按需手动触发，连接真实模型）
 npm run format           # 用 Prettier 格式化
 ```
@@ -178,7 +182,7 @@ npm run format           # 用 Prettier 格式化
 
 ## 参与贡献
 
-欢迎提交 Issue 和 Pull Request，开始前请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+欢迎提交 Issue 和 Pull Request，开始前请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md) 与[行为准则](./CODE_OF_CONDUCT.md)。
 
 ## 许可证
 

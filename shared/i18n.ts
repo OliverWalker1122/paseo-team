@@ -313,7 +313,6 @@ export const UI_TEXT = {
       ]
         .filter(Boolean)
         .join(" · "),
-    roundsCount: (n: number) => `${n} rounds`,
 
     // Graph
     nativeTreeBadge: "Subagents of this chat",
@@ -328,13 +327,9 @@ export const UI_TEXT = {
     authorizeNextRound: "Allow one more round",
     hiddenStagesHint: (n: number) =>
       `${n} unused stage${n > 1 ? "s" : ""} hidden`,
-    parallelTag: (n: number) => `×${n}`,
     focusPrefix: "Focus:",
     gateCompleted: "Verified",
     gateReady: "Ready",
-    gateCheck: "Not checked",
-    coordinatorIdle: "Coordinator",
-    waitingPrev: "Waiting",
     openSubagentBtn: "Open chat",
     recheckGateBtn: "Recheck",
     completeTaskBtn: "Mark complete",
@@ -481,7 +476,6 @@ export const UI_TEXT = {
       ]
         .filter(Boolean)
         .join(" · "),
-    roundsCount: (n: number) => `${n} 轮`,
 
     // Graph
     nativeTreeBadge: "当前对话的子 Agent",
@@ -495,13 +489,9 @@ export const UI_TEXT = {
       `两轮审查未通过，已暂停（${stage === "plan" ? "方案审查" : "代码审查"}）`,
     authorizeNextRound: "允许再审一轮",
     hiddenStagesHint: (n: number) => `已隐藏 ${n} 个未启用阶段`,
-    parallelTag: (n: number) => `×${n}`,
     focusPrefix: "侧重：",
     gateCompleted: "已验收",
     gateReady: "可验收",
-    gateCheck: "未核验",
-    coordinatorIdle: "主控会话",
-    waitingPrev: "等待前置阶段",
     openSubagentBtn: "进入对话",
     recheckGateBtn: "重新核验",
     completeTaskBtn: "确认完成",

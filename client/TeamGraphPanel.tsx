@@ -10,7 +10,6 @@ import {
   Icon,
   Loading,
   ScrollView,
-  TextInput,
   useToast,
 } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useState } from "react";
@@ -184,16 +183,6 @@ function formatShortTime(iso: string): string {
   const hh = String(d.getHours()).padStart(2, "0");
   const min = String(d.getMinutes()).padStart(2, "0");
   return `${mm}-${dd} ${hh}:${min}`;
-}
-
-function formatSpecChip(
-  spec: { model: string; thinking?: string } | undefined,
-  lang: UiLanguage,
-): string {
-  if (!spec || !spec.model || spec.model === "auto") {
-    return lang === "en" ? "Auto" : "自动匹配";
-  }
-  return spec.model;
 }
 
 type TaskStatusTone = "danger" | "success" | "accent" | "muted";

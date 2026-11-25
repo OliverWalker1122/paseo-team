@@ -6,6 +6,11 @@ import {
   validateOverviewContent,
   validatePluginManifest,
 } from "../scripts/check.mjs";
+import {
+  badgeColorForPercent,
+  parseCoverageSummary,
+  renderCoverageBadgeSvg,
+} from "../scripts/coverage.mjs";
 
 test("repository passes plugin manifest, cross-platform client audit, and markdown checks", async () => {
   assert.deepEqual(await checkRepository(), []);
@@ -59,4 +64,27 @@ test("validatePluginManifest and validateOverviewContent enforce Paseo registry 
       e.includes("install command"),
     ),
   );
+});
+
+test("coverage helper parses Node coverage output and renders a valid SVG badge", () => {
+  const sample =
+    "ℹ all files        |  84.25 |    79.96 |   73.78 |\nℹ end of coverage report\n";
+  assert.deepEqual(parseCoverageSummary(sample), {
+    lines: 84.25,
+    branches: 79.96,
+    functions: 73.78,
+  });
+  assert.equal(parseCoverageSummary("no table here"), null);
+
+  assert.equal(badgeColorForPercent(92), "#4c1");
+  assert.equal(badgeColorForPercent(84.2), "#97ca00");
+  assert.equal(badgeColorForPercent(75), "#a4a61d");
+  assert.equal(badgeColorForPercent(65), "#dfb317");
+  assert.equal(badgeColorForPercent(50), "#e05d44");
+
+  const svg = renderCoverageBadgeSvg(84.26);
+  assert.match(svg, /^<svg /);
+  assert.match(svg, /coverage: 84\.3%/);
+  assert.match(svg, /#97ca00/);
+  assert.match(svg, /<\/svg>\n$/);
 });

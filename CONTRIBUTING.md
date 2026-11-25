@@ -7,6 +7,7 @@ Thanks for helping improve Paseo Team.
 - For bugs, open an issue with your Paseo version, the provider and model involved, and steps to reproduce.
 - For new features, open an issue first so we can agree on scope before you write code.
 - Report security problems privately as described in [SECURITY.md](./SECURITY.md), not in a public issue.
+- Please follow our [Code of Conduct](./CODE_OF_CONDUCT.md) in all interactions.
 
 ## Development setup
 
@@ -31,7 +32,7 @@ Tests are organized into three tiers:
 
 1. Create a branch from `main`.
 2. Keep each pull request focused on one change.
-3. Run `npm run format`, then `npm run ci`. Both must pass.
+3. Run `npm run format`, `npm run ci`, and `npm run test:coverage` (run `npm run coverage:badge` if coverage changes). All checks must pass.
 4. Add or update tests in `tests/` for any behavior change.
 5. Update `README.md` and `CHANGELOG.md` when user-facing behavior changes.
 

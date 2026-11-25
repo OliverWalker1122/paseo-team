@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Tiered test suite: L1 unit & prompt contract tests (`npm run test:unit`), L2 full 5-hook & tool pipeline integration tests (`npm run test:integration`), L3 opt-in live Paseo daemon E2E acceptance suite (`npm run test:e2e`), and Node native coverage reporting & SVG badge generator (`npm run test:coverage`, `npm run coverage:badge`).
+- Open-source repository templates (`CODE_OF_CONDUCT.md`, GitHub issue & PR templates) and stricter unused-code TypeScript checks (`noUnusedLocals`, `noUnusedParameters`).
+
+### Fixed
+
+- Auto-allow coordinator read-only permission checks (`list_pending_permissions`, `list_hosts`, `list_workspaces`, `list_profiles`), dot-delimited provider tool names (`paseo.*`), and task-child-scoped `respond_to_permission` calls in `agent.permission.before` to prevent Antigravity coordinator+child permission deadlocks.
+- Separated plan-reviewer vs. code-reviewer prompt guidance (`stage: "plan" | "code"`) and removed the contradictory subagent safety-rule repetition instruction.
+- Removed unused dead code in `client/TeamGraphPanel.tsx` and obsolete `UI_TEXT` entries in `shared/i18n.ts`.
+
 ### Changed
 
 - Removed automatic model matching. A task now refuses to start and names each role that has no model; pick one in Team settings or turn a reviewer off.

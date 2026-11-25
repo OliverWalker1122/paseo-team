@@ -13,7 +13,9 @@
  *
  * Optional env vars:
  *   PASEO_E2E_SUITE=smoke|standard|claude-coord|antigravity-coord|all  (default: smoke)
- *   PASEO_E2E_CWD=/path/to/test-workspace                              (default: /home/lcq/ai/test/todo if present)
+ *   PASEO_E2E_CWD=/path/to/test-workspace                              (required when PASEO_E2E_LIVE=1)
+ *   PASEO_E2E_SMOKE_PRESET=<preset-name>                               (defaults to config.default)
+ *   PASEO_E2E_STANDARD_PRESET=<preset-name>                            (defaults to config.default)
  *   PASEO_E2E_HOME=~/.paseo                                            (default: ~/.paseo)
  *   PASEO_E2E_TIMEOUT_MS=600000                                        (default: 10 minutes per scenario)
  *   PASEO_E2E_PERMISSION_STALL_MS=25000                                (fail if a task agent stays stuck on a tool permission)
@@ -82,8 +84,6 @@ function resolveTargetCwd() {
   if (process.env.PASEO_E2E_CWD) {
     return path.resolve(process.env.PASEO_E2E_CWD);
   }
-  const defaultTodo = path.join(os.homedir(), "ai", "test", "todo");
-  if (existsSync(defaultTodo)) return defaultTodo;
   throw new Error(
     "Set PASEO_E2E_CWD to a local test workspace registered in Paseo.",
   );
@@ -241,9 +241,13 @@ async function runLiveScenario({
       "paseo_team.config.get",
       { cwd },
     );
+    const resolvedPreset =
+      presetName ||
+      configBundle?.effectiveTeamName ||
+      configBundle?.config?.default;
     assert.ok(
-      configBundle?.config?.teams?.[presetName],
-      `Preset "${presetName}" must exist in paseo-team config for scenario "${name}"`,
+      resolvedPreset && configBundle?.config?.teams?.[resolvedPreset],
+      `Preset "${resolvedPreset ?? "(default)"}" must exist in paseo-team config for scenario "${name}"`,
     );
 
     launcherInfo = await resolveLauncherAgentId({
@@ -258,12 +262,12 @@ async function runLiveScenario({
       ownedSessionIds.add(launcherInfo.agentId);
     }
 
-    const reviewPhrase = requireReview ? "需要代码审查" : "不要代码审查";
+    const reviewPhrase = requireReview ? "with code review" : "no code review";
     const expectedLine = `after=${name}`;
     const rawArgs = [
-      `只改单个临时文件 ${probeFile}：将其内容精确改为 "${expectedLine}"（末尾带换行）。`,
-      `不要修改仓库中的任何其他文件，不要新增测试，不要执行 git commit。`,
-      `${reviewPhrase}，用 ${presetName} 预设。`,
+      `Edit only the single temporary file ${probeFile}: replace its contents with "${expectedLine}" followed by a newline. `,
+      `Do not edit any other file in the repository, do not add tests, and do not run git commit. `,
+      `${reviewPhrase}, use preset ${resolvedPreset}.`,
     ].join("");
 
     const started = await client.invokePluginRpc(
@@ -426,46 +430,46 @@ const SCENARIOS = [
   {
     id: "smoke",
     title:
-      "L3 Live E2E [smoke]: Codex Coordinator + Deepseek preset (no Claude quota)",
+      "L3 Live E2E [smoke]: Codex Coordinator + smoke/default preset (no review)",
     launcherProvider: "codex",
     launcherModel: "gpt-6-astra",
     launcherEnvVar: "PASEO_E2E_CODEX_LAUNCHER",
-    presetName: "Deepseek",
+    presetName: process.env.PASEO_E2E_SMOKE_PRESET || "",
     requireReview: false,
     expectedProviders: ["codex"],
   },
   {
     id: "standard",
     title:
-      "L3 Live E2E [standard]: Codex Coordinator + Standard preset (Codex + Antigravity Gemini + Claude Code)",
+      "L3 Live E2E [standard]: Codex Coordinator + default/standard preset (with code review)",
     launcherProvider: "codex",
     launcherModel: "gpt-6-astra",
     launcherEnvVar: "PASEO_E2E_CODEX_LAUNCHER",
-    presetName: "标准",
+    presetName: process.env.PASEO_E2E_STANDARD_PRESET || "",
     requireReview: true,
-    expectedProviders: ["codex", "antigravity", "claude"],
+    expectedProviders: ["codex"],
   },
   {
     id: "claude-coord",
     title:
-      "L3 Live E2E [claude-coord]: Claude Code Coordinator + Deepseek preset",
+      "L3 Live E2E [claude-coord]: Claude Code Coordinator + smoke/default preset",
     launcherProvider: "claude",
     launcherModel: "claude-opus-5-5",
     launcherEnvVar: "PASEO_E2E_CLAUDE_LAUNCHER",
-    presetName: "Deepseek",
+    presetName: process.env.PASEO_E2E_SMOKE_PRESET || "",
     requireReview: true,
-    expectedProviders: ["claude", "codex", "pi"],
+    expectedProviders: ["claude"],
   },
   {
     id: "antigravity-coord",
     title:
-      "L3 Live E2E [antigravity-coord]: Antigravity Gemini Coordinator + Standard preset (parent+child permission hook regression)",
+      "L3 Live E2E [antigravity-coord]: Antigravity Gemini Coordinator + default/standard preset (parent+child permission hook regression)",
     launcherProvider: "antigravity",
     launcherModel: "gemini-4-carbon",
     launcherEnvVar: "PASEO_E2E_ANTIGRAVITY_LAUNCHER",
-    presetName: "标准",
+    presetName: process.env.PASEO_E2E_STANDARD_PRESET || "",
     requireReview: true,
-    expectedProviders: ["antigravity", "claude", "codex"],
+    expectedProviders: ["antigravity"],
   },
 ];
 

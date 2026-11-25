@@ -10,6 +10,7 @@ export const markdownSources = Object.freeze([
   "README.zh-CN.md",
   "OVERVIEW.md",
   "CONTRIBUTING.md",
+  "CODE_OF_CONDUCT.md",
   "SECURITY.md",
   "CHANGELOG.md",
 ]);
