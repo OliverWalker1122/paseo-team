@@ -1468,6 +1468,35 @@ function SingleConversationGraphView({
         gap: 14,
       }}
     >
+      {payload.mode === "team_task" &&
+      payload.task?.launcherAgentId &&
+      payload.task.launcherAgentId !== payload.viewerAgentId &&
+      onOpenAgent ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() =>
+            onOpenAgent(
+              payload.task!.launcherAgentId!,
+              payload.task!.coordinatorServerId,
+            )
+          }
+          style={{
+            alignSelf: "flex-start",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 4,
+            paddingHorizontal: 10,
+            paddingVertical: 5,
+            borderRadius: 999,
+            backgroundColor: theme.colors.surface2,
+          }}
+        >
+          <Icon name="ChevronLeft" size={14} color={theme.colors.foreground} />
+          <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>
+            {t.backToMainChat}
+          </Text>
+        </Pressable>
+      ) : null}
       {payload.task ? (
         <TaskFlowCanvas
           theme={theme}
@@ -1819,28 +1848,24 @@ function HistoryListItem({
   );
 }
 
-export function GlobalTeamGraphScreen({
+/** Mounted only while the History tab is open, so opening Team does not load every task. */
+function TeamHistoryTab({
   theme,
-  layout,
+  compact,
+  lang,
   navigation,
-  params,
-}: PluginScreenProps) {
-  const [tab, setTab] = useState<"config" | "history">(
-    params.tab === "history" ? "history" : "config",
-  );
+}: {
+  theme: PluginTheme;
+  compact: boolean;
+  lang: UiLanguage;
+  navigation: PluginScreenProps["navigation"];
+}) {
   const fetchTasks = useRpc(listTasksRpc);
-  const lang = useUiLanguage();
   const [historyTasks, setHistoryTasks] = useState<
     PipelineTaskSnapshotDto[] | null
   >(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [filter, setFilter] = useState<HistoryFilter>("all");
-
-  useEffect(() => {
-    if (params.tab === "history" || params.tab === "config") {
-      setTab(params.tab);
-    }
-  }, [params.tab]);
 
   const historyInput = useMemo(
     () => ({ includeAllProjects: true, language: lang }),
@@ -1899,106 +1924,125 @@ export function GlobalTeamGraphScreen({
   }, [visibleTasks, selectedTaskId]);
 
   const t = UI_TEXT[lang];
-  const compact = layout.compact;
 
-  const historyBody =
-    historyTasks === null ? (
-      <Loading />
-    ) : historyTasks.length === 0 ? (
-      <View style={{ padding: compact ? 16 : 28 }}>
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>
-          {t.noHistoryYet}
-        </Text>
-      </View>
-    ) : (
-      <View style={{ flex: 1, flexDirection: compact ? "column" : "row" }}>
-        <View
-          style={{
-            width: compact ? "100%" : 300,
-            maxHeight: compact ? 280 : undefined,
-            borderRightWidth: compact ? 0 : 1,
-            borderBottomWidth: compact ? 1 : 0,
-            borderColor: theme.colors.border,
-          }}
-        >
-          <View style={{ paddingHorizontal: 12, paddingVertical: 10 }}>
-            <SegmentedTabs
-              theme={theme}
-              value={filter}
-              onChange={setFilter}
-              items={[
-                { id: "all", label: t.filterAll, count: counts.all },
-                { id: "active", label: t.filterActive, count: counts.active },
-                { id: "done", label: t.filterDone, count: counts.done },
-              ]}
-            />
-          </View>
-          <ScrollView
-            style={{ flex: 1 }}
-            contentContainerStyle={{
-              paddingHorizontal: 6,
-              paddingBottom: 12,
-              gap: 1,
-            }}
-          >
-            {visibleTasks.length === 0 ? (
-              <Text
-                style={{
-                  color: theme.colors.foregroundMuted,
-                  fontSize: 12,
-                  padding: 10,
-                }}
-              >
-                {t.noHistoryForFilter}
-              </Text>
-            ) : (
-              visibleTasks.map((item) => (
-                <HistoryListItem
-                  key={item.taskId}
-                  theme={theme}
-                  lang={lang}
-                  task={item}
-                  selected={activeHistoryTask?.taskId === item.taskId}
-                  onPress={() => setSelectedTaskId(item.taskId)}
-                />
-              ))
-            )}
-          </ScrollView>
+  return historyTasks === null ? (
+    <Loading />
+  ) : historyTasks.length === 0 ? (
+    <View style={{ padding: compact ? 16 : 28 }}>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>
+        {t.noHistoryYet}
+      </Text>
+    </View>
+  ) : (
+    <View style={{ flex: 1, flexDirection: compact ? "column" : "row" }}>
+      <View
+        style={{
+          width: compact ? "100%" : 300,
+          maxHeight: compact ? 280 : undefined,
+          borderRightWidth: compact ? 0 : 1,
+          borderBottomWidth: compact ? 1 : 0,
+          borderColor: theme.colors.border,
+        }}
+      >
+        <View style={{ paddingHorizontal: 12, paddingVertical: 10 }}>
+          <SegmentedTabs
+            theme={theme}
+            value={filter}
+            onChange={setFilter}
+            items={[
+              { id: "all", label: t.filterAll, count: counts.all },
+              { id: "active", label: t.filterActive, count: counts.active },
+              { id: "done", label: t.filterDone, count: counts.done },
+            ]}
+          />
         </View>
-
         <ScrollView
           style={{ flex: 1 }}
-          contentContainerStyle={{ padding: compact ? 12 : 20 }}
+          contentContainerStyle={{
+            paddingHorizontal: 6,
+            paddingBottom: 12,
+            gap: 1,
+          }}
         >
-          {activeHistoryTask ? (
-            <TaskFlowCanvas
-              theme={theme}
-              compact={compact}
-              lang={lang}
-              task={activeHistoryTask}
-              onOpenAgent={
-                navigation?.openAgent
-                  ? (targetId, serverId) =>
-                      navigation.openAgent({
-                        agentId: targetId,
-                        ...(serverId ? { serverId } : {}),
-                      })
-                  : undefined
-              }
-              onTaskUpdated={(nextTask) =>
-                setHistoryTasks((prev) =>
-                  prev
-                    ? prev.map((x) =>
-                        x.taskId === nextTask.taskId ? nextTask : x,
-                      )
-                    : prev,
-                )
-              }
-            />
-          ) : null}
+          {visibleTasks.length === 0 ? (
+            <Text
+              style={{
+                color: theme.colors.foregroundMuted,
+                fontSize: 12,
+                padding: 10,
+              }}
+            >
+              {t.noHistoryForFilter}
+            </Text>
+          ) : (
+            visibleTasks.map((item) => (
+              <HistoryListItem
+                key={item.taskId}
+                theme={theme}
+                lang={lang}
+                task={item}
+                selected={activeHistoryTask?.taskId === item.taskId}
+                onPress={() => setSelectedTaskId(item.taskId)}
+              />
+            ))
+          )}
         </ScrollView>
       </View>
-    );
+
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ padding: compact ? 12 : 20 }}
+      >
+        {activeHistoryTask ? (
+          <TaskFlowCanvas
+            theme={theme}
+            compact={compact}
+            lang={lang}
+            task={activeHistoryTask}
+            onOpenAgent={
+              navigation?.openAgent
+                ? (targetId, serverId) =>
+                    navigation.openAgent({
+                      agentId: targetId,
+                      ...(serverId ? { serverId } : {}),
+                    })
+                : undefined
+            }
+            onTaskUpdated={(nextTask) =>
+              setHistoryTasks((prev) =>
+                prev
+                  ? prev.map((x) =>
+                      x.taskId === nextTask.taskId ? nextTask : x,
+                    )
+                  : prev,
+              )
+            }
+          />
+        ) : null}
+      </ScrollView>
+    </View>
+  );
+}
+
+export function GlobalTeamGraphScreen({
+  theme,
+  layout,
+  navigation,
+  params,
+}: PluginScreenProps) {
+  const [tab, setTab] = useState<"config" | "history">(
+    params.tab === "history" ? "history" : "config",
+  );
+  const lang = useUiLanguage();
+
+  useEffect(() => {
+    if (params.tab === "history" || params.tab === "config") {
+      setTab(params.tab);
+    }
+  }, [params.tab]);
+
+  const t = UI_TEXT[lang];
+  const compact = layout.compact;
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
@@ -2028,7 +2072,12 @@ export function GlobalTeamGraphScreen({
           cwd={params.cwd || undefined}
         />
       ) : (
-        historyBody
+        <TeamHistoryTab
+          theme={theme}
+          compact={compact}
+          lang={lang}
+          navigation={navigation}
+        />
       )}
     </View>
   );

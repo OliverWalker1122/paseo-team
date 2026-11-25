@@ -210,6 +210,7 @@ export const UI_TEXT = {
     tabConfig: "Setup",
     tabHistory: "History",
     backToGraph: "Back to graph",
+    backToMainChat: "Back to main chat",
     configureTeam: "Setup",
 
     // Setup page
@@ -219,18 +220,23 @@ export const UI_TEXT = {
     sectionPresets: "Preset",
     sectionPresetsInfo:
       "A preset is a saved set of role models. New tasks use the default preset.",
-    presetEditing: "Editing",
+    presetEditing: "Preset",
     defaultSuffix: " (default)",
-    presetDefaultRow: "Default for new tasks",
+    presetDefaultRow: "Default preset",
     presetDefaultHintIs: "New tasks use this preset.",
     presetDefaultHintNot: (name: string) =>
       `New tasks currently use "${name}".`,
     setGlobalDefault: "Set as default",
     isGlobalDefault: "Default",
-    presetDeleteRow: "Delete preset",
-    presetDeleteHintDefault: "Pick another default before deleting this one.",
-    presetDeleteHintLast: "At least one preset must remain.",
-    presetDeleteHint: "Removes this preset and its project bindings.",
+    presetDeleteRow: (name: string) => `Delete "${name}"`,
+    presetDeleteConfirm: (
+      name: string,
+      fallback: string,
+      wasDefault: boolean,
+    ) =>
+      wasDefault
+        ? `"${name}" is the default. After deleting it, new tasks and its projects use "${fallback}".`
+        : `Projects bound to "${name}" go back to the default "${fallback}".`,
     deletePresetBtn: "Delete",
     newPresetBtn: "New preset",
     newPresetPlaceholder: "Preset name",
@@ -276,7 +282,6 @@ export const UI_TEXT = {
     errEnterPresetName: "Enter a preset name.",
     errPresetExists: (n: string) => `A preset named "${n}" already exists.`,
     errKeepOnePreset: "At least one preset must remain.",
-    errCannotDeleteDefault: "Pick another default before deleting this preset.",
 
     // History
     filterAll: "All",
@@ -376,6 +381,7 @@ export const UI_TEXT = {
     tabConfig: "配置",
     tabHistory: "历史",
     backToGraph: "返回状态图",
+    backToMainChat: "返回主对话",
     configureTeam: "配置",
 
     // Setup page
@@ -384,17 +390,22 @@ export const UI_TEXT = {
     savingStatus: "保存中…",
     sectionPresets: "预设",
     sectionPresetsInfo: "预设是一组角色模型配置，新任务默认使用「默认预设」。",
-    presetEditing: "当前编辑",
+    presetEditing: "预设",
     defaultSuffix: "（默认）",
-    presetDefaultRow: "新任务默认使用",
-    presetDefaultHintIs: "新任务会使用这个预设。",
-    presetDefaultHintNot: (name: string) => `新任务当前使用「${name}」。`,
+    presetDefaultRow: "默认预设",
+    presetDefaultHintIs: "新任务都用这个预设。",
+    presetDefaultHintNot: (name: string) => `新任务现在用「${name}」。`,
     setGlobalDefault: "设为默认",
-    isGlobalDefault: "已是默认",
-    presetDeleteRow: "删除预设",
-    presetDeleteHintDefault: "请先把其他预设设为默认，再删除这个。",
-    presetDeleteHintLast: "至少需要保留一个预设。",
-    presetDeleteHint: "删除这个预设及其项目绑定。",
+    isGlobalDefault: "当前默认",
+    presetDeleteRow: (name: string) => `删除「${name}」`,
+    presetDeleteConfirm: (
+      name: string,
+      fallback: string,
+      wasDefault: boolean,
+    ) =>
+      wasDefault
+        ? `「${name}」是默认预设，删除后新任务和绑定它的项目改用「${fallback}」。`
+        : `绑定「${name}」的项目会改用默认预设「${fallback}」。`,
     deletePresetBtn: "删除",
     newPresetBtn: "新建预设",
     newPresetPlaceholder: "预设名称",
@@ -439,7 +450,6 @@ export const UI_TEXT = {
     errEnterPresetName: "请输入预设名称。",
     errPresetExists: (n: string) => `已存在名为「${n}」的预设。`,
     errKeepOnePreset: "至少需要保留一个预设。",
-    errCannotDeleteDefault: "请先把其他预设设为默认，再删除这个。",
 
     // History
     filterAll: "全部",

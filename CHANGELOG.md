@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - Removed automatic model matching. A task now refuses to start and names each role that has no model; pick one in Team settings or turn a reviewer off.
 - Team graph: compact square node tiles, short rows for finished tasks, long details collapsed until opened; the "start another task" box under the graph is gone (use `/paseo-team` in the chat).
+- A coordinator or member chat's team graph has a "Back to main chat" button that opens the chat which started the task.
+- Presets: deleting the default preset is allowed (the first remaining preset becomes default) and the confirmation says where its projects go; the preset card has one select, a default row and a delete row.
+- Opening Team no longer loads the whole task history; History loads when its tab is opened, and the config page renders from the last loaded settings while it refreshes.
 
 - Each team task now runs in a new coordinator session that inherits the launching chat's model, so one chat can start several tasks. The chat's graph shows each task as a subtree.
 - Members hand off through their own submit tools (`paseo_team_submit_delivery`, `paseo_team_submit_plan`, `paseo_team_submit_review`), which validate the input; a turn that ends without a submission gets one reminder; if the member still does not submit, the coordinator may record on its behalf. Recording is refused while a reminder is pending or after the member submitted, so a handoff is never recorded twice.

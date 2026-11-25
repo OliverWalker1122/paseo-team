@@ -489,6 +489,18 @@ function ActionButton({
   );
 }
 
+// Last bundle per cwd: reopening Team renders at once and refreshes in the background.
+const bundleCache = new Map<string, ConfigBundleDto>();
+
+function initialTeamName(res: ConfigBundleDto): string {
+  return (
+    res.effectiveTeamName ??
+    res.config.default ??
+    Object.keys(res.config.teams)[0] ??
+    ""
+  );
+}
+
 export function TeamConfigView({
   theme,
   compact,
@@ -503,9 +515,15 @@ export function TeamConfigView({
   const getBundle = useRpc(getConfigBundleRpc);
   const saveBundle = useRpc(saveConfigRpc);
 
-  const [bundle, setBundle] = useState<ConfigBundleDto | null>(null);
-  const [draft, setDraft] = useState<PaseoTeamConfigDto | null>(null);
-  const [selectedTeam, setSelectedTeam] = useState<string>("");
+  const cacheKey = cwd ?? "";
+  const cached = bundleCache.get(cacheKey) ?? null;
+  const [bundle, setBundle] = useState<ConfigBundleDto | null>(cached);
+  const [draft, setDraft] = useState<PaseoTeamConfigDto | null>(
+    cached?.config ?? null,
+  );
+  const [selectedTeam, setSelectedTeam] = useState<string>(
+    cached ? initialTeamName(cached) : "",
+  );
   const [newTeamName, setNewTeamName] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -515,14 +533,12 @@ export function TeamConfigView({
     let active = true;
     void getBundle(cwd ? { cwd } : {})
       .then((res) => {
+        bundleCache.set(cacheKey, res);
         if (!active) return;
         setBundle(res);
         setDraft(res.config);
-        setSelectedTeam(
-          res.effectiveTeamName ??
-            res.config.default ??
-            Object.keys(res.config.teams)[0] ??
-            "",
+        setSelectedTeam((prev) =>
+          prev && res.config.teams[prev] ? prev : initialTeamName(res),
         );
       })
       .catch((err) => {
@@ -531,7 +547,7 @@ export function TeamConfigView({
     return () => {
       active = false;
     };
-  }, [cwd, getBundle, toast]);
+  }, [cacheKey, cwd, getBundle, toast]);
 
   if (!bundle || !draft) {
     return <Loading />;
@@ -555,6 +571,7 @@ export function TeamConfigView({
         config: nextConfig,
         ...(cwd ? { cwd } : {}),
       });
+      bundleCache.set(cacheKey, updated);
       setBundle(updated);
       setDraft(updated.config);
     } catch (err) {
@@ -614,21 +631,20 @@ export function TeamConfigView({
       toast.error(t.errKeepOnePreset);
       return;
     }
-    if (draft.default === name) {
-      toast.error(t.errCannotDeleteDefault);
-      return;
-    }
     const nextTeams = { ...draft.teams };
     const nextProjects = { ...draft.projects };
     for (const [repo, presetName] of Object.entries(nextProjects)) {
       if (presetName === name) delete nextProjects[repo];
     }
     delete nextTeams[name];
-    if (selectedTeam === name) {
-      setSelectedTeam(draft.default ?? Object.keys(nextTeams)[0] ?? "");
-    }
+    const nextDefault =
+      draft.default && draft.default !== name
+        ? draft.default
+        : (Object.keys(nextTeams)[0] ?? null);
+    if (selectedTeam === name) setSelectedTeam(nextDefault ?? "");
     void persistNextConfig({
       ...draft,
+      default: nextDefault,
       teams: nextTeams,
       projects: nextProjects,
     });
@@ -648,11 +664,10 @@ export function TeamConfigView({
       (r) => r.model === activePreset.developer.model,
     );
 
-  const deleteBlockedHint = isDefault
-    ? t.presetDeleteHintDefault
-    : teamNames.length <= 1
-      ? t.presetDeleteHintLast
-      : t.presetDeleteHint;
+  // Deleting the default hands the default to the first remaining preset.
+  const deleteFallback = isDefault
+    ? (teamNames.find((name) => name !== activeName) ?? "")
+    : (draft.default ?? "");
 
   return (
     <ScrollView
@@ -726,26 +741,34 @@ export function TeamConfigView({
               }))}
               onValueChange={(value) => setSelectedTeam(value)}
             />
-            <SettingsAction
-              label={t.presetDefaultRow}
-              hint={
-                isDefault
-                  ? t.presetDefaultHintIs
-                  : t.presetDefaultHintNot(draft.default ?? "")
-              }
-              actionLabel={isDefault ? t.isGlobalDefault : t.setGlobalDefault}
-              disabled={isDefault}
-              onPress={() =>
-                void persistNextConfig({ ...draft, default: activeName })
-              }
-            />
-            <SettingsAction
-              label={t.presetDeleteRow}
-              hint={deleteBlockedHint}
-              actionLabel={t.deletePresetBtn}
-              disabled={isDefault || teamNames.length <= 1}
-              onPress={() => setDeleteOpen(true)}
-            />
+            {isDefault ? (
+              <SettingsRow
+                label={t.presetDefaultRow}
+                hint={t.presetDefaultHintIs}
+              >
+                <Text
+                  style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}
+                >
+                  {t.isGlobalDefault}
+                </Text>
+              </SettingsRow>
+            ) : (
+              <SettingsAction
+                label={t.presetDefaultRow}
+                hint={t.presetDefaultHintNot(draft.default ?? "")}
+                actionLabel={t.setGlobalDefault}
+                onPress={() =>
+                  void persistNextConfig({ ...draft, default: activeName })
+                }
+              />
+            )}
+            {teamNames.length > 1 ? (
+              <SettingsAction
+                label={t.presetDeleteRow(activeName)}
+                actionLabel={t.deletePresetBtn}
+                onPress={() => setDeleteOpen(true)}
+              />
+            ) : null}
           </SettingsCard>
         </SettingsSection>
 
@@ -968,13 +991,13 @@ export function TeamConfigView({
       </Modal>
 
       <Modal
-        title={`${t.presetDeleteRow} · ${activeName}`}
+        title={t.presetDeleteRow(activeName)}
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
       >
         <Modal.Content contentContainerStyle={{ gap: 12 }}>
           <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>
-            {t.presetDeleteHint}
+            {t.presetDeleteConfirm(activeName, deleteFallback, isDefault)}
           </Text>
           <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
             <Pressable

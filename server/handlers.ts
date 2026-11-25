@@ -1058,6 +1058,9 @@ export function toPipelineSnapshot(
     ...(record.coordinatorServerId
       ? { coordinatorServerId: record.coordinatorServerId }
       : {}),
+    ...(record.launcherAgentId
+      ? { launcherAgentId: record.launcherAgentId }
+      : {}),
     planReview: record.planReview,
     planReviewRound: record.planReviewRound,
     codeReview: record.codeReview,
