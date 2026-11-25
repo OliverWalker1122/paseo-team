@@ -9,10 +9,6 @@ All notable changes to this project are documented here. The format follows [Kee
 - Tiered test suite: L1 unit & prompt contract tests (`npm run test:unit`), L2 full 5-hook & tool pipeline integration tests (`npm run test:integration`), L3 opt-in live Paseo daemon E2E acceptance suite (`npm run test:e2e`), and Node native coverage reporting & SVG badge generator (`npm run test:coverage`, `npm run coverage:badge`).
 - Open-source repository templates (`CODE_OF_CONDUCT.md`, GitHub issue & PR templates) and stricter unused-code TypeScript checks (`noUnusedLocals`, `noUnusedParameters`).
 
-### Changed
-
-- Team page: the default-preset and delete actions share one row, Delete is shown in the danger color with a trash icon, and the delete confirmation has a Cancel button.
-
 ### Fixed
 
 - Auto-allow coordinator read-only permission checks (`list_pending_permissions`, `list_hosts`, `list_workspaces`, `list_profiles`), dot-delimited provider tool names (`paseo.*`), and task-child-scoped `respond_to_permission` calls in `agent.permission.before` to prevent Antigravity coordinator+child permission deadlocks.
@@ -24,7 +20,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Removed automatic model matching. A task now refuses to start and names each role that has no model; pick one in Team settings or turn a reviewer off.
 - Team graph: compact square node tiles, short rows for finished tasks, long details collapsed until opened; the "start another task" box under the graph is gone (use `/paseo-team` in the chat).
 - A coordinator or member chat's team graph has a "Back to main chat" button that opens the chat which started the task.
-- Presets: deleting the default preset is allowed (the first remaining preset becomes default) and the confirmation says where its projects go; the preset card has one select, a default row and a delete row.
+- Presets: deleting the default preset is allowed (the first remaining preset becomes default) and the confirmation says where its projects go; Delete sits in the preset header next to New preset in the danger color, and its confirmation has a Cancel button.
+- Team page: the preset select reads "Editing", Developer has a hint, effort labels use one casing, and the Complex tasks section is collapsed until opened.
 - Opening Team no longer loads the whole task history; History loads when its tab is opened, and the config page renders from the last loaded settings while it refreshes.
 
 - Each team task now runs in a new coordinator session that inherits the launching chat's model, so one chat can start several tasks. The chat's graph shows each task as a subtree.

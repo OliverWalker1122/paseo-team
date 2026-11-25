@@ -69,13 +69,23 @@ function formatModelButtonLabel(
   return modelValue;
 }
 
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function effortChoicesFor(
   spec: RoleModelSpecDto | null,
   providers: ProviderCatalogItemDto[],
 ): { id: string; label: string }[] {
   if (!spec || !spec.model || spec.model === "auto") return [];
   const meta = findModelMeta(spec.model, providers);
-  if (meta && meta.thinkingOptions.length > 0) return meta.thinkingOptions;
+  if (meta && meta.thinkingOptions.length > 0) {
+    // Providers disagree on casing ("high" vs "High"); show one style.
+    return meta.thinkingOptions.map((o) => ({
+      id: o.id,
+      label: capitalize(o.label),
+    }));
+  }
   return [
     { id: "low", label: "Low" },
     { id: "medium", label: "Medium" },
@@ -256,7 +266,7 @@ function RoleModelRow({
       : currentEffort === AUTO_EFFORT
         ? t.effortDefault
         : (effortChoices.find((c) => c.id === currentEffort)?.label ??
-          currentEffort);
+          capitalize(currentEffort));
 
   const filteredGroups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -523,6 +533,7 @@ export function TeamConfigView({
   const [newTeamName, setNewTeamName] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [complexOpen, setComplexOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -718,12 +729,23 @@ export function TeamConfigView({
           title={t.sectionPresets}
           info={t.sectionPresetsInfo}
           trailing={
-            <ActionButton
-              theme={theme}
-              icon="Plus"
-              label={t.newPresetBtn}
-              onPress={() => setCreateOpen(true)}
-            />
+            <View style={{ flexDirection: "row", gap: 4 }}>
+              <ActionButton
+                theme={theme}
+                icon="Plus"
+                label={t.newPresetBtn}
+                onPress={() => setCreateOpen(true)}
+              />
+              {teamNames.length > 1 ? (
+                <ActionButton
+                  theme={theme}
+                  danger
+                  icon="Trash2"
+                  label={t.deletePresetBtn}
+                  onPress={() => setDeleteOpen(true)}
+                />
+              ) : null}
+            </View>
           }
         >
           <SettingsCard>
@@ -737,47 +759,31 @@ export function TeamConfigView({
               }))}
               onValueChange={(value) => setSelectedTeam(value)}
             />
-            <SettingsRow
-              label={t.presetDefaultRow}
-              hint={
-                isDefault
-                  ? t.presetDefaultHintIs
-                  : t.presetDefaultHintNot(draft.default ?? "")
-              }
-            >
-              <View
-                style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+            {isDefault ? (
+              <SettingsRow
+                label={t.presetDefaultRow}
+                hint={t.presetDefaultHintIs}
               >
-                {isDefault ? (
-                  <Text
-                    style={{
-                      color: theme.colors.foregroundMuted,
-                      fontSize: 12,
-                      paddingHorizontal: 10,
-                    }}
-                  >
-                    {t.isGlobalDefault}
-                  </Text>
-                ) : (
-                  <ActionButton
-                    theme={theme}
-                    label={t.setGlobalDefault}
-                    onPress={() =>
-                      void persistNextConfig({ ...draft, default: activeName })
-                    }
-                  />
-                )}
-                {teamNames.length > 1 ? (
-                  <ActionButton
-                    theme={theme}
-                    danger
-                    icon="Trash2"
-                    label={t.deletePresetBtn}
-                    onPress={() => setDeleteOpen(true)}
-                  />
-                ) : null}
-              </View>
-            </SettingsRow>
+                <Text
+                  style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}
+                >
+                  {t.isGlobalDefault}
+                </Text>
+              </SettingsRow>
+            ) : (
+              <SettingsRow
+                label={t.presetDefaultRow}
+                hint={t.presetDefaultHintNot(draft.default ?? "")}
+              >
+                <ActionButton
+                  theme={theme}
+                  label={t.setGlobalDefault}
+                  onPress={() =>
+                    void persistNextConfig({ ...draft, default: activeName })
+                  }
+                />
+              </SettingsRow>
+            )}
           </SettingsCard>
         </SettingsSection>
 
@@ -793,6 +799,7 @@ export function TeamConfigView({
                   compact={compact}
                   lang={lang}
                   title="Developer"
+                  hint={t.devRoleHint}
                   spec={activePreset.developer}
                   providers={bundle.providers}
                   onChange={(next) => {
@@ -865,95 +872,107 @@ export function TeamConfigView({
             <SettingsSection
               title={t.sectionComplex}
               info={t.sectionComplexInfo}
+              trailing={
+                <ActionButton
+                  theme={theme}
+                  icon={complexOpen ? "ChevronUp" : "ChevronDown"}
+                  label={complexOpen ? t.collapseBtn : t.expandBtn}
+                  onPress={() => setComplexOpen((open) => !open)}
+                />
+              }
             >
-              <SettingsCard>
-                <SettingsSelect
-                  label={t.planAuthorLabel}
-                  value={activePreset.complexMode}
-                  options={[
-                    { value: "simple" as const, label: t.planAuthorSimple },
-                    { value: "expert" as const, label: t.planAuthorExpert },
-                  ]}
-                  onValueChange={(value) =>
-                    updatePreset({
-                      complexMode: value,
-                      ...(value === "expert" && !activePreset.expert
-                        ? { expert: { model: "auto" } }
-                        : {}),
-                    })
-                  }
-                />
-                {activePreset.complexMode === "expert" ? (
-                  <RoleModelRow
-                    theme={theme}
-                    compact={compact}
-                    lang={lang}
-                    title={t.expertRoleTitle}
-                    hint={t.expertRoleHint}
-                    spec={activePreset.expert ?? { model: "auto" }}
-                    providers={bundle.providers}
-                    onChange={(next) => {
-                      if (next) updatePreset({ expert: next });
-                    }}
+              {complexOpen ? (
+                <SettingsCard>
+                  <SettingsSelect
+                    label={t.planAuthorLabel}
+                    value={activePreset.complexMode}
+                    options={[
+                      { value: "simple" as const, label: t.planAuthorSimple },
+                      { value: "expert" as const, label: t.planAuthorExpert },
+                    ]}
+                    onValueChange={(value) =>
+                      updatePreset({
+                        complexMode: value,
+                        ...(value === "expert" && !activePreset.expert
+                          ? { expert: { model: "auto" } }
+                          : {}),
+                      })
+                    }
                   />
-                ) : null}
-                <SettingsSwitch
-                  label={t.separatePlanRevTitle}
-                  hint={t.separatePlanRevHint}
-                  value={activePreset.separatePlanReviewers ?? false}
-                  onValueChange={(value) =>
-                    updatePreset({
-                      separatePlanReviewers: value,
-                      planReviewers: [...activePreset.codeReviewers],
-                    })
-                  }
-                />
-                {activePreset.separatePlanReviewers ? (
-                  <>
+                  {activePreset.complexMode === "expert" ? (
                     <RoleModelRow
                       theme={theme}
                       compact={compact}
                       lang={lang}
-                      title={t.planRevRoleTitle(0)}
-                      hint={t.planRevRoleHint}
-                      spec={activePreset.planReviewers[0] ?? { model: "auto" }}
+                      title={t.expertRoleTitle}
+                      hint={t.expertRoleHint}
+                      spec={activePreset.expert ?? { model: "auto" }}
                       providers={bundle.providers}
                       onChange={(next) => {
-                        if (!next) return;
-                        const p2 =
+                        if (next) updatePreset({ expert: next });
+                      }}
+                    />
+                  ) : null}
+                  <SettingsSwitch
+                    label={t.separatePlanRevTitle}
+                    hint={t.separatePlanRevHint}
+                    value={activePreset.separatePlanReviewers ?? false}
+                    onValueChange={(value) =>
+                      updatePreset({
+                        separatePlanReviewers: value,
+                        planReviewers: [...activePreset.codeReviewers],
+                      })
+                    }
+                  />
+                  {activePreset.separatePlanReviewers ? (
+                    <>
+                      <RoleModelRow
+                        theme={theme}
+                        compact={compact}
+                        lang={lang}
+                        title={t.planRevRoleTitle(0)}
+                        hint={t.planRevRoleHint}
+                        spec={
+                          activePreset.planReviewers[0] ?? { model: "auto" }
+                        }
+                        providers={bundle.providers}
+                        onChange={(next) => {
+                          if (!next) return;
+                          const p2 =
+                            activePreset.planReviewers.length >= 2
+                              ? activePreset.planReviewers[1]
+                              : null;
+                          updatePreset({
+                            planReviewers: p2 ? [next, p2] : [next],
+                          });
+                        }}
+                      />
+                      <RoleModelRow
+                        theme={theme}
+                        compact={compact}
+                        lang={lang}
+                        title={t.planRevRoleTitle(1)}
+                        hint={t.planRevRoleHint}
+                        spec={
                           activePreset.planReviewers.length >= 2
                             ? activePreset.planReviewers[1]
-                            : null;
-                        updatePreset({
-                          planReviewers: p2 ? [next, p2] : [next],
-                        });
-                      }}
-                    />
-                    <RoleModelRow
-                      theme={theme}
-                      compact={compact}
-                      lang={lang}
-                      title={t.planRevRoleTitle(1)}
-                      hint={t.planRevRoleHint}
-                      spec={
-                        activePreset.planReviewers.length >= 2
-                          ? activePreset.planReviewers[1]
-                          : null
-                      }
-                      allowNone
-                      providers={bundle.providers}
-                      onChange={(next) => {
-                        const p1 = activePreset.planReviewers[0] ?? {
-                          model: "auto",
-                        };
-                        updatePreset({
-                          planReviewers: next ? [p1, next] : [p1],
-                        });
-                      }}
-                    />
-                  </>
-                ) : null}
-              </SettingsCard>
+                            : null
+                        }
+                        allowNone
+                        providers={bundle.providers}
+                        onChange={(next) => {
+                          const p1 = activePreset.planReviewers[0] ?? {
+                            model: "auto",
+                          };
+                          updatePreset({
+                            planReviewers: next ? [p1, next] : [p1],
+                          });
+                        }}
+                      />
+                    </>
+                  ) : null}
+                </SettingsCard>
+              ) : null}
             </SettingsSection>
           </>
         ) : null}

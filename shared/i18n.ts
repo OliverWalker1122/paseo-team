@@ -220,7 +220,7 @@ export const UI_TEXT = {
     sectionPresets: "Preset",
     sectionPresetsInfo:
       "A preset is a saved set of role models. New tasks use the default preset.",
-    presetEditing: "Preset",
+    presetEditing: "Editing",
     defaultSuffix: " (default)",
     presetDefaultRow: "Default preset",
     presetDefaultHintIs: "New tasks use this preset.",
@@ -243,6 +243,8 @@ export const UI_TEXT = {
     newPresetHint: (from: string) => `Starts as a copy of "${from}".`,
     createBtn: "Create",
     cancelBtn: "Cancel",
+    expandBtn: "Show",
+    collapseBtn: "Hide",
     sectionDeveloper: "Developer",
     sectionDeveloperInfo:
       "The only role that edits files. Works directly in this workspace and runs the full test suite.",
@@ -252,6 +254,7 @@ export const UI_TEXT = {
     sectionReviewInfo:
       "Cross review: two reviewers examine each change independently from opposing angles and never see each other's verdict.",
     rev1RoleTitle: "Code Reviewer #1",
+    devRoleHint: "Writes the code and runs the checks",
     rev1RoleHint: "Requirements and real edge cases",
     rev2RoleTitle: "Code Reviewer #2",
     rev2RoleHint: "Architecture and simpler alternatives",
@@ -386,7 +389,7 @@ export const UI_TEXT = {
     savingStatus: "保存中…",
     sectionPresets: "预设",
     sectionPresetsInfo: "预设是一组角色模型配置，新任务默认使用「默认预设」。",
-    presetEditing: "预设",
+    presetEditing: "正在编辑",
     defaultSuffix: "（默认）",
     presetDefaultRow: "默认预设",
     presetDefaultHintIs: "新任务都用这个预设。",
@@ -408,6 +411,8 @@ export const UI_TEXT = {
     newPresetHint: (from: string) => `以「${from}」为副本创建。`,
     createBtn: "创建",
     cancelBtn: "取消",
+    expandBtn: "展开",
+    collapseBtn: "收起",
     sectionDeveloper: "开发",
     sectionDeveloperInfo:
       "唯一可以修改文件的角色，直接在当前工作区改代码并运行完整测试。",
@@ -417,6 +422,7 @@ export const UI_TEXT = {
     sectionReviewInfo:
       "交叉审核：两位审查员从对立视角独立审查每次改动，彼此看不到对方结论。",
     rev1RoleTitle: "代码审查 #1",
+    devRoleHint: "写代码并跑检查",
     rev1RoleHint: "需求符合度与真实边界场景",
     rev2RoleTitle: "代码审查 #2",
     rev2RoleHint: "架构一致性与更简单的方案",
