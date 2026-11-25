@@ -161,7 +161,8 @@ export function ciProblem(
   const check = latestCheck(taskDir);
   if (!check) return "No paseo_team_run_check result in the task directory.";
   if (!check.passed) return `Latest check ${check.name} did not pass.`;
-  if (check.at <= previousDeliveryAt) {
+  // mtimeMs has sub-millisecond precision; deliveredAt is whole ms, so compare at ms resolution.
+  if (Math.floor(check.at) <= previousDeliveryAt) {
     return `Latest check ${check.name} predates the round ${current - 1} delivery; rerun paseo_team_run_check after the rework.`;
   }
   return null;
