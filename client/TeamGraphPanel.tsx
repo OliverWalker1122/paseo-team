@@ -408,16 +408,20 @@ function WorkflowNodeCard({
       accessibilityState={{ selected }}
       onPress={onPress}
       style={({ hovered }: HoverState) => ({
-        borderRadius: 10,
+        borderRadius: 12,
         borderWidth: 1,
+        borderLeftWidth: 3,
         borderColor: selected
           ? theme.colors.accent
           : hovered
             ? theme.colors.foregroundMuted
             : theme.colors.border,
-        backgroundColor: theme.colors.surface1,
-        paddingHorizontal: 13,
-        paddingVertical: 11,
+        borderLeftColor: pal.dot,
+        backgroundColor: selected
+          ? theme.colors.surface2
+          : theme.colors.surface1,
+        paddingHorizontal: 14,
+        paddingVertical: 12,
         gap: 6,
         opacity: node.visualStatus === "skipped" ? 0.55 : 1,
       })}
@@ -487,9 +491,9 @@ function WorkflowNodeCard({
 
       {body ? (
         <Text
-          numberOfLines={2}
+          numberOfLines={1}
           style={{
-            color: theme.colors.foreground,
+            color: theme.colors.foregroundMuted,
             fontSize: 12,
             lineHeight: 17,
           }}
@@ -501,13 +505,69 @@ function WorkflowNodeCard({
   );
 }
 
+const EDGE_WIDTH = 1.5;
+const EDGE_RADIUS = 10;
+
 /**
- * Pure React Native topological edge connector between consecutive workflow steps:
- * - 1 -> 1: straight centered stem
- * - 1 -> N: stem + symmetric flexbox fork bar into each parallel node center
- * - N -> 1: symmetric flexbox join bar from each parallel node center + stem
- * - N -> M: join bar + center stem + fork bar
+ * Pure React Native edge connector between consecutive workflow steps:
+ * a centered stem, plus a rounded join bar (N -> 1) and/or fork bar (1 -> N)
+ * whose drops land on each parallel node's center.
  */
+function EdgeBar({
+  color,
+  count,
+  direction,
+}: {
+  color: string;
+  count: number;
+  direction: "join" | "fork";
+}) {
+  const side = direction === "join" ? "Bottom" : "Top";
+  return (
+    <View style={{ width: "100%", flexDirection: "row", height: 16 }}>
+      {Array.from({ length: count }).map((_, idx) => {
+        const first = idx === 0;
+        const last = idx === count - 1;
+        const line = { [`border${side}Width`]: EDGE_WIDTH, borderColor: color };
+        return (
+          <View
+            key={`${direction}-${idx}`}
+            style={{ flex: 1, flexDirection: "row" }}
+          >
+            <View
+              style={{
+                flex: 1,
+                ...(first ? {} : line),
+                ...(last && !first
+                  ? {
+                      borderRightWidth: EDGE_WIDTH,
+                      [`border${side}RightRadius`]: EDGE_RADIUS,
+                    }
+                  : {}),
+              }}
+            />
+            {!first && !last ? (
+              <View style={{ width: EDGE_WIDTH, backgroundColor: color }} />
+            ) : null}
+            <View
+              style={{
+                flex: 1,
+                ...(last ? {} : line),
+                ...(first && !last
+                  ? {
+                      borderLeftWidth: EDGE_WIDTH,
+                      [`border${side}LeftRadius`]: EDGE_RADIUS,
+                    }
+                  : {}),
+              }}
+            />
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 function WorkflowEdgeConnector({
   color,
   fromCount,
@@ -517,70 +577,64 @@ function WorkflowEdgeConnector({
   fromCount: number;
   toCount: number;
 }) {
-  if (fromCount <= 1 && toCount <= 1) {
-    return (
-      <View style={{ alignItems: "center" }}>
-        <View style={{ width: 2, height: 18, backgroundColor: color }} />
-      </View>
-    );
-  }
-
+  const stem = (height: number) => (
+    <View style={{ width: EDGE_WIDTH, height, backgroundColor: color }} />
+  );
   return (
     <View style={{ width: "100%", alignItems: "center" }}>
       {fromCount > 1 ? (
-        <View style={{ width: "100%", flexDirection: "row", height: 12 }}>
-          {Array.from({ length: fromCount }).map((_, idx) => (
-            <View key={`join-${idx}`} style={{ flex: 1, flexDirection: "row" }}>
-              <View
-                style={{
-                  flex: 1,
-                  borderBottomWidth: idx > 0 ? 2 : 0,
-                  borderColor: color,
-                }}
-              />
-              <View style={{ width: 2, backgroundColor: color }} />
-              <View
-                style={{
-                  flex: 1,
-                  borderBottomWidth: idx < fromCount - 1 ? 2 : 0,
-                  borderColor: color,
-                }}
-              />
-            </View>
-          ))}
-        </View>
+        <EdgeBar color={color} count={fromCount} direction="join" />
       ) : null}
-
-      <View
-        style={{
-          width: 2,
-          height: fromCount > 1 && toCount > 1 ? 8 : 10,
-          backgroundColor: color,
-        }}
-      />
-
+      {stem(
+        fromCount > 1 && toCount > 1
+          ? 10
+          : fromCount > 1 || toCount > 1
+            ? 14
+            : 28,
+      )}
       {toCount > 1 ? (
-        <View style={{ width: "100%", flexDirection: "row", height: 12 }}>
-          {Array.from({ length: toCount }).map((_, idx) => (
-            <View key={`fork-${idx}`} style={{ flex: 1, flexDirection: "row" }}>
-              <View
-                style={{
-                  flex: 1,
-                  borderTopWidth: idx > 0 ? 2 : 0,
-                  borderColor: color,
-                }}
-              />
-              <View style={{ width: 2, backgroundColor: color }} />
-              <View
-                style={{
-                  flex: 1,
-                  borderTopWidth: idx < toCount - 1 ? 2 : 0,
-                  borderColor: color,
-                }}
-              />
-            </View>
-          ))}
-        </View>
+        <EdgeBar color={color} count={toCount} direction="fork" />
+      ) : null}
+    </View>
+  );
+}
+
+function ExpandableText({
+  theme,
+  lang,
+  text,
+}: {
+  theme: PluginTheme;
+  lang: UiLanguage;
+  text: string;
+}) {
+  const [open, setOpen] = useState(false);
+  // shortcut: length heuristic instead of measuring lines; good enough for summaries.
+  const long = text.length > 160 || text.split("\n").length > 3;
+  return (
+    <View style={{ gap: 4 }}>
+      <Text
+        selectable
+        numberOfLines={long && !open ? 3 : undefined}
+        style={{ color: theme.colors.foreground, fontSize: 13, lineHeight: 20 }}
+      >
+        {text}
+      </Text>
+      {long ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setOpen((v) => !v)}
+        >
+          <Text
+            style={{
+              color: theme.colors.accent,
+              fontSize: 12,
+              fontWeight: "500",
+            }}
+          >
+            {open ? UI_TEXT[lang].showLess : UI_TEXT[lang].showMore}
+          </Text>
+        </Pressable>
       ) : null}
     </View>
   );
@@ -662,15 +716,11 @@ function ReviewRoundsList({
                 </Text>
               </Text>
               {round.summary ? (
-                <Text
-                  style={{
-                    color: theme.colors.foreground,
-                    fontSize: 13,
-                    lineHeight: 19,
-                  }}
-                >
-                  {round.summary}
-                </Text>
+                <ExpandableText
+                  theme={theme}
+                  lang={lang}
+                  text={round.summary}
+                />
               ) : null}
               {(round.findings ?? []).map((raw, i) => {
                 const f = parseFinding(raw);
@@ -746,9 +796,9 @@ function NodeInspector({
   return (
     <View
       style={{
-        marginTop: 8,
-        padding: 14,
-        borderRadius: 10,
+        marginTop: 10,
+        padding: 16,
+        borderRadius: 12,
         borderWidth: 1,
         borderColor: theme.colors.accent,
         backgroundColor: theme.colors.surface1,
@@ -882,15 +932,7 @@ function NodeInspector({
       {node.briefSummary ? (
         <View style={{ gap: 3 }}>
           <SectionLabel theme={theme} text={t.responsibilityTitle} />
-          <Text
-            style={{
-              color: theme.colors.foreground,
-              fontSize: 13,
-              lineHeight: 19,
-            }}
-          >
-            {node.briefSummary}
-          </Text>
+          <ExpandableText theme={theme} lang={lang} text={node.briefSummary} />
         </View>
       ) : null}
 
@@ -899,15 +941,7 @@ function NodeInspector({
       ) : node.summary ? (
         <View style={{ gap: 3 }}>
           <SectionLabel theme={theme} text={t.outcomeTitle} />
-          <Text
-            style={{
-              color: theme.colors.foreground,
-              fontSize: 13,
-              lineHeight: 19,
-            }}
-          >
-            {node.summary}
-          </Text>
+          <ExpandableText theme={theme} lang={lang} text={node.summary} />
         </View>
       ) : null}
 
@@ -1291,7 +1325,7 @@ function TaskFlowCanvas({
                   />
                 </View>
               ) : stackParallel ? (
-                <View style={{ width: "100%", gap: 8, paddingHorizontal: 5 }}>
+                <View style={{ width: "100%", gap: 10, paddingHorizontal: 8 }}>
                   {stage.nodes.map((node) => (
                     <WorkflowNodeCard
                       key={node.nodeId}
@@ -1312,7 +1346,7 @@ function TaskFlowCanvas({
                   {stage.nodes.map((node) => (
                     <View
                       key={node.nodeId}
-                      style={{ flex: 1, minWidth: 0, paddingHorizontal: 5 }}
+                      style={{ flex: 1, minWidth: 0, paddingHorizontal: 8 }}
                     >
                       <WorkflowNodeCard
                         theme={theme}
