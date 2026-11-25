@@ -658,6 +658,8 @@ export function toPipelineSnapshot(
   const planRevVisible = planRevBase.length > 0 && !planRevSkipped;
 
   const maxRounds = 2 + (record.extraRounds ?? 0);
+  const ownMaxRound = (item: BaseResolvedNode) =>
+    item.rounds.reduce((m, r) => Math.max(m, r.round), 0);
 
   if (expertVisible || planRevVisible) {
     const recordedPlanRoundSet = new Set<number>();
@@ -667,15 +669,29 @@ export function toPipelineSnapshot(
     const recordedPlanRounds = [...recordedPlanRoundSet].sort((a, b) => a - b);
     const maxPlanRecorded =
       recordedPlanRounds.length > 0 ? Math.max(...recordedPlanRounds) : 0;
+    const planSubmissions = record.planSubmissions ?? 0;
+    const lastPlanRoundFailed =
+      maxPlanRecorded >= 1 &&
+      planRevBase.some((item) => {
+        const last = item.rounds
+          .filter((x) => x.round === maxPlanRecorded)
+          .at(-1);
+        return Boolean(last && last.verdict !== "APPROVE");
+      });
 
     const nextLiveExpertRound =
-      maxPlanRecorded >= 1 && expertBase.some((n) => n.isLiveActive)
+      maxPlanRecorded >= 1 &&
+      maxPlanRecorded >= planSubmissions &&
+      lastPlanRoundFailed &&
+      expertBase.some((n) => n.isLiveActive)
         ? maxPlanRecorded + 1
         : 0;
-    const nextLivePlanRevRound =
-      maxPlanRecorded >= 1 && planRevBase.some((n) => n.isLiveActive)
-        ? maxPlanRecorded + 1
-        : 0;
+    const planTargetRound = Math.max(1, maxPlanRecorded, planSubmissions);
+    const nextLivePlanRevRound = planRevBase.some(
+      (n) => n.isLiveActive && ownMaxRound(n) < planTargetRound,
+    )
+      ? planTargetRound
+      : 0;
 
     const planCycleRounds = [
       ...new Set<number>([
@@ -688,7 +704,10 @@ export function toPipelineSnapshot(
     const maxPlanCycle = planCycleRounds[planCycleRounds.length - 1] ?? 1;
 
     for (const r of planCycleRounds) {
-      if (expertVisible) {
+      if (
+        expertVisible &&
+        (r === 1 || r <= planSubmissions || r === nextLiveExpertRound)
+      ) {
         const expRoundNodes = expertBase.map((item): PipelineNodeViewDto => {
           const settledEarlier = r < maxPlanCycle || r <= maxPlanRecorded;
           return {
@@ -806,18 +825,29 @@ export function toPipelineSnapshot(
 
   const deliveries = record.deliveries ?? [];
   const recordedDevRoundSet = new Set<number>(deliveries.map((d) => d.round));
+  const maxDeliveryRound = deliveries.reduce((m, d) => Math.max(m, d.round), 0);
+  const lastCodeRoundFailed =
+    maxCodeRecorded >= 1 &&
+    codeRevBase.some((item) => {
+      const last = item.rounds
+        .filter((x) => x.round === maxCodeRecorded)
+        .at(-1);
+      return Boolean(last && last.verdict !== "APPROVE");
+    });
 
   const nextLiveDevRound =
-    maxCodeRecorded >= 1 && devBase.some((n) => n.isLiveActive)
+    maxCodeRecorded >= 1 &&
+    maxCodeRecorded >= maxDeliveryRound &&
+    lastCodeRoundFailed &&
+    devBase.some((n) => n.isLiveActive)
       ? Math.max(maxCodeRecorded + 1, ...devBase.map((n) => n.raw.round ?? 0))
       : 0;
-  const nextLiveCodeRound =
-    maxCodeRecorded >= 1 && codeRevBase.some((n) => n.isLiveActive)
-      ? Math.max(
-          maxCodeRecorded + 1,
-          ...codeRevBase.map((n) => n.raw.round ?? 0),
-        )
-      : 0;
+  const codeTargetRound = Math.max(1, maxCodeRecorded, maxDeliveryRound);
+  const nextLiveCodeRound = codeRevBase.some(
+    (n) => n.isLiveActive && ownMaxRound(n) < codeTargetRound,
+  )
+    ? codeTargetRound
+    : 0;
 
   const codeCycleRounds = [
     ...new Set<number>([
@@ -832,7 +862,10 @@ export function toPipelineSnapshot(
   const maxCodeCycle = codeCycleRounds[codeCycleRounds.length - 1] ?? 1;
 
   for (const r of codeCycleRounds) {
-    if (devBase.length > 0) {
+    if (
+      devBase.length > 0 &&
+      (r === 1 || recordedDevRoundSet.has(r) || r === nextLiveDevRound)
+    ) {
       const roundDeliveries = deliveries.filter((d) => d.round === r);
       const settledDevRound =
         r < maxCodeCycle ||

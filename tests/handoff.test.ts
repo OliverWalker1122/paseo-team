@@ -463,3 +463,129 @@ test("waived code review skips reviewer nodes immediately from task creation", (
   );
   assert.equal(snap.skippedStageCount, 2);
 });
+
+test("mid-round-2 review keeps gate blocked for unresolved reviewer and avoids phantom round 3", (t) => {
+  const { make } = setup(t);
+  const { recordPath } = make("Mid-round-2 live snapshot");
+  registerTaskAgent(recordPath, {
+    role: "developer",
+    agentId: "dev-1",
+    profile: "auto",
+    briefSummary: "Build",
+  });
+  registerTaskAgent(recordPath, {
+    role: "code-reviewer",
+    slotIndex: 0,
+    agentId: "rev-1",
+    profile: "auto",
+    briefSummary: "Review 1",
+  });
+  registerTaskAgent(recordPath, {
+    role: "code-reviewer",
+    slotIndex: 1,
+    agentId: "rev-2",
+    profile: "auto",
+    briefSummary: "Review 2",
+  });
+
+  recordCandidateDelivery(recordPath, {
+    agentId: "dev-1",
+    summary: "d1",
+    architectureImpact: "None",
+    ciWaivedUserQuote: "user waived CI",
+  });
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-1",
+    round: 1,
+    verdict: "REQUEST_CHANGES",
+    summary: "fix 1",
+    findings: ["blocking: a.ts:1 bug"],
+  });
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-2",
+    round: 1,
+    verdict: "REQUEST_CHANGES",
+    summary: "fix 2",
+    findings: ["blocking: a.ts:2 bug"],
+  });
+
+  // Round 2 delivered: gate stays blocked before any round-2 review arrives.
+  recordCandidateDelivery(recordPath, {
+    agentId: "dev-1",
+    summary: "d2",
+    architectureImpact: "None",
+    ciWaivedUserQuote: "user waived CI",
+  });
+  assert.equal(inspectQualityGate({ recordPath }).status, "BLOCKED");
+
+  // rev-1 finishes round 2 first while rev-2 is still running round 2.
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-1",
+    round: 2,
+    verdict: "APPROVE",
+    summary: "r2 ok",
+  });
+
+  const gateMidR2 = inspectQualityGate({ recordPath });
+  assert.equal(gateMidR2.status, "BLOCKED");
+  assert.equal(gateMidR2.checks.codeReviewSatisfied, false);
+  assert.ok(
+    gateMidR2.missing.some((m) => m.includes("rev-2")),
+    gateMidR2.missing.join("\n"),
+  );
+
+  const liveMidR2 = new Map([
+    [
+      "rev-1",
+      {
+        status: "running" as const,
+        awaitingPermission: false,
+        provider: "codex",
+      },
+    ],
+    [
+      "rev-2",
+      { status: "running" as const, awaitingPermission: false, provider: "pi" },
+    ],
+  ]);
+  const snapMidR2 = toPipelineSnapshot(
+    recordPath,
+    loadTask(recordPath),
+    liveMidR2,
+    "zh",
+  );
+  assert.equal(snapMidR2.gateReady, false);
+  // No phantom development-r3 or code-review-r3!
+  assert.deepEqual(
+    snapMidR2.stages.map((s) => s.stepId),
+    [
+      "coordinator",
+      "development",
+      "code-review",
+      "development-r2",
+      "code-review-r2",
+      "merge-gate",
+    ],
+  );
+  const r2Stage = snapMidR2.stages.find((s) => s.stepId === "code-review-r2");
+  assert.deepEqual(
+    r2Stage?.nodes.map((n) => [n.agentId, n.visualStatus]),
+    [
+      ["rev-1", "approved"],
+      ["rev-2", "running"],
+    ],
+  );
+
+  // Once rev-2 also approves round 2, the gate passes.
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-2",
+    round: 2,
+    verdict: "APPROVE",
+    summary: "r2 ok",
+  });
+  assert.equal(inspectQualityGate({ recordPath }).status, "READY");
+});

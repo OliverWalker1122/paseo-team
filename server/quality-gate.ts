@@ -167,19 +167,24 @@ export function ciProblem(
   return null;
 }
 
-// Reviewers of the newest round must all approve, and every dispatched
-// reviewer must have submitted; older rounds are superseded.
+// Reviewers of the newest round must all approve, every dispatched reviewer
+// must have submitted and hold an APPROVE verdict (so an unresolved earlier
+// REQUEST_CHANGES cannot be bypassed while that reviewer is still re-reviewing),
+// and the latest review round must cover the newest delivery/plan submission.
 function reviewProblems(
   stage: "plan" | "code",
   reviewers: Record<string, unknown>[],
   nodes: Record<string, unknown>[],
+  requiredRound: number,
 ): string[] {
   const role = stage === "plan" ? "plan-reviewer" : "code-reviewer";
+  const registeredNodes = nodes.filter(
+    (n) => n?.role === role && filled(n.agentId),
+  );
+  const registeredIds = new Set(registeredNodes.map((n) => n.agentId));
   const submitted = new Set(reviewers.map((r) => r?.agentId));
-  const problems = nodes
-    .filter(
-      (n) => n?.role === role && filled(n.agentId) && !submitted.has(n.agentId),
-    )
+  const problems = registeredNodes
+    .filter((n) => !submitted.has(n.agentId))
     .map(
       (n) =>
         `${String(n.label ?? role)} (${String(n.agentId)}) has not submitted a ${stage} verdict via paseo_team_submit_review.`,
@@ -188,10 +193,19 @@ function reviewProblems(
     return problems.length > 0 ? problems : [`No ${stage} review submitted.`];
   }
   const latest = Math.max(...reviewers.map(roundOf));
+  if (latest < requiredRound) {
+    problems.push(
+      `No ${stage} review submitted for round ${requiredRound} yet.`,
+    );
+  }
   for (const r of reviewers) {
-    if (roundOf(r) === latest && r?.status !== "APPROVE") {
+    const rRound = roundOf(r);
+    if (
+      (rRound === latest || registeredIds.has(r?.agentId)) &&
+      r?.status !== "APPROVE"
+    ) {
       problems.push(
-        `${stage} reviewer ${String(r?.agentId)} round ${latest}: ${String(r?.status)}.`,
+        `${stage} reviewer ${String(r?.agentId)} round ${rRound}: ${String(r?.status)}.`,
       );
     }
   }
@@ -219,13 +233,28 @@ export function inspectQualityGate(options: {
   // Dispatching a reviewer makes its stage required, so an unsubmitted one always blocks.
   const dispatched = (role: string) =>
     nodes.some((n) => n?.role === role && filled(n.agentId));
+  const requiredPlanRound = Math.max(1, Number(record?.planSubmissions) || 0);
+  const requiredCodeRound = Math.max(
+    1,
+    ...asList(record?.deliveries).map(roundOf),
+  );
   const planProblems =
     record?.planReview === "required" || dispatched("plan-reviewer")
-      ? reviewProblems("plan", asList(record?.planReviewers), nodes)
+      ? reviewProblems(
+          "plan",
+          asList(record?.planReviewers),
+          nodes,
+          requiredPlanRound,
+        )
       : [];
   const codeProblems =
     record?.codeReview === "required" || dispatched("code-reviewer")
-      ? reviewProblems("code", asList(record?.codeReviewers), nodes)
+      ? reviewProblems(
+          "code",
+          asList(record?.codeReviewers),
+          nodes,
+          requiredCodeRound,
+        )
       : record?.codeReview === "waived" && !filled(record?.codeReviewReason)
         ? ["Code review waived without a reason."]
         : [];
