@@ -173,6 +173,12 @@ function edgeStrokeColor(
   return theme.colors.border;
 }
 
+/** First clause of a task goal, capped, for collapsed task rows. */
+function shortGoal(goal: string): string {
+  const clause = goal.split(/[。；;\n]/)[0]?.trim() || goal;
+  return clause.length > 36 ? `${clause.slice(0, 36)}…` : clause;
+}
+
 function formatShortTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
@@ -356,11 +362,18 @@ function verdictColor(theme: PluginTheme, verdict: ReviewRound["verdict"]) {
 }
 
 /** Card text: concrete conclusion or brief for this exact workflow step. */
+/** Fixed node tile geometry; edges use the same slot width so drops land on tile centers. */
+function nodeGeometry(compact: boolean) {
+  const width = compact ? 132 : 156;
+  return { width, slot: width + (compact ? 12 : 24) };
+}
+
 function WorkflowNodeCard({
   theme,
   lang,
   task,
   node,
+  width,
   selected,
   isViewerSelf,
   onPress,
@@ -369,13 +382,14 @@ function WorkflowNodeCard({
   lang: UiLanguage;
   task: PipelineTaskSnapshotDto;
   node: PipelineNodeViewDto;
+  width: number;
   selected: boolean;
   isViewerSelf: boolean;
   onPress: () => void;
 }) {
   const t = UI_TEXT[lang];
   const pal = statusPalette(theme, lang, node.visualStatus);
-  // The round moves into the status pill ("R2 已通过") so narrow cards keep the role name readable.
+  // The round moves into the status line ("R2 已通过") so the tile keeps just the role name.
   const cardLabel = node.round
     ? node.label.replace(/\s*·\s*(?:第\s*\d+\s*轮|Round\s*\d+)\S*\s*$/i, "")
     : node.label;
@@ -390,107 +404,62 @@ function WorkflowNodeCard({
         ? `R${node.round} ${pal.label}`
         : pal.label;
 
-  const metaItems = [
-    node.modelBadge || node.profile,
-    node.perspectiveLabel,
-    isViewerSelf ? t.currentChatTag : undefined,
-  ].filter(Boolean);
-
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityLabel={`${node.label} · ${statusText}`}
       accessibilityState={{ selected }}
       onPress={onPress}
       style={({ hovered }: HoverState) => ({
-        borderRadius: 12,
+        width,
+        alignItems: "center",
+        gap: 6,
+        paddingHorizontal: 10,
+        paddingVertical: 12,
+        borderRadius: 14,
         borderWidth: 1,
-        borderLeftWidth: 3,
         borderColor: selected
           ? theme.colors.accent
           : hovered
             ? theme.colors.foregroundMuted
             : theme.colors.border,
-        borderLeftColor: pal.dot,
         backgroundColor: selected
           ? theme.colors.surface2
           : theme.colors.surface1,
-        paddingHorizontal: 12,
-        paddingVertical: 10,
-        gap: 4,
         opacity: node.visualStatus === "skipped" ? 0.55 : 1,
       })}
     >
       <View
         style={{
-          flexDirection: "row",
-          flexWrap: "wrap",
+          width: 34,
+          height: 34,
+          borderRadius: 17,
+          borderWidth: 2,
+          borderColor: pal.dot,
+          backgroundColor: theme.colors.surface0,
           alignItems: "center",
-          columnGap: 8,
-          rowGap: 6,
+          justifyContent: "center",
         }}
       >
-        <View
-          style={{
-            width: 24,
-            height: 24,
-            borderRadius: 6,
-            backgroundColor: theme.colors.surface2,
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <Icon name={roleIconName(node.role)} size={13} color={pal.iconFg} />
-        </View>
-        <Text
-          numberOfLines={1}
-          style={{
-            flexGrow: 1,
-            flexShrink: 1,
-            flexBasis: 96,
-            color: theme.colors.foreground,
-            fontSize: 13,
-            fontWeight: "600",
-          }}
-        >
-          {cardLabel}
-        </Text>
-        <View
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 5,
-            paddingHorizontal: 7,
-            paddingVertical: 2,
-            borderRadius: 999,
-            backgroundColor: theme.colors.surface0,
-            borderWidth: 1,
-            borderColor: theme.colors.border,
-          }}
-        >
-          <View
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: 3,
-              backgroundColor: pal.dot,
-            }}
-          />
-          <Text style={{ color: pal.fg, fontSize: 10, fontWeight: "600" }}>
-            {statusText}
-          </Text>
-        </View>
+        <Icon name={roleIconName(node.role)} size={15} color={pal.iconFg} />
       </View>
-
       <Text
         numberOfLines={1}
         style={{
-          color: isViewerSelf
-            ? theme.colors.accent
-            : theme.colors.foregroundMuted,
-          fontSize: 11,
+          maxWidth: "100%",
+          color: isViewerSelf ? theme.colors.accent : theme.colors.foreground,
+          fontSize: 12,
+          fontWeight: "600",
+          textAlign: "center",
         }}
       >
-        {metaItems.join(" · ")}
+        {cardLabel}
+      </Text>
+      <Text
+        numberOfLines={1}
+        style={{ color: pal.fg, fontSize: 10.5, fontWeight: "600" }}
+      >
+        {statusText}
       </Text>
     </Pressable>
   );
@@ -502,20 +471,22 @@ const EDGE_RADIUS = 10;
 /**
  * Pure React Native edge connector between consecutive workflow steps:
  * a centered stem, plus a rounded join bar (N -> 1) and/or fork bar (1 -> N)
- * whose drops land on each parallel node's center.
+ * whose drops land on each parallel tile's center.
  */
 function EdgeBar({
   color,
   count,
+  slot,
   direction,
 }: {
   color: string;
   count: number;
+  slot: number;
   direction: "join" | "fork";
 }) {
   const side = direction === "join" ? "Bottom" : "Top";
   return (
-    <View style={{ width: "100%", flexDirection: "row", height: 16 }}>
+    <View style={{ width: count * slot, flexDirection: "row", height: 16 }}>
       {Array.from({ length: count }).map((_, idx) => {
         const first = idx === 0;
         const last = idx === count - 1;
@@ -563,10 +534,12 @@ function WorkflowEdgeConnector({
   color,
   fromCount,
   toCount,
+  slot,
 }: {
   color: string;
   fromCount: number;
   toCount: number;
+  slot: number;
 }) {
   const stem = (height: number) => (
     <View style={{ width: EDGE_WIDTH, height, backgroundColor: color }} />
@@ -574,17 +547,17 @@ function WorkflowEdgeConnector({
   return (
     <View style={{ width: "100%", alignItems: "center" }}>
       {fromCount > 1 ? (
-        <EdgeBar color={color} count={fromCount} direction="join" />
+        <EdgeBar color={color} count={fromCount} slot={slot} direction="join" />
       ) : null}
       {stem(
         fromCount > 1 && toCount > 1
           ? 10
           : fromCount > 1 || toCount > 1
-            ? 14
-            : 28,
+            ? 12
+            : 24,
       )}
       {toCount > 1 ? (
-        <EdgeBar color={color} count={toCount} direction="fork" />
+        <EdgeBar color={color} count={toCount} slot={slot} direction="fork" />
       ) : null}
     </View>
   );
@@ -1087,6 +1060,20 @@ function TaskFlowCanvas({
 
   const toggleNode = (nodeId: string) =>
     setSelectedNodeId((prev) => (prev === nodeId ? null : nodeId));
+  const geometry = nodeGeometry(compact);
+  const renderTile = (node: PipelineNodeViewDto) => (
+    <WorkflowNodeCard
+      key={node.nodeId}
+      theme={theme}
+      lang={lang}
+      task={task}
+      node={node}
+      width={geometry.width}
+      selected={selectedNode?.nodeId === node.nodeId}
+      isViewerSelf={Boolean(viewerAgentId) && node.agentId === viewerAgentId}
+      onPress={() => toggleNode(node.nodeId)}
+    />
+  );
 
   return (
     <View style={{ gap: 16 }}>
@@ -1115,11 +1102,12 @@ function TaskFlowCanvas({
             ) : (
               // The opening row already shows goal and status; keep one quiet meta line.
               <Text
-                numberOfLines={1}
+                numberOfLines={goalExpanded ? undefined : 1}
                 style={{
                   color: theme.colors.foregroundMuted,
                   fontSize: 12,
-                  lineHeight: 26,
+                  lineHeight: 20,
+                  paddingVertical: 3,
                 }}
               >
                 {[
@@ -1130,6 +1118,7 @@ function TaskFlowCanvas({
                 ]
                   .filter(Boolean)
                   .join(" · ")}
+                {goalExpanded ? `\n${task.goal}` : ""}
               </Text>
             )}
           </Pressable>
@@ -1330,64 +1319,18 @@ function TaskFlowCanvas({
 
           return (
             <View key={stage.stepId} style={{ width: "100%" }}>
-              {stage.nodes.length === 1 ? (
-                <View
-                  style={{
-                    width: "100%",
-                    maxWidth: 540,
-                    alignSelf: "center",
-                    paddingHorizontal: 5,
-                  }}
-                >
-                  <WorkflowNodeCard
-                    theme={theme}
-                    lang={lang}
-                    task={task}
-                    node={stage.nodes[0]}
-                    selected={selectedNode?.nodeId === stage.nodes[0].nodeId}
-                    isViewerSelf={
-                      Boolean(viewerAgentId) &&
-                      stage.nodes[0].agentId === viewerAgentId
-                    }
-                    onPress={() => toggleNode(stage.nodes[0].nodeId)}
-                  />
-                </View>
-              ) : stackParallel ? (
-                <View style={{ width: "100%", gap: 10, paddingHorizontal: 8 }}>
-                  {stage.nodes.map((node) => (
-                    <WorkflowNodeCard
-                      key={node.nodeId}
-                      theme={theme}
-                      lang={lang}
-                      task={task}
-                      node={node}
-                      selected={selectedNode?.nodeId === node.nodeId}
-                      isViewerSelf={
-                        Boolean(viewerAgentId) && node.agentId === viewerAgentId
-                      }
-                      onPress={() => toggleNode(node.nodeId)}
-                    />
-                  ))}
+              {stackParallel ? (
+                <View style={{ alignItems: "center", gap: 8 }}>
+                  {stage.nodes.map((node) => renderTile(node))}
                 </View>
               ) : (
-                <View style={{ width: "100%", flexDirection: "row" }}>
+                <View style={{ flexDirection: "row", alignSelf: "center" }}>
                   {stage.nodes.map((node) => (
                     <View
                       key={node.nodeId}
-                      style={{ flex: 1, minWidth: 0, paddingHorizontal: 8 }}
+                      style={{ width: geometry.slot, alignItems: "center" }}
                     >
-                      <WorkflowNodeCard
-                        theme={theme}
-                        lang={lang}
-                        task={task}
-                        node={node}
-                        selected={selectedNode?.nodeId === node.nodeId}
-                        isViewerSelf={
-                          Boolean(viewerAgentId) &&
-                          node.agentId === viewerAgentId
-                        }
-                        onPress={() => toggleNode(node.nodeId)}
-                      />
+                      {renderTile(node)}
                     </View>
                   ))}
                 </View>
@@ -1397,7 +1340,7 @@ function TaskFlowCanvas({
                 <View
                   style={{
                     width: "100%",
-                    maxWidth: stage.nodes.length === 1 ? 540 : undefined,
+                    maxWidth: 560,
                     alignSelf: "center",
                     paddingHorizontal: 5,
                   }}
@@ -1425,6 +1368,7 @@ function TaskFlowCanvas({
                   )}
                   fromCount={visualNodeCount}
                   toCount={nextVisualCount}
+                  slot={geometry.slot}
                 />
               ) : null}
             </View>
@@ -1886,6 +1830,9 @@ function LauncherTaskTree({
       {shown.map((task) => {
         const open = expanded === task.taskId;
         const status = taskStatusInfo(lang, task);
+        const finished =
+          task.lifecycleStatus === "completed" ||
+          task.lifecycleStatus === "abandoned";
         return (
           <View
             key={task.taskId}
@@ -1901,7 +1848,11 @@ function LauncherTaskTree({
               accessibilityRole="button"
               accessibilityState={{ expanded: open }}
               onPress={() => setExpanded(open ? null : task.taskId)}
-              style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+              style={{
+                flexDirection: "row",
+                alignItems: open ? "flex-start" : "center",
+                gap: 8,
+              }}
             >
               <Icon
                 name={open ? "ChevronDown" : "ChevronRight"}
@@ -1918,15 +1869,26 @@ function LauncherTaskTree({
                 {status.label}
               </Text>
               <Text
-                numberOfLines={1}
+                numberOfLines={open ? 3 : 1}
                 style={{
                   flex: 1,
-                  color: theme.colors.foreground,
+                  color:
+                    finished && !open
+                      ? theme.colors.foregroundMuted
+                      : theme.colors.foreground,
                   fontSize: 13,
+                  lineHeight: 19,
                 }}
               >
-                {task.goal}
+                {open ? task.goal : shortGoal(task.goal)}
               </Text>
+              {!open ? (
+                <Text
+                  style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
+                >
+                  {formatShortTime(task.updatedAt)}
+                </Text>
+              ) : null}
             </Pressable>
             {open ? (
               <TaskFlowCanvas
