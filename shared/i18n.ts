@@ -352,6 +352,8 @@ export const UI_TEXT = {
     startAnotherTitle: "Start another task from this chat",
     launcherRoot: (n: number) =>
       `This chat · ${n} team task${n === 1 ? "" : "s"}`,
+    showEarlierTasks: (n: number) => `Show ${n} earlier tasks`,
+    hideEarlierTasks: "Hide earlier tasks",
     blueprintPreviewTitle: (team: string) => `How preset "${team}" runs`,
     blueprintCoord: "Coordinator",
     blueprintThisChat: "This chat",
@@ -529,6 +531,8 @@ export const UI_TEXT = {
     startBtn: "启动任务",
     startAnotherTitle: "从本对话再开一个任务",
     launcherRoot: (n: number) => `本对话 · ${n} 个团队任务`,
+    showEarlierTasks: (n: number) => `显示更早的 ${n} 个任务`,
+    hideEarlierTasks: "收起更早的任务",
     blueprintPreviewTitle: (team: string) => `预设「${team}」的执行流程`,
     blueprintCoord: "主控协调",
     blueprintThisChat: "当前对话",

@@ -356,14 +356,6 @@ function verdictColor(theme: PluginTheme, verdict: ReviewRound["verdict"]) {
 }
 
 /** Card text: concrete conclusion or brief for this exact workflow step. */
-function nodeCardBody(lang: UiLanguage, node: PipelineNodeViewDto): string {
-  const latest = node.rounds?.[node.rounds.length - 1];
-  if (latest) {
-    return latest.summary || findingsDigest(lang, latest) || node.briefSummary;
-  }
-  return node.summary || node.briefSummary;
-}
-
 function WorkflowNodeCard({
   theme,
   lang,
@@ -383,7 +375,6 @@ function WorkflowNodeCard({
 }) {
   const t = UI_TEXT[lang];
   const pal = statusPalette(theme, lang, node.visualStatus);
-  const body = nodeCardBody(lang, node);
   // The round moves into the status pill ("R2 已通过") so narrow cards keep the role name readable.
   const cardLabel = node.round
     ? node.label.replace(/\s*·\s*(?:第\s*\d+\s*轮|Round\s*\d+)\S*\s*$/i, "")
@@ -423,9 +414,9 @@ function WorkflowNodeCard({
         backgroundColor: selected
           ? theme.colors.surface2
           : theme.colors.surface1,
-        paddingHorizontal: 14,
-        paddingVertical: 12,
-        gap: 6,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        gap: 4,
         opacity: node.visualStatus === "skipped" ? 0.55 : 1,
       })}
     >
@@ -501,19 +492,6 @@ function WorkflowNodeCard({
       >
         {metaItems.join(" · ")}
       </Text>
-
-      {body ? (
-        <Text
-          numberOfLines={1}
-          style={{
-            color: theme.colors.foregroundMuted,
-            fontSize: 12,
-            lineHeight: 17,
-          }}
-        >
-          {body}
-        </Text>
-      ) : null}
     </Pressable>
   );
 }
@@ -1027,6 +1005,7 @@ function TaskFlowCanvas({
   onOpenAgent,
   onOpenConfig,
   onTaskUpdated,
+  showGoal = true,
 }: {
   theme: PluginTheme;
   compact: boolean;
@@ -1036,6 +1015,8 @@ function TaskFlowCanvas({
   onOpenAgent?: (agentId: string, serverId?: string) => void;
   onOpenConfig?: () => void;
   onTaskUpdated?: (next: PipelineTaskSnapshotDto) => void;
+  /** Off where the goal is already shown on the row that opened this canvas. */
+  showGoal?: boolean;
 }) {
   const t = UI_TEXT[lang];
   const toast = useToast();
@@ -1119,17 +1100,38 @@ function TaskFlowCanvas({
             onPress={() => setGoalExpanded((prev) => !prev)}
             style={{ flex: 1, minWidth: 0 }}
           >
-            <Text
-              numberOfLines={goalExpanded ? undefined : 2}
-              style={{
-                color: theme.colors.foreground,
-                fontSize: 15,
-                fontWeight: "600",
-                lineHeight: 22,
-              }}
-            >
-              {task.goal}
-            </Text>
+            {showGoal ? (
+              <Text
+                numberOfLines={goalExpanded ? undefined : 2}
+                style={{
+                  color: theme.colors.foreground,
+                  fontSize: 15,
+                  fontWeight: "600",
+                  lineHeight: 22,
+                }}
+              >
+                {task.goal}
+              </Text>
+            ) : (
+              // The opening row already shows goal and status; keep one quiet meta line.
+              <Text
+                numberOfLines={1}
+                style={{
+                  color: theme.colors.foregroundMuted,
+                  fontSize: 12,
+                  lineHeight: 26,
+                }}
+              >
+                {[
+                  ...metaParts,
+                  task.skippedStageCount
+                    ? t.hiddenStagesHint(task.skippedStageCount)
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </Text>
+            )}
           </Pressable>
           {task.recordPath &&
           !isNativeTree &&
@@ -1199,51 +1201,57 @@ function TaskFlowCanvas({
           ) : null}
         </View>
 
-        <View
-          style={{
-            flexDirection: "row",
-            flexWrap: "wrap",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
-          }}
-        >
+        {showGoal ? (
           <View
             style={{
               flexDirection: "row",
               flexWrap: "wrap",
               alignItems: "center",
-              gap: 6,
+              justifyContent: "space-between",
+              gap: 8,
             }}
           >
             <View
               style={{
-                width: 7,
-                height: 7,
-                borderRadius: 4,
-                backgroundColor: toneColor(theme, status.tone),
-              }}
-            />
-            <Text
-              style={{
-                color: toneColor(theme, status.tone),
-                fontSize: 12,
-                fontWeight: "600",
+                flexDirection: "row",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: 6,
               }}
             >
-              {status.label}
-            </Text>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-              {metaParts.map((part) => ` · ${part}`).join("")}
-            </Text>
-          </View>
+              <View
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: 4,
+                  backgroundColor: toneColor(theme, status.tone),
+                }}
+              />
+              <Text
+                style={{
+                  color: toneColor(theme, status.tone),
+                  fontSize: 12,
+                  fontWeight: "600",
+                }}
+              >
+                {status.label}
+              </Text>
+              <Text
+                style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}
+              >
+                {metaParts.map((part) => ` · ${part}`).join("")}
+              </Text>
+            </View>
 
-          {task.skippedStageCount && task.skippedStageCount > 0 ? (
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
-              {t.hiddenStagesHint(task.skippedStageCount)}
-            </Text>
-          ) : null}
-        </View>
+            {task.skippedStageCount && task.skippedStageCount > 0 ? (
+              <Text
+                style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
+              >
+                {t.hiddenStagesHint(task.skippedStageCount)}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
 
         {task.circuitBroken ? (
           <View
@@ -1852,6 +1860,14 @@ function LauncherTaskTree({
   const [expanded, setExpanded] = useState<string | null>(newestId);
   // A newly started task opens its branch.
   useEffect(() => setExpanded(newestId), [newestId]);
+  const [showEarlier, setShowEarlier] = useState(false);
+  // Keep the newest few and anything still active in view; fold the finished rest.
+  const recent = tasks.filter(
+    (task, i) =>
+      i < 3 || task.lifecycleStatus === "active" || task.taskId === expanded,
+  );
+  const earlierCount = tasks.length - recent.length;
+  const shown = showEarlier ? tasks : recent;
 
   return (
     <View style={{ gap: 10 }}>
@@ -1867,7 +1883,7 @@ function LauncherTaskTree({
           {t.launcherRoot(tasks.length)}
         </Text>
       </View>
-      {tasks.map((task) => {
+      {shown.map((task) => {
         const open = expanded === task.taskId;
         const status = taskStatusInfo(lang, task);
         return (
@@ -1921,11 +1937,25 @@ function LauncherTaskTree({
                 viewerAgentId={viewerAgentId}
                 onOpenAgent={onOpenAgent}
                 onOpenConfig={onOpenConfig}
+                showGoal={false}
               />
             ) : null}
           </View>
         );
       })}
+      {earlierCount > 0 ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setShowEarlier((v) => !v)}
+          style={{ marginLeft: 6, paddingLeft: 14, paddingVertical: 2 }}
+        >
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            {showEarlier
+              ? t.hideEarlierTasks
+              : t.showEarlierTasks(earlierCount)}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
