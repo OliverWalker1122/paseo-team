@@ -5,7 +5,6 @@ import {
   Loading,
   Modal,
   ScrollView,
-  SettingsAction,
   SettingsCard,
   SettingsRow,
   SettingsSection,
@@ -439,14 +438,21 @@ function ActionButton({
   label,
   icon,
   primary,
+  danger,
   onPress,
 }: {
   theme: PluginTheme;
   label: string;
   icon?: string;
   primary?: boolean;
+  danger?: boolean;
   onPress: () => void;
 }) {
+  const fg = primary
+    ? theme.colors.accentForeground
+    : danger
+      ? theme.colors.statusDanger
+      : theme.colors.foreground;
   return (
     <Pressable
       accessibilityRole="button"
@@ -465,20 +471,10 @@ function ActionButton({
             : "transparent",
       })}
     >
-      {icon ? (
-        <Icon
-          name={icon}
-          size={13}
-          color={
-            primary ? theme.colors.accentForeground : theme.colors.foreground
-          }
-        />
-      ) : null}
+      {icon ? <Icon name={icon} size={13} color={fg} /> : null}
       <Text
         style={{
-          color: primary
-            ? theme.colors.accentForeground
-            : theme.colors.foreground,
+          color: fg,
           fontSize: 12,
           fontWeight: "600",
         }}
@@ -741,34 +737,47 @@ export function TeamConfigView({
               }))}
               onValueChange={(value) => setSelectedTeam(value)}
             />
-            {isDefault ? (
-              <SettingsRow
-                label={t.presetDefaultRow}
-                hint={t.presetDefaultHintIs}
+            <SettingsRow
+              label={t.presetDefaultRow}
+              hint={
+                isDefault
+                  ? t.presetDefaultHintIs
+                  : t.presetDefaultHintNot(draft.default ?? "")
+              }
+            >
+              <View
+                style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
               >
-                <Text
-                  style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}
-                >
-                  {t.isGlobalDefault}
-                </Text>
-              </SettingsRow>
-            ) : (
-              <SettingsAction
-                label={t.presetDefaultRow}
-                hint={t.presetDefaultHintNot(draft.default ?? "")}
-                actionLabel={t.setGlobalDefault}
-                onPress={() =>
-                  void persistNextConfig({ ...draft, default: activeName })
-                }
-              />
-            )}
-            {teamNames.length > 1 ? (
-              <SettingsAction
-                label={t.presetDeleteRow(activeName)}
-                actionLabel={t.deletePresetBtn}
-                onPress={() => setDeleteOpen(true)}
-              />
-            ) : null}
+                {isDefault ? (
+                  <Text
+                    style={{
+                      color: theme.colors.foregroundMuted,
+                      fontSize: 12,
+                      paddingHorizontal: 10,
+                    }}
+                  >
+                    {t.isGlobalDefault}
+                  </Text>
+                ) : (
+                  <ActionButton
+                    theme={theme}
+                    label={t.setGlobalDefault}
+                    onPress={() =>
+                      void persistNextConfig({ ...draft, default: activeName })
+                    }
+                  />
+                )}
+                {teamNames.length > 1 ? (
+                  <ActionButton
+                    theme={theme}
+                    danger
+                    icon="Trash2"
+                    label={t.deletePresetBtn}
+                    onPress={() => setDeleteOpen(true)}
+                  />
+                ) : null}
+              </View>
+            </SettingsRow>
           </SettingsCard>
         </SettingsSection>
 
@@ -999,7 +1008,14 @@ export function TeamConfigView({
           <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>
             {t.presetDeleteConfirm(activeName, deleteFallback, isDefault)}
           </Text>
-          <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+          <View
+            style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}
+          >
+            <ActionButton
+              theme={theme}
+              label={t.cancelBtn}
+              onPress={() => setDeleteOpen(false)}
+            />
             <Pressable
               accessibilityRole="button"
               onPress={() => handleDeletePreset(activeName)}

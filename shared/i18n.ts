@@ -242,6 +242,7 @@ export const UI_TEXT = {
     newPresetPlaceholder: "Preset name",
     newPresetHint: (from: string) => `Starts as a copy of "${from}".`,
     createBtn: "Create",
+    cancelBtn: "Cancel",
     sectionDeveloper: "Developer",
     sectionDeveloperInfo:
       "The only role that edits files. Works directly in this workspace and runs the full test suite.",
@@ -406,6 +407,7 @@ export const UI_TEXT = {
     newPresetPlaceholder: "预设名称",
     newPresetHint: (from: string) => `以「${from}」为副本创建。`,
     createBtn: "创建",
+    cancelBtn: "取消",
     sectionDeveloper: "开发",
     sectionDeveloperInfo:
       "唯一可以修改文件的角色，直接在当前工作区改代码并运行完整测试。",
