@@ -10,5 +10,5 @@ Role-separated multi-agent orchestration, direct model routing (zero external Ag
 
 ## Quick Start
 
-1. Click **Team** in the sidebar (or run `/paseo-team setup`) to optionally customize models. Out of the box, `Auto` model matching works with zero setup.
+1. Click **Team** in the sidebar (or run `/paseo-team setup`) and pick a model for each role. Tasks do not start while a needed role has no model.
 2. Run `/paseo-team <your task goal>` inside any chat, or click the **Team Graph** composer pill to view the live left-to-right pipeline.

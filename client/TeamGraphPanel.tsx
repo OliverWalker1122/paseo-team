@@ -21,16 +21,13 @@ import {
   View,
 } from "react-native";
 import {
-  type ConfigBundleDto,
   type ConversationGraphPayloadDto,
   controlTaskRpc,
-  getConfigBundleRpc,
   getConversationGraphRpc,
   listTasksRpc,
   type PipelineNodeViewDto,
   type PipelineStageColumnDto,
   type PipelineTaskSnapshotDto,
-  startTeamTaskRpc,
   watchConversationGraphSubscription,
   watchTasksSubscription,
 } from "../shared/contracts.ts";
@@ -1409,20 +1406,12 @@ function SingleConversationGraphView({
   onOpenAgent?: (agentId: string, serverId?: string) => void;
   onOpenConfig?: () => void;
 }) {
-  const toast = useToast();
   const fetchConv = useRpc(getConversationGraphRpc);
-  const fetchConfig = useRpc(getConfigBundleRpc);
-  const startTask = useRpc(startTeamTaskRpc);
   const lang = useUiLanguage();
 
   const [payload, setPayload] = useState<ConversationGraphPayloadDto | null>(
     null,
   );
-  const [configBundle, setConfigBundle] = useState<ConfigBundleDto | null>(
-    null,
-  );
-  const [draftGoal, setDraftGoal] = useState("");
-  const [starting, setStarting] = useState(false);
 
   const queryInput = useMemo(
     () => ({
@@ -1460,53 +1449,16 @@ function SingleConversationGraphView({
           });
         }
       });
-    void fetchConfig(cwd ? { cwd } : {})
-      .then((b) => {
-        if (active) setConfigBundle(b);
-      })
-      .catch(() => {});
     return () => {
       active = false;
     };
-  }, [agentId, cwd, fetchConfig, fetchConv, queryInput]);
+  }, [agentId, cwd, fetchConv, queryInput]);
 
   const t = UI_TEXT[lang];
-
-  async function handleStartInThisConversation() {
-    if (!cwd) {
-      toast.error(t.errNoWorkspaceCwd);
-      return;
-    }
-    if (!draftGoal.trim()) {
-      toast.error(t.errEnterTaskGoal);
-      return;
-    }
-    setStarting(true);
-    try {
-      await startTask({
-        cwd,
-        workspaceId,
-        ...(agentId ? { agentId } : {}),
-        rawArgs: draftGoal.trim(),
-        language: lang,
-      });
-      setDraftGoal("");
-      toast.show(t.toastTaskStarted, { variant: "success" });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setStarting(false);
-    }
-  }
 
   if (payload === null) {
     return <Loading />;
   }
-
-  const effectivePreset =
-    configBundle && configBundle.effectiveTeamName
-      ? configBundle.config.teams[configBundle.effectiveTeamName]
-      : null;
 
   return (
     <ScrollView
@@ -1541,240 +1493,29 @@ function SingleConversationGraphView({
               onOpenAgent={onOpenAgent}
               onOpenConfig={onOpenConfig}
             />
-          ) : null}
-          <View
-            style={{
-              padding: 20,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: theme.colors.border,
-              backgroundColor: theme.colors.surface1,
-              gap: 14,
-            }}
-          >
-            <View
-              style={{
-                flexDirection: compact ? "column" : "row",
-                justifyContent: "space-between",
-                alignItems: compact ? "flex-start" : "center",
-                gap: 8,
-              }}
-            >
-              <View style={{ gap: 4, flex: 1 }}>
-                <Text
-                  style={{
-                    color: theme.colors.foreground,
-                    fontSize: 16,
-                    fontWeight: "700",
-                  }}
-                >
-                  {payload.tasks?.length ? t.startAnotherTitle : t.emptyTitle}
-                </Text>
-                {payload.tasks?.length ? null : (
-                  <Text
-                    style={{
-                      color: theme.colors.foregroundMuted,
-                      fontSize: 13,
-                      lineHeight: 19,
-                    }}
-                  >
-                    {t.emptyDesc}
-                  </Text>
-                )}
-              </View>
-
-              <View
-                style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
-              >
-                {onOpenConfig ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={onOpenConfig}
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 5,
-                      paddingHorizontal: 11,
-                      paddingVertical: 6,
-                      borderRadius: 7,
-                      borderWidth: 1,
-                      borderColor: theme.colors.border,
-                      backgroundColor: theme.colors.surface0,
-                    }}
-                  >
-                    <Icon
-                      name="Settings2"
-                      size={13}
-                      color={theme.colors.foreground}
-                    />
-                    <Text
-                      style={{
-                        color: theme.colors.foreground,
-                        fontSize: 12,
-                        fontWeight: "600",
-                      }}
-                    >
-                      {t.configureTeam}
-                    </Text>
-                  </Pressable>
-                ) : null}
-              </View>
-            </View>
-
-            <View
-              style={{
-                flexDirection: compact ? "column" : "row",
-                gap: 8,
-                alignItems: compact ? "stretch" : "center",
-              }}
-            >
-              <View style={{ flex: 1 }}>
-                <TextInput
-                  value={draftGoal}
-                  onChangeText={setDraftGoal}
-                  placeholder={t.startPlaceholder(
-                    configBundle?.effectiveTeamName ?? "Standard",
-                  )}
-                  placeholderTextColor={theme.colors.foregroundMuted}
-                  style={{
-                    color: theme.colors.foreground,
-                    fontSize: 13,
-                    paddingHorizontal: 11,
-                    paddingVertical: 8,
-                    borderRadius: 7,
-                    backgroundColor: theme.colors.surface0,
-                    borderWidth: 1,
-                    borderColor: theme.colors.border,
-                  }}
-                />
-              </View>
-              <Pressable
-                accessibilityRole="button"
-                disabled={starting}
-                onPress={() => void handleStartInThisConversation()}
+          ) : (
+            <View style={{ gap: 6, paddingVertical: 24, alignItems: "center" }}>
+              <Text
                 style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 6,
-                  paddingHorizontal: 15,
-                  paddingVertical: 9,
-                  borderRadius: 7,
-                  backgroundColor: theme.colors.accent,
-                  opacity: starting ? 0.6 : 1,
+                  color: theme.colors.foreground,
+                  fontSize: 15,
+                  fontWeight: "600",
                 }}
               >
-                <Icon
-                  name="Play"
-                  size={14}
-                  color={theme.colors.accentForeground}
-                />
-                <Text
-                  style={{
-                    color: theme.colors.accentForeground,
-                    fontSize: 13,
-                    fontWeight: "600",
-                  }}
-                >
-                  {starting ? t.startingBtn : t.startBtn}
-                </Text>
-              </Pressable>
+                {t.emptyTitle}
+              </Text>
+              <Text
+                style={{
+                  color: theme.colors.foregroundMuted,
+                  fontSize: 13,
+                  lineHeight: 19,
+                  textAlign: "center",
+                }}
+              >
+                {t.emptyDesc}
+              </Text>
             </View>
-
-            {effectivePreset ? (
-              <View style={{ gap: 6, paddingTop: 4 }}>
-                <Text
-                  style={{
-                    color: theme.colors.foregroundMuted,
-                    fontSize: 11,
-                    fontWeight: "600",
-                  }}
-                >
-                  {t.blueprintPreviewTitle(
-                    configBundle?.effectiveTeamName ?? "Standard",
-                  )}
-                </Text>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 8,
-                  }}
-                >
-                  {[
-                    { title: t.blueprintCoord, sub: t.blueprintThisChat },
-                    ...(effectivePreset.complexMode === "expert"
-                      ? [
-                          {
-                            title: t.blueprintExpert,
-                            sub: formatSpecChip(effectivePreset.expert, lang),
-                          },
-                        ]
-                      : []),
-                    {
-                      title: t.blueprintDev,
-                      sub: formatSpecChip(effectivePreset.developer, lang),
-                    },
-                    {
-                      title: t.blueprintReview,
-                      sub: effectivePreset.codeReviewers
-                        .map((r) => formatSpecChip(r, lang))
-                        .join(" + "),
-                    },
-                    { title: t.blueprintGate, sub: t.blueprintAutoCheck },
-                  ].map((step, i, arr) => (
-                    <View
-                      key={step.title}
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: 8,
-                      }}
-                    >
-                      <View
-                        style={{
-                          paddingHorizontal: 12,
-                          paddingVertical: 8,
-                          borderRadius: 8,
-                          borderWidth: 1,
-                          borderColor: theme.colors.border,
-                          backgroundColor: theme.colors.surface0,
-                          gap: 2,
-                        }}
-                      >
-                        <Text
-                          style={{
-                            color: theme.colors.foreground,
-                            fontSize: 12,
-                            fontWeight: "600",
-                          }}
-                        >
-                          {step.title}
-                        </Text>
-                        <Text
-                          style={{
-                            color: theme.colors.foregroundMuted,
-                            fontSize: 11,
-                          }}
-                        >
-                          {step.sub}
-                        </Text>
-                      </View>
-                      {i < arr.length - 1 ? (
-                        <Icon
-                          name="ChevronRight"
-                          size={15}
-                          color={theme.colors.border}
-                        />
-                      ) : null}
-                    </View>
-                  ))}
-                </ScrollView>
-              </View>
-            ) : null}
-          </View>
+          )}
         </>
       )}
     </ScrollView>

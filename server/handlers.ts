@@ -30,6 +30,7 @@ import {
   resolveProjectKey,
   type RoleModelSpec,
   saveConfig,
+  type TeamPreset,
 } from "./config-store.ts";
 import {
   assignReviewerPerspective,
@@ -329,7 +330,7 @@ async function fetchLiveAgentMap(
 
 function humanizeProfileLabel(profile: string, lang: UiLanguage): string {
   if (!profile || profile === "auto" || profile === "Auto") {
-    return lang === "en" ? "Auto-matched model" : "自动匹配模型";
+    return lang === "en" ? "No model set" : "未设置模型";
   }
   if (profile === "workflow.ts" || profile === "quality-gate") {
     return lang === "en" ? "Quality Gate" : "质量验收门禁";
@@ -1537,57 +1538,42 @@ export function parseInlineTaskDirectives(rawArgs: string): {
   };
 }
 
+const isUnsetSpec = (spec: RoleModelSpec | undefined) =>
+  !spec?.model || spec.model === AUTO_MODEL;
+
+/** Roles of a preset that still have no model; an "off" reviewer is simply absent from the list. */
+export function unsetRoles(preset: TeamPreset): string[] {
+  return [
+    isUnsetSpec(preset.developer) ? "Developer" : "",
+    preset.complexMode === "expert" && isUnsetSpec(preset.expert)
+      ? "Expert"
+      : "",
+    ...preset.codeReviewers.map((spec, i) =>
+      isUnsetSpec(spec) ? `Code Reviewer #${i + 1}` : "",
+    ),
+    ...preset.planReviewers.map((spec, i) =>
+      isUnsetSpec(spec) ? `Plan Reviewer #${i + 1}` : "",
+    ),
+  ].filter(Boolean);
+}
+
 function resolveRoleLaunchSpec(options: {
   role:
     "coordinator" | "developer" | "expert" | "plan-reviewer" | "code-reviewer";
   spec: RoleModelSpec;
   catalog: ProviderCatalogItemDto[];
-  readyProviders: string[];
-  avoidFullId?: string;
 }): {
   providerArg: string;
   modeId?: string;
   thinkingOptionId?: string;
 } {
-  const { spec, catalog, readyProviders, avoidFullId } = options;
-  let providerId = "";
-  let fullId = "";
-
+  const { spec, catalog } = options;
   if (!spec.model || spec.model === AUTO_MODEL) {
-    const PROVIDER_PRIORITY: Record<string, number> = {
-      codex: 1,
-      claude: 2,
-      antigravity: 3,
-      gemini: 4,
-      opencode: 5,
-      pi: 6,
-    };
-    const readyCatalog = [...catalog.filter((c) => c.ready)].sort(
-      (a, b) =>
-        (PROVIDER_PRIORITY[a.provider] ?? 99) -
-        (PROVIDER_PRIORITY[b.provider] ?? 99),
-    );
-    const avoidProv = avoidFullId?.split("/")[0] ?? "";
-    const chosenCat =
-      (avoidProv
-        ? readyCatalog.find((c) => c.provider !== avoidProv)
-        : undefined) ?? readyCatalog[0];
-
-    if (chosenCat) {
-      providerId = chosenCat.provider;
-      const defaultModel =
-        chosenCat.models.find((m) => m.isDefault && m.fullId !== avoidFullId) ??
-        chosenCat.models.find((m) => m.fullId !== avoidFullId) ??
-        chosenCat.models[0];
-      fullId = defaultModel ? defaultModel.fullId : chosenCat.provider;
-    } else {
-      providerId = readyProviders[0] ?? "codex";
-      fullId = providerId;
-    }
-  } else {
-    fullId = spec.model;
-    providerId = spec.model.split("/")[0] ?? spec.model;
+    // Guessing a model picks badly; startTeamTask reports unset roles before this.
+    throw new Error(`No model is set for the ${options.role} role.`);
   }
+  const fullId = spec.model;
+  const providerId = spec.model.split("/")[0] ?? spec.model;
 
   const catEntry = catalog.find((c) => c.provider === providerId);
   const availableModes = catEntry?.modes ?? [];
@@ -1646,10 +1632,7 @@ export async function startTeamTask(
   teamName: string;
   message: string;
 }> {
-  const { providers, readyProviders } = await readProviderCatalog(
-    paseo,
-    input.cwd,
-  );
+  const { providers } = await readProviderCatalog(paseo, input.cwd);
   const { config } = loadAndUpgradeConfig();
 
   const parsed = parseInlineTaskDirectives(input.rawArgs);
@@ -1661,6 +1644,15 @@ export async function startTeamTask(
     complexModeOverride:
       input.complexModeOverride ?? parsed.complexModeOverride,
   });
+
+  const unset = unsetRoles(eff.preset);
+  if (unset.length > 0) {
+    throw new Error(
+      zh
+        ? `预设「${eff.teamName}」还有角色没选模型：${unset.join("、")}。请在团队配置里为它们选择模型（审查员也可以设为“不启用”）。`
+        : `Preset "${eff.teamName}" has roles without a model: ${unset.join(", ")}. Pick a model for each in Team settings (a reviewer can also be turned off).`,
+    );
+  }
 
   const created = initTask({
     cwd: input.cwd,
@@ -1678,7 +1670,6 @@ export async function startTeamTask(
     role: "developer",
     spec: eff.preset.developer,
     catalog: providers,
-    readyProviders,
   });
 
   const formatLaunchLine = (
@@ -1702,7 +1693,6 @@ export async function startTeamTask(
       role: "expert",
       spec: eff.preset.expert ?? { model: AUTO_MODEL },
       catalog: providers,
-      readyProviders,
     });
     rosterLines.push(`- Expert: ${formatLaunchLine(expLaunch)}`);
   }
@@ -1713,7 +1703,6 @@ export async function startTeamTask(
         role: "plan-reviewer",
         spec,
         catalog: providers,
-        readyProviders,
       });
       const persp = assignReviewerPerspective(
         idx,
@@ -1741,8 +1730,6 @@ export async function startTeamTask(
         role: "code-reviewer",
         spec,
         catalog: providers,
-        readyProviders,
-        avoidFullId: idx > 0 ? devLaunch.providerArg : undefined,
       });
       rosterLines.push(
         `- Code Reviewer #${idx + 1} (${reviewerPerspectiveLabel(persp, promptLang)}): ${formatLaunchLine(revLaunch)}`,
@@ -1780,7 +1767,7 @@ export async function startTeamTask(
 
   // Each task gets its own new coordinator session, so one chat can start
   // several tasks; the coordinator inherits the launching chat's model.
-  let coordSpec: RoleModelSpec = { model: AUTO_MODEL };
+  let coordSpec: RoleModelSpec | null = null;
   if (input.agentId) {
     const launcher = (
       await paseo.agents
@@ -1800,11 +1787,17 @@ export async function startTeamTask(
       };
     }
   }
+  if (!coordSpec) {
+    throw new Error(
+      zh
+        ? "读不到发起对话的模型，无法创建协调者。请在一个对话里用 /paseo-team 启动任务。"
+        : "Could not read the launching chat's model for the coordinator. Start the task with /paseo-team from a chat.",
+    );
+  }
   const coordLaunch = resolveRoleLaunchSpec({
     role: "coordinator",
     spec: coordSpec,
     catalog: providers,
-    readyProviders,
   });
   const createdAgent = await paseo.workspaces
     .ref(input.workspaceId)

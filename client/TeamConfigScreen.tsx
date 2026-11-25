@@ -53,47 +53,15 @@ function findModelMeta(
   return undefined;
 }
 
-function previewAutoResolvedModel(
-  providers: ProviderCatalogItemDto[],
-  avoidFullId?: string,
-): string | null {
-  const PROVIDER_PRIORITY: Record<string, number> = {
-    codex: 1,
-    claude: 2,
-    antigravity: 3,
-    gemini: 4,
-    opencode: 5,
-    pi: 6,
-  };
-  const ready = [...providers.filter((c) => c.ready)].sort(
-    (a, b) =>
-      (PROVIDER_PRIORITY[a.provider] ?? 99) -
-      (PROVIDER_PRIORITY[b.provider] ?? 99),
-  );
-  if (ready.length === 0) return null;
-  const avoidProv = avoidFullId?.split("/")[0] ?? "";
-  const chosen =
-    (avoidProv ? ready.find((c) => c.provider !== avoidProv) : undefined) ??
-    ready[0];
-  const m =
-    chosen.models.find((x) => x.isDefault && x.fullId !== avoidFullId) ??
-    chosen.models.find((x) => x.fullId !== avoidFullId) ??
-    chosen.models[0];
-  return m ? m.fullId : chosen.provider;
-}
-
 function formatModelButtonLabel(
   modelValue: string,
   providers: ProviderCatalogItemDto[],
   lang: UiLanguage,
-  avoidFullId?: string,
 ): string {
   const t = UI_TEXT[lang];
   if (modelValue === NONE_MODEL) return t.noneReviewerLabel;
-  if (!modelValue || modelValue === "auto") {
-    const resolved = previewAutoResolvedModel(providers, avoidFullId);
-    return resolved ? `${t.autoModelLabel} · ${resolved}` : t.autoModelLabel;
-  }
+  // "auto" is the stored marker for a role nobody has picked a model for yet.
+  if (!modelValue || modelValue === "auto") return t.unsetModelLabel;
   const meta = findModelMeta(modelValue, providers);
   if (meta) {
     const prov = modelValue.split("/")[0] ?? "";
@@ -259,7 +227,6 @@ function RoleModelRow({
   hint,
   spec,
   allowNone,
-  avoidFullId,
   providers,
   onChange,
 }: {
@@ -270,7 +237,6 @@ function RoleModelRow({
   hint?: string;
   spec: RoleModelSpecDto | null;
   allowNone?: boolean;
-  avoidFullId?: string;
   providers: ProviderCatalogItemDto[];
   onChange: (next: RoleModelSpecDto | null) => void;
 }) {
@@ -287,7 +253,7 @@ function RoleModelRow({
   const currentEffort = spec?.thinking || AUTO_EFFORT;
   const effortLabel =
     effortChoices.length === 0
-      ? t.autoModelLabel
+      ? t.effortDefault
       : currentEffort === AUTO_EFFORT
         ? t.effortDefault
         : (effortChoices.find((c) => c.id === currentEffort)?.label ??
@@ -316,10 +282,6 @@ function RoleModelRow({
     setQuery("");
     if (nextModel === NONE_MODEL) {
       onChange(null);
-      return;
-    }
-    if (nextModel === "auto") {
-      onChange({ model: "auto" });
       return;
     }
     const nextMeta = findModelMeta(nextModel, providers);
@@ -358,12 +320,7 @@ function RoleModelRow({
           theme={theme}
           width={compact ? 190 : MODEL_BUTTON_WIDTH}
           muted={currentModel === NONE_MODEL}
-          label={formatModelButtonLabel(
-            currentModel,
-            providers,
-            lang,
-            avoidFullId,
-          )}
+          label={formatModelButtonLabel(currentModel, providers, lang)}
           onPress={() => setModelOpen(true)}
         />
         <PickerButton
@@ -402,13 +359,6 @@ function RoleModelRow({
 
           {!query.trim() ? (
             <>
-              <OptionRow
-                theme={theme}
-                title={t.autoModelLabel}
-                subtitle={t.autoModelDesc}
-                selected={currentModel === "auto"}
-                onPress={() => selectModel("auto")}
-              />
               {allowNone ? (
                 <OptionRow
                   theme={theme}
@@ -690,11 +640,6 @@ export function TeamConfigView({
       ? activePreset.codeReviewers[1]
       : null;
 
-  const developerAutoTarget =
-    activePreset && activePreset.developer.model !== "auto"
-      ? activePreset.developer.model
-      : (previewAutoResolvedModel(bundle.providers) ?? undefined);
-
   const sameModelBlindspot =
     activePreset &&
     activePreset.developer.model !== "auto" &&
@@ -834,7 +779,6 @@ export function TeamConfigView({
                   title={t.rev1RoleTitle}
                   hint={t.rev1RoleHint}
                   spec={rev1}
-                  avoidFullId={developerAutoTarget}
                   providers={bundle.providers}
                   onChange={(next) => {
                     if (!next) return;
@@ -851,7 +795,6 @@ export function TeamConfigView({
                   hint={t.rev2RoleHint}
                   spec={rev2}
                   allowNone
-                  avoidFullId={developerAutoTarget}
                   providers={bundle.providers}
                   onChange={(next) => {
                     updatePreset({

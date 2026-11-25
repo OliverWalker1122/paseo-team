@@ -20,7 +20,7 @@ When one agent writes code and then judges its own work, it tends to approve its
 - **Two-round limit.** If review still fails after two rounds, the team stops and asks you instead of patching endlessly.
 - **Quality gate.** A task completes only when four evidence checks pass, and a blocked gate lists exactly what is missing and from whom (see [Quality gate](#quality-gate)).
 - **Your workspace, your commits.** Agents work in the Paseo workspace you opened: a project folder or a Paseo-managed worktree. The plugin never creates hidden worktrees and never commits or merges, so every edit shows up in Paseo's Changes panel and you decide when to commit.
-- **Pick models per role.** Choose provider, model and reasoning effort for each role, or leave it on Auto. Auto gives the reviewers a different provider than the Developer.
+- **Pick models per role.** Choose provider, model and reasoning effort for each role. A task will not start while a role it needs has no model; a reviewer can be turned off instead.
 - **Live graph per chat.** A chat can start several team tasks; its graph shows each one as a subtree under that chat. History keeps every task, including each review round and its findings.
 - **English and Chinese.** The UI follows the Paseo app language. Agent prompts follow the language of your task goal.
 
@@ -51,7 +51,7 @@ After editing a local clone, run `paseo plugin reload paseo-team`.
 
 ## Usage
 
-1. Optional: open **Team** in the Paseo sidebar and pick a model for each role. Auto works without any setup.
+1. Open **Team** in the Paseo sidebar and pick a model for each role.
 2. In any chat, describe the task:
 
    ```text
@@ -125,7 +125,7 @@ Settings are edited in **Team → Setup** and saved to `~/.config/paseo-team/con
   "default": "Standard",
   "teams": {
     "Standard": {
-      "developer": { "model": "auto" },
+      "developer": { "model": "codex/gpt-6.1-sol", "thinking": "high" },
       "codeReviewers": [
         { "model": "claude/claude-opus-5-5", "thinking": "high" },
         { "model": "codex/gpt-6-astra", "thinking": "high" }
@@ -140,7 +140,7 @@ Settings are edited in **Team → Setup** and saved to `~/.config/paseo-team/con
 ```
 
 - A **preset** is a named set of role models. New tasks use `default` unless the goal names another preset.
-- `"model": "auto"` picks a ready model at launch. Remove the second code reviewer to run with one.
+- `"model": "auto"` marks a role with no model yet; a task that needs it refuses to start and names the role. Remove the second code reviewer to run with one.
 - `complexMode` decides who writes the plan for complex tasks: `simple` (the coordinator) or `expert` (a dedicated session).
 
 Task records, CI logs and review records are kept per project under `~/.local/state/paseo-team/` (or `$XDG_STATE_HOME/paseo-team/`).

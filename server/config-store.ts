@@ -36,19 +36,17 @@ export interface PaseoTeamConfig {
   projects: Record<string, string>;
 }
 
+/** Stored marker for a role with no model picked yet; tasks refuse to start until it is set. */
 export const AUTO_MODEL = "auto";
 
 export function formatRoleSpecShort(
   spec: RoleModelSpec | string | undefined,
   lang: UiLanguage = "en",
 ): string {
-  if (!spec) return lang === "en" ? "Auto" : "自动匹配";
-  if (typeof spec === "string") {
-    return spec === AUTO_MODEL ? (lang === "en" ? "Auto" : "自动匹配") : spec;
-  }
-  if (!spec.model || spec.model === AUTO_MODEL) {
-    return lang === "en" ? "Auto" : "自动匹配";
-  }
+  const unset = lang === "en" ? "Not set" : "未设置";
+  if (!spec) return unset;
+  if (typeof spec === "string") return spec === AUTO_MODEL ? unset : spec;
+  if (!spec.model || spec.model === AUTO_MODEL) return unset;
   return spec.thinking && spec.thinking !== "auto"
     ? `${spec.model} · ${spec.thinking}`
     : spec.model;
@@ -162,7 +160,7 @@ export function createEmptyConfig(): PaseoTeamConfig {
         planReviewers: [{ model: AUTO_MODEL }, { model: AUTO_MODEL }],
         complexMode: "simple",
         description:
-          "Auto-matched developer with adversarial cross review by two reviewers",
+          "One developer with adversarial cross review by two reviewers",
       },
       Fast: {
         developer: { model: AUTO_MODEL },

@@ -9,6 +9,7 @@ import {
   parseInlineTaskDirectives,
   reviewInputProblem,
   toPipelineSnapshot,
+  unsetRoles,
 } from "../server/handlers.ts";
 import { inspectQualityGate } from "../server/quality-gate.ts";
 import {
@@ -588,4 +589,24 @@ test("mid-round-2 review keeps gate blocked for unresolved reviewer and avoids p
     summary: "r2 ok",
   });
   assert.equal(inspectQualityGate({ recordPath }).status, "READY");
+});
+
+test("roles without a model block the task instead of guessing one", () => {
+  const preset = {
+    developer: { model: "auto" },
+    codeReviewers: [{ model: "codex/gpt-6-astra" }, { model: "auto" }],
+    separatePlanReviewers: false,
+    planReviewers: [{ model: "codex/gpt-6-astra" }],
+    complexMode: "simple" as const,
+  };
+  assert.deepEqual(unsetRoles(preset), ["Developer", "Code Reviewer #2"]);
+  assert.deepEqual(
+    unsetRoles({
+      ...preset,
+      developer: { model: "codex/gpt-6.1-sol" },
+      codeReviewers: [{ model: "codex/gpt-6-astra" }],
+      complexMode: "expert",
+    }),
+    ["Expert"],
+  );
 });

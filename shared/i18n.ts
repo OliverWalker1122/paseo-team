@@ -264,9 +264,7 @@ export const UI_TEXT = {
     planRevRoleHint: "Independent cross review before implementation",
 
     // Model picker
-    autoModelLabel: "Auto",
-    autoModelDesc:
-      "Picks a ready model and gives the two reviewers different providers",
+    unsetModelLabel: "Not set — pick a model",
     noneReviewerLabel: "Off (single reviewer)",
     noneReviewerDesc: "Run one code reviewer instead of two",
     selectModelTitle: "Choose model",
@@ -279,9 +277,6 @@ export const UI_TEXT = {
     errPresetExists: (n: string) => `A preset named "${n}" already exists.`,
     errKeepOnePreset: "At least one preset must remain.",
     errCannotDeleteDefault: "Pick another default before deleting this preset.",
-    errNoWorkspaceCwd: "Can't detect the current workspace directory.",
-    errEnterTaskGoal: "Enter a task goal.",
-    toastTaskStarted: "Team task started in a new coordinator session",
 
     // History
     filterAll: "All",
@@ -330,7 +325,6 @@ export const UI_TEXT = {
       `${n} unused stage${n > 1 ? "s" : ""} hidden`,
     parallelTag: (n: number) => `×${n}`,
     focusPrefix: "Focus:",
-    currentChatTag: "● This chat",
     gateCompleted: "Verified",
     gateReady: "Ready",
     gateCheck: "Not checked",
@@ -345,23 +339,10 @@ export const UI_TEXT = {
     emptyTitle: "No subagents in this chat yet",
     emptyDesc:
       "Each chat has its own workflow graph. Run /paseo-team or spawn subagents here and every step grows downward as work progresses.",
-    startPlaceholder: (team: string) =>
-      `Describe a task for the team (preset: ${team}; add "with review" to force code review)`,
-    startingBtn: "Starting…",
-    startBtn: "Start task",
-    startAnotherTitle: "Start another task from this chat",
     launcherRoot: (n: number) =>
       `This chat · ${n} team task${n === 1 ? "" : "s"}`,
     showEarlierTasks: (n: number) => `Show ${n} earlier tasks`,
     hideEarlierTasks: "Hide earlier tasks",
-    blueprintPreviewTitle: (team: string) => `How preset "${team}" runs`,
-    blueprintCoord: "Coordinator",
-    blueprintThisChat: "This chat",
-    blueprintExpert: "Expert plan",
-    blueprintDev: "Developer",
-    blueprintReview: "Code review",
-    blueprintGate: "Quality gate",
-    blueprintAutoCheck: "CI + review",
     visRunning: "Running",
     visAuth: "Needs approval",
     visApproved: "Approved",
@@ -446,8 +427,7 @@ export const UI_TEXT = {
     planRevRoleHint: "实现前的独立交叉审核",
 
     // Model picker
-    autoModelLabel: "自动",
-    autoModelDesc: "自动选用本机可用模型，并让两位审查员使用不同 Provider",
+    unsetModelLabel: "未设置，请选择模型",
     noneReviewerLabel: "关闭（单人审查）",
     noneReviewerDesc: "只派 1 位代码审查，不开第 2 位",
     selectModelTitle: "选择模型",
@@ -460,9 +440,6 @@ export const UI_TEXT = {
     errPresetExists: (n: string) => `已存在名为「${n}」的预设。`,
     errKeepOnePreset: "至少需要保留一个预设。",
     errCannotDeleteDefault: "请先把其他预设设为默认，再删除这个。",
-    errNoWorkspaceCwd: "无法识别当前工作区目录。",
-    errEnterTaskGoal: "请输入任务目标。",
-    toastTaskStarted: "已在新的主控会话中启动团队任务",
 
     // History
     filterAll: "全部",
@@ -510,7 +487,6 @@ export const UI_TEXT = {
     hiddenStagesHint: (n: number) => `已隐藏 ${n} 个未启用阶段`,
     parallelTag: (n: number) => `×${n}`,
     focusPrefix: "侧重：",
-    currentChatTag: "● 当前对话",
     gateCompleted: "已验收",
     gateReady: "可验收",
     gateCheck: "未核验",
@@ -525,22 +501,9 @@ export const UI_TEXT = {
     emptyTitle: "当前对话还没有子 Agent",
     emptyDesc:
       "每个对话有自己的工作流状态图。在这里运行 /paseo-team 或派生子 Agent，各执行与审查轮次会按工作流节点向下动态展开。",
-    startPlaceholder: (team: string) =>
-      `描述要交给团队的任务（预设：${team}；写“需要审查”可强制代码审查）`,
-    startingBtn: "启动中…",
-    startBtn: "启动任务",
-    startAnotherTitle: "从本对话再开一个任务",
     launcherRoot: (n: number) => `本对话 · ${n} 个团队任务`,
     showEarlierTasks: (n: number) => `显示更早的 ${n} 个任务`,
     hideEarlierTasks: "收起更早的任务",
-    blueprintPreviewTitle: (team: string) => `预设「${team}」的执行流程`,
-    blueprintCoord: "主控协调",
-    blueprintThisChat: "当前对话",
-    blueprintExpert: "专家方案",
-    blueprintDev: "Developer",
-    blueprintReview: "代码审查",
-    blueprintGate: "验收门禁",
-    blueprintAutoCheck: "CI + 审查",
     visRunning: "运行中",
     visAuth: "待授权",
     visApproved: "已通过",
