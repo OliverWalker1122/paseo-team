@@ -384,7 +384,10 @@ function WorkflowNodeCard({
   const t = UI_TEXT[lang];
   const pal = statusPalette(theme, lang, node.visualStatus);
   const body = nodeCardBody(lang, node);
-  const labelAlreadyHasRound = /第\s*\d+\s*轮|Round\s*\d+/i.test(node.label);
+  // The round moves into the status pill ("R2 已通过") so narrow cards keep the role name readable.
+  const cardLabel = node.round
+    ? node.label.replace(/\s*·\s*(?:第\s*\d+\s*轮|Round\s*\d+)\S*\s*$/i, "")
+    : node.label;
   const statusText =
     node.role === "gate"
       ? task.lifecycleStatus === "completed"
@@ -392,7 +395,7 @@ function WorkflowNodeCard({
         : task.gateReady
           ? t.gateReady
           : pal.label
-      : node.round && !labelAlreadyHasRound
+      : node.round
         ? `R${node.round} ${pal.label}`
         : pal.label;
 
@@ -426,7 +429,15 @@ function WorkflowNodeCard({
         opacity: node.visualStatus === "skipped" ? 0.55 : 1,
       })}
     >
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+      <View
+        style={{
+          flexDirection: "row",
+          flexWrap: "wrap",
+          alignItems: "center",
+          columnGap: 8,
+          rowGap: 6,
+        }}
+      >
         <View
           style={{
             width: 24,
@@ -442,13 +453,15 @@ function WorkflowNodeCard({
         <Text
           numberOfLines={1}
           style={{
-            flex: 1,
+            flexGrow: 1,
+            flexShrink: 1,
+            flexBasis: 96,
             color: theme.colors.foreground,
             fontSize: 13,
             fontWeight: "600",
           }}
         >
-          {node.label}
+          {cardLabel}
         </Text>
         <View
           style={{
@@ -603,20 +616,28 @@ function ExpandableText({
   theme,
   lang,
   text,
+  lines = 3,
+  fontSize = 13,
 }: {
   theme: PluginTheme;
   lang: UiLanguage;
   text: string;
+  lines?: number;
+  fontSize?: number;
 }) {
   const [open, setOpen] = useState(false);
   // shortcut: length heuristic instead of measuring lines; good enough for summaries.
-  const long = text.length > 160 || text.split("\n").length > 3;
+  const long = text.length > lines * 55 || text.split("\n").length > lines;
   return (
     <View style={{ gap: 4 }}>
       <Text
         selectable
-        numberOfLines={long && !open ? 3 : undefined}
-        style={{ color: theme.colors.foreground, fontSize: 13, lineHeight: 20 }}
+        numberOfLines={long && !open ? lines : undefined}
+        style={{
+          color: theme.colors.foreground,
+          fontSize,
+          lineHeight: Math.round(fontSize * 1.55),
+        }}
       >
         {text}
       </Text>
@@ -748,16 +769,15 @@ function ReviewRoundsList({
                           ? t.findingAdvice
                           : "•"}
                     </Text>
-                    <Text
-                      style={{
-                        flex: 1,
-                        color: theme.colors.foreground,
-                        fontSize: 12,
-                        lineHeight: 18,
-                      }}
-                    >
-                      {f.body}
-                    </Text>
+                    <View style={{ flex: 1 }}>
+                      <ExpandableText
+                        theme={theme}
+                        lang={lang}
+                        text={f.body}
+                        lines={2}
+                        fontSize={12}
+                      />
+                    </View>
                   </View>
                 );
               })}
