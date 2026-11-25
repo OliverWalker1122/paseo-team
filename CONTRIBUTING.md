@@ -19,6 +19,14 @@ paseo plugin add "$(pwd)"
 
 Run `paseo plugin reload paseo-team` after each change, and `paseo plugin logs paseo-team` to see server output.
 
+## Testing tiers
+
+Tests are organized into three tiers:
+
+1. **L1 Unit & prompt contracts (`npm run test:unit`)**: pure offline tests covering state machine, config migration, quality gate, credential-isolated CI runner, handoff rules, and every prompt template (`tests/prompts.test.ts`).
+2. **L2 Hook & plugin integration (`npm run test:integration`)**: boots `contribute()` against an in-memory Paseo harness (`tests/hooks.integration.test.ts`) to verify all five hooks (`agent.create.after`, `agent.open.before`, `agent.permission.before`, `agent.turn.before`, `agent.turn.after`), multi-provider permission prefixes, and a full R1-rework-to-R2-complete pipeline.
+3. **L3 Live Paseo E2E (`npm run test:e2e` / `npm run test:e2e:all`)**: highest-tier real acceptance suite (`tests/e2e/live-paseo.test.mjs`) against a running Paseo daemon and real providers (`PASEO_E2E_SUITE=smoke|standard|claude-coord|antigravity-coord|all`, `PASEO_E2E_CWD=/path/to/test-repo`). Opt-in only; skipped during normal `npm test` and CI.
+
 ## Pull requests
 
 1. Create a branch from `main`.

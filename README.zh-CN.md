@@ -157,8 +157,11 @@ flowchart LR
 
 ```bash
 npm ci
-npm run ci        # 格式检查、Markdown 检查、类型检查、插件审计、测试
-npm run format    # 用 Prettier 格式化
+npm run ci               # 格式检查、Markdown 检查、类型检查、插件审计、L1 + L2 测试
+npm run test:unit        # L1：单元测试与提示词全量契约验收（离线，<1s）
+npm run test:integration # L2：全部 5 个钩子与工具闭环集成测试（内存模拟 Paseo，<1s）
+npm run test:e2e         # L3：最高级别真实 Paseo 实跑验收（按需手动触发，连接真实模型）
+npm run format           # 用 Prettier 格式化
 ```
 
 | 路径                                     | 内容                                         |

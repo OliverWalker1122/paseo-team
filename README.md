@@ -157,8 +157,11 @@ To report a vulnerability, see [SECURITY.md](./SECURITY.md).
 
 ```bash
 npm ci
-npm run ci        # format check, Markdown lint, typecheck, plugin audit, tests
-npm run format    # apply Prettier
+npm run ci               # format check, Markdown lint, typecheck, plugin audit, L1 + L2 tests
+npm run test:unit        # L1: unit & prompt contract tests (offline, <1s)
+npm run test:integration # L2: full 5-hook & tool pipeline integration tests (mock Paseo, <1s)
+npm run test:e2e         # L3: live Paseo daemon E2E acceptance (opt-in, real providers/models)
+npm run format           # apply Prettier
 ```
 
 | Path                                     | Contents                                               |

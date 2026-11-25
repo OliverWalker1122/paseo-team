@@ -30,6 +30,7 @@ import {
   buildDeveloperPrompt,
   buildExpertPrompt,
   buildReviewerPrompt,
+  buildTurnHandoffReminder,
 } from "./server/prompts.ts";
 import { inspectQualityGate } from "./server/quality-gate.ts";
 import {
@@ -109,7 +110,7 @@ export function isScopedCoordinatorPermissionResponse(options: {
   );
 }
 
-function inferChildRole(options: {
+export function inferChildRole(options: {
   metaRole?: string;
   labelRole?: string;
   title?: string | null;
@@ -155,7 +156,7 @@ function stripRolePrefix(title: string | null | undefined): string {
   return match?.[1]?.trim() || raw;
 }
 
-function extractToolName(req: unknown): string | null {
+export function extractToolName(req: unknown): string | null {
   if (!req || typeof req !== "object") return null;
   const r = req as Record<string, unknown>;
   if (typeof r.toolName === "string" && r.toolName) return r.toolName;
@@ -656,6 +657,7 @@ export default function contribute(server: PluginServerContext) {
               buildReviewerPrompt({
                 taskId: record.taskId,
                 perspective,
+                stage: role === "plan-reviewer" ? "plan" : "code",
                 lang: promptLang,
               }),
             ],
@@ -776,14 +778,15 @@ export default function contribute(server: PluginServerContext) {
             checkTurnHandoff(match.recordPath, agent.id) === "remind"
           ) {
             const tool = HANDOFF_TOOL[match.matchedRole];
-            const zh = detectPromptLanguage(match.record.goal) === "zh";
+            const promptLang = detectPromptLanguage(match.record.goal);
             if (tool) {
               await paseo.agents
                 .ref(agent.id)
                 .send(
-                  zh
-                    ? `[Team 交接检查] 本轮结束但没有调用 \`${tool}\`。如果工作已完成，请现在调用它提交；如果还没完成，请说明卡在哪里。`
-                    : `[Team handoff check] This turn ended without calling \`${tool}\`. If your work is done, call it now; if not, say what is blocking you.`,
+                  buildTurnHandoffReminder({
+                    toolName: tool,
+                    lang: promptLang,
+                  }),
                 )
                 .catch(() => {});
             }

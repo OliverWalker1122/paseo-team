@@ -4,10 +4,10 @@ export type ReviewerPerspective =
   "spec-boundary" | "arch-simplicity" | "comprehensive";
 
 export const SAFETY_RULES_EN = `### Security & Credential Redlines (Mandatory)
-Never read, search, copy, print, or upload \`.env\` (including \`.env.*\`, \`.envrc\`, etc.) or any secret files; never run \`env\`, \`printenv\`, \`set\`, \`export -p\`, or dump all environment variables; only check whether specific required variable names are \`configured\`/\`missing\`. Isolate formatting, linting, and unit tests from real credentials (\`SKIP_DOTENV=true\`, \`DOTENV_CONFIG_PATH=/dev/null\`). Real API checks may only load credentials internally via audited project code that never logs secrets. Existing credentials never authorize trading, deployment, messaging, or mutating remote data. Include this exact section verbatim whenever spawning subagents.`;
+Never read, search, copy, print, or upload \`.env\` (including \`.env.*\`, \`.envrc\`, etc.) or any secret files; never run \`env\`, \`printenv\`, \`set\`, \`export -p\`, or dump all environment variables; only check whether specific required variable names are \`configured\`/\`missing\`. Isolate formatting, linting, and unit tests from real credentials (\`SKIP_DOTENV=true\`, \`DOTENV_CONFIG_PATH=/dev/null\`). Real API checks may only load credentials internally via audited project code that never logs secrets. Existing credentials never authorize trading, deployment, messaging, or mutating remote data. When spawning any subagent outside this plugin, pass these security redlines along.`;
 
 export const SAFETY_RULES_ZH = `### 安全与凭据红线（强制执行）
-禁止读取、搜索、复制、输出或上传 \`.env\`（含 \`.env.*\`、\`.envrc\` 等）及其他秘密文件；不执行 \`env\`、\`printenv\`、\`set\`、\`export -p\` 等列出全部环境变量的命令；只能检查任务需要的特定变量是否已配置，输出仅限变量名与 \`configured\`/\`missing\`。格式化、lint、单元测试隔离真实凭据（\`SKIP_DOTENV=true\`、\`DOTENV_CONFIG_PATH=/dev/null\`）。真实 API 验证只能由已检查过、不会打印凭据的可信程序在内部加载配置。凭据存在不代表获准交易、部署、发送消息或修改远程数据。再派生子 agent 时，必须将本节原文写入其简报。`;
+禁止读取、搜索、复制、输出或上传 \`.env\`（含 \`.env.*\`、\`.envrc\` 等）及其他秘密文件；不执行 \`env\`、\`printenv\`、\`set\`、\`export -p\` 等列出全部环境变量的命令；只能检查任务需要的特定变量是否已配置，输出仅限变量名与 \`configured\`/\`missing\`。格式化、lint、单元测试隔离真实凭据（\`SKIP_DOTENV=true\`、\`DOTENV_CONFIG_PATH=/dev/null\`）。真实 API 验证只能由已检查过、不会打印凭据的可信程序在内部加载配置。凭据存在不代表获准交易、部署、发送消息或修改远程数据。如派生非本插件托管的子 agent，必须同步传达上述安全红线。`;
 
 export function getSafetyRulesText(lang: UiLanguage = "en"): string {
   return lang === "zh" ? SAFETY_RULES_ZH : SAFETY_RULES_EN;
@@ -188,20 +188,32 @@ export function assignReviewerPerspective(
 export function buildReviewerPrompt(options: {
   taskId: string;
   perspective: ReviewerPerspective;
+  stage?: "plan" | "code";
   lang?: UiLanguage;
 }): string {
   const lang = options.lang ?? "en";
+  const stage = options.stage ?? "code";
   if (lang === "zh") {
     const focusLine =
-      options.perspective === "spec-boundary"
-        ? "- **本席主审视角（需求规格与真实边界）**：重点核对当前工作区改动是否完整满足原始目标与硬约束，以及在真实使用场景下是否存在具体输入/状态会导致错误或数据损坏。"
-        : options.perspective === "arch-simplicity"
-          ? "- **本席主审视角（架构一致性与复杂度删减）**：重点对照现有架构检查是否引入了不必要的新存储、新概念、反向依赖或性能退化，思考能否用更简单的方案达成同一目标。"
-          : "- **本席审查视角（全维独立审查）**：核对原始需求满足度、真实出错路径、架构与性能影响及更简替代方案。";
+      stage === "plan"
+        ? options.perspective === "spec-boundary"
+          ? "- **本席主审视角（需求规格与真实边界）**：重点核对方案文档是否完整覆盖原始目标与硬约束，并对照代码核查真实边界条件、状态迁移和失败恢复是否遗漏。"
+          : options.perspective === "arch-simplicity"
+            ? "- **本席主审视角（架构一致性与复杂度删减）**：重点对照现有架构检查方案是否引入不必要的新存储、新概念、反向依赖或性能退化，思考能否用更简单的方案达成同一目标。"
+            : "- **本席审查视角（全维独立审查）**：核对方案的需求覆盖度、真实边界风险、架构与性能影响及更简替代方案。"
+        : options.perspective === "spec-boundary"
+          ? "- **本席主审视角（需求规格与真实边界）**：重点核对当前工作区改动是否完整满足原始目标与硬约束，以及在真实使用场景下是否存在具体输入/状态会导致错误或数据损坏。"
+          : options.perspective === "arch-simplicity"
+            ? "- **本席主审视角（架构一致性与复杂度删减）**：重点对照现有架构检查是否引入了不必要的新存储、新概念、反向依赖或性能退化，思考能否用更简单的方案达成同一目标。"
+            : "- **本席审查视角（全维独立审查）**：核对原始需求满足度、真实出错路径、架构与性能影响及更简替代方案。";
 
     return [
-      `# Paseo Team 独立代码审查指引（任务 ${options.taskId}）`,
-      "- **只审不改业务代码，允许运行验证**：不要直接替 Developer 修改项目业务源码，不再派生子 agent；除阅读代码与 `git diff` 外，可按需运行现有测试或临时最小复现命令核实可疑边界（若有临时产物，结束前清理干净）。",
+      stage === "plan"
+        ? `# Paseo Team 独立方案审查指引（任务 ${options.taskId}）`
+        : `# Paseo Team 独立代码审查指引（任务 ${options.taskId}）`,
+      stage === "plan"
+        ? "- **只审方案不改代码**：阅读任务证据目录下的方案/根因文档，并结合真实仓库源码核实关键假设与 `file:line` 证据；严禁修改项目业务源码，不再派生子 agent。"
+        : "- **只审不改业务代码，允许运行验证**：不要直接替 Developer 修改项目业务源码，不再派生子 agent；除阅读代码与 `git diff` 外，可按需运行现有测试或临时最小复现命令核实可疑边界（若有临时产物，结束前清理干净）。",
       focusLine,
       "- **阻断意见准入制**：阻断问题必须写明精确位置（`file:line`）+ 真实场景下的具体出错路径（或更简替代方案）。纯理论担忧归入“建议（不阻断）”。",
       "- **交接**：审完调用 `paseo_team_submit_review`：`verdict` 为 `APPROVE` / `REQUEST_CHANGES` / `BLOCKED`；`findings` 每条以 `blocking:` 或 `advice:` 开头（未验证的写成 `advice: unverified …`）。非 APPROVE 至少要有一条 `blocking:`，APPROVE 不能带 `blocking:`；格式不对工具会退回。提交后用几行回复结论。",
@@ -211,19 +223,71 @@ export function buildReviewerPrompt(options: {
   }
 
   const focusLine =
-    options.perspective === "spec-boundary"
-      ? "- **Primary Perspective (Spec & Real Edge Cases)**: verify every acceptance criterion and hard constraint in the current workspace diff, and trace concrete inputs/states in real usage that could cause wrong behavior or data corruption."
-      : options.perspective === "arch-simplicity"
-        ? "- **Primary Perspective (Architecture & Simplicity)**: check alignment with existing repository patterns, unnecessary abstractions/storage/dependencies, performance regressions, and whether a simpler change achieves the exact same goal."
-        : "- **Primary Perspective (Comprehensive Review)**: verify spec compliance, concrete failure scenarios, architecture/performance impact, and simpler alternatives.";
+    stage === "plan"
+      ? options.perspective === "spec-boundary"
+        ? "- **Primary Perspective (Spec & Real Edge Cases)**: verify the design/RCA document covers every acceptance criterion and hard constraint, and check real code paths for missing edge cases, state transitions, or failure recovery."
+        : options.perspective === "arch-simplicity"
+          ? "- **Primary Perspective (Architecture & Simplicity)**: check the design against existing repository patterns for unnecessary abstractions/storage/dependencies or performance regressions, and look for a simpler alternative."
+          : "- **Primary Perspective (Comprehensive Review)**: verify spec compliance, real edge cases against the codebase, architecture/performance impact, and simpler alternatives."
+      : options.perspective === "spec-boundary"
+        ? "- **Primary Perspective (Spec & Real Edge Cases)**: verify every acceptance criterion and hard constraint in the current workspace diff, and trace concrete inputs/states in real usage that could cause wrong behavior or data corruption."
+        : options.perspective === "arch-simplicity"
+          ? "- **Primary Perspective (Architecture & Simplicity)**: check alignment with existing repository patterns, unnecessary abstractions/storage/dependencies, performance regressions, and whether a simpler change achieves the exact same goal."
+          : "- **Primary Perspective (Comprehensive Review)**: verify spec compliance, concrete failure scenarios, architecture/performance impact, and simpler alternatives.";
 
   return [
-    `# Paseo Team Independent Code Reviewer Guide (Task ${options.taskId})`,
-    "- **Review Without Editing Product Code (Dynamic Verification Allowed)**: do not edit project source files to fix issues yourself, and do not spawn subagents. Beyond reading code and `git diff`, you may freely run existing tests or temporary reproduction commands to verify suspected edge cases (clean up any temporary artifacts afterward).",
+    stage === "plan"
+      ? `# Paseo Team Independent Plan Reviewer Guide (Task ${options.taskId})`
+      : `# Paseo Team Independent Code Reviewer Guide (Task ${options.taskId})`,
+    stage === "plan"
+      ? "- **Review Design Without Editing Product Code**: inspect the plan/RCA document in the task evidence directory and verify assumptions against real repository `file:line` evidence. Do not modify product code or spawn subagents."
+      : "- **Review Without Editing Product Code (Dynamic Verification Allowed)**: do not edit project source files to fix issues yourself, and do not spawn subagents. Beyond reading code and `git diff`, you may freely run existing tests or temporary reproduction commands to verify suspected edge cases (clean up any temporary artifacts afterward).",
     focusLine,
     "- **Evidence Bar for Blocking**: every blocking issue must cite an exact `file:line` plus a concrete real-world failure path or a concretely simpler alternative. Put hypothetical nitpicks under Non-blocking Suggestions.",
     "- **Handoff**: when done, call `paseo_team_submit_review` with `verdict` (`APPROVE` / `REQUEST_CHANGES` / `BLOCKED`) and `findings`, each prefixed `blocking:` or `advice:` (write unverified points as `advice: unverified …`). Non-APPROVE needs at least one `blocking:`; APPROVE must have none. The tool bounces wrong formats. Then reply with a few lines of outcome.",
     "",
     SAFETY_RULES_EN,
   ].join("\n");
+}
+
+export function buildKickoffPrompt(options: {
+  taskId: string;
+  goal: string;
+  teamName: string;
+  complexMode: "expert" | "simple";
+  rosterLines: string[];
+  lang?: UiLanguage;
+}): string {
+  const lang = options.lang ?? "en";
+  if (lang === "zh") {
+    return [
+      `[Team 任务启动] task_id=\`${options.taskId}\``,
+      `任务目标：${options.goal}`,
+      `生效预设：\`${options.teamName}\`（模式：\`${options.complexMode}\`）`,
+      "",
+      "### 成员派发参数（create_agent 直接使用）",
+      ...options.rosterLines,
+      "",
+      "按系统提示中的协调协议执行。",
+    ].join("\n");
+  }
+  return [
+    `[Team Kickoff] task_id=\`${options.taskId}\``,
+    `Goal: ${options.goal}`,
+    `Active Preset: \`${options.teamName}\` (mode: \`${options.complexMode}\`)`,
+    "",
+    "### Member Routing (use as-is in create_agent)",
+    ...options.rosterLines,
+    "",
+    "Follow the coordinator protocol in your system prompt.",
+  ].join("\n");
+}
+
+export function buildTurnHandoffReminder(options: {
+  toolName: string;
+  lang?: UiLanguage;
+}): string {
+  return options.lang === "zh"
+    ? `[Team 交接检查] 本轮结束但没有调用 \`${options.toolName}\`。如果工作已完成，请现在调用它提交；如果还没完成，请说明卡在哪里。`
+    : `[Team handoff check] This turn ended without calling \`${options.toolName}\`. If your work is done, call it now; if not, say what is blocking you.`;
 }

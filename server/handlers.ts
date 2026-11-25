@@ -35,6 +35,7 @@ import {
 import {
   assignReviewerPerspective,
   buildCoordinatorSystemPrompt,
+  buildKickoffPrompt,
   reviewerPerspectiveLabel,
 } from "./prompts.ts";
 import {
@@ -1742,27 +1743,14 @@ export async function startTeamTask(
 
   // Task-specific facts only; the protocol and safety rules arrive through the
   // coordinator's system prompt (agent.open.before), so nothing is sent twice.
-  const kickoffPrompt = zh
-    ? [
-        `[Team 任务启动] task_id=\`${created.record.taskId}\``,
-        `任务目标：${parsed.goal}`,
-        `生效预设：\`${eff.teamName}\`（模式：\`${eff.preset.complexMode}\`）`,
-        "",
-        "### 成员派发参数（create_agent 直接使用）",
-        ...rosterLines,
-        "",
-        "按系统提示中的协调协议执行。",
-      ].join("\n")
-    : [
-        `[Team Kickoff] task_id=\`${created.record.taskId}\``,
-        `Goal: ${parsed.goal}`,
-        `Active Preset: \`${eff.teamName}\` (mode: \`${eff.preset.complexMode}\`)`,
-        "",
-        "### Member Routing (use as-is in create_agent)",
-        ...rosterLines,
-        "",
-        "Follow the coordinator protocol in your system prompt.",
-      ].join("\n");
+  const kickoffPrompt = buildKickoffPrompt({
+    taskId: created.record.taskId,
+    goal: parsed.goal,
+    teamName: eff.teamName,
+    complexMode: eff.preset.complexMode,
+    rosterLines,
+    lang: promptLang,
+  });
 
   if (!input.workspaceId) {
     throw new Error("A workspace is required to start a team task.");
