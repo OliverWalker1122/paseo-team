@@ -44,11 +44,9 @@ import {
 import { runCheck } from "./run-check.ts";
 import {
   buildRecoveryBrief,
-  findTaskByAgentId,
   handoffOwed,
   initTask,
   listAllRecentTasks,
-  listTasksByLauncher,
   listTasksForProject,
   loadTask,
   markTaskCompleted,
@@ -72,6 +70,10 @@ export function subscribeTaskChanges(listener: Listener): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
+    if (listeners.size === 0 && debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
   };
 }
 
@@ -317,7 +319,10 @@ async function fetchLiveAgentMap(
     }
   } catch (err) {
     // Non-fatal, but log it: a silent failure here blanks every live status.
-    console.error("[paseo-team] agents.list failed:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/Daemon client closed/i.test(msg)) {
+      console.error("[paseo-team] agents.list failed:", err);
+    }
   }
   return map;
 }
@@ -1286,13 +1291,21 @@ export async function buildConversationGraph(
 ): Promise<ConversationGraphPayloadDto> {
   const lang = input.language ?? "en";
   const liveMap = await fetchLiveAgentMap(paseo);
+  const recentTasks = listAllRecentTasks(undefined, 100);
+  const matchTask = (agentId: string) =>
+    recentTasks.find(
+      (item) =>
+        item.record.coordinatorAgentId === agentId ||
+        (Array.isArray(item.record.nodes) &&
+          item.record.nodes.some((n) => n?.agentId === agentId)),
+    ) ?? null;
 
   let viewerAgentId = input.agentId?.trim() || null;
   if (!viewerAgentId && input.workspaceId) {
     const wsAgents = [...liveMap.values()].filter(
       (a) => a.workspaceId === input.workspaceId && a.id,
     );
-    const withTeam = wsAgents.find((a) => Boolean(findTaskByAgentId(a.id!)));
+    const withTeam = wsAgents.find((a) => Boolean(matchTask(a.id!)));
     const topLevel = wsAgents.find((a) => !a.parentAgentId);
     viewerAgentId = withTeam?.id ?? topLevel?.id ?? wsAgents[0]?.id ?? null;
   }
@@ -1310,9 +1323,11 @@ export async function buildConversationGraph(
 
   // A chat that launched tasks shows them as subtrees, plus any task it
   // coordinates itself (older tasks used the launching chat as coordinator).
-  const launched = listTasksByLauncher(viewerAgentId);
+  const launched = recentTasks
+    .filter((item) => item.record.launcherAgentId === viewerAgentId)
+    .sort((a, b) => b.record.createdAt.localeCompare(a.record.createdAt));
   if (launched.length > 0) {
-    const own = findTaskByAgentId(viewerAgentId);
+    const own = matchTask(viewerAgentId);
     const items =
       own && !launched.some((x) => x.recordPath === own.recordPath)
         ? [...launched, own].sort((a, b) =>
@@ -1334,7 +1349,7 @@ export async function buildConversationGraph(
   const seenAncestors = new Set<string>();
   while (cur && !seenAncestors.has(cur)) {
     seenAncestors.add(cur);
-    const directMatch = findTaskByAgentId(cur);
+    const directMatch = matchTask(cur);
     if (directMatch) {
       return {
         mode: "team_task",
@@ -1356,7 +1371,7 @@ export async function buildConversationGraph(
     ...collectSubtreeIds(rootAgentId, liveMap),
   ];
   for (const candidateId of candidateIds) {
-    const matched = findTaskByAgentId(candidateId);
+    const matched = matchTask(candidateId);
     if (matched) {
       return {
         mode: "team_task",
@@ -1677,22 +1692,30 @@ export async function startTeamTask(
     });
   }
 
-  eff.preset.codeReviewers.forEach((spec, idx) => {
-    const persp = assignReviewerPerspective(
-      idx,
-      eff.preset.codeReviewers.length,
-    );
-    const revLaunch = resolveRoleLaunchSpec({
-      role: "code-reviewer",
-      spec,
-      catalog: providers,
-      readyProviders,
-      avoidFullId: idx > 0 ? devLaunch.providerArg : undefined,
-    });
+  if (created.record.codeReview === "waived") {
     rosterLines.push(
-      `- Code Reviewer #${idx + 1} (${reviewerPerspectiveLabel(persp, promptLang)}): ${formatLaunchLine(revLaunch)}`,
+      zh
+        ? "- 代码审查：用户已豁免（无需派发审查员）"
+        : "- Code Review: waived by user (do not dispatch reviewers)",
     );
-  });
+  } else {
+    eff.preset.codeReviewers.forEach((spec, idx) => {
+      const persp = assignReviewerPerspective(
+        idx,
+        eff.preset.codeReviewers.length,
+      );
+      const revLaunch = resolveRoleLaunchSpec({
+        role: "code-reviewer",
+        spec,
+        catalog: providers,
+        readyProviders,
+        avoidFullId: idx > 0 ? devLaunch.providerArg : undefined,
+      });
+      rosterLines.push(
+        `- Code Reviewer #${idx + 1} (${reviewerPerspectiveLabel(persp, promptLang)}): ${formatLaunchLine(revLaunch)}`,
+      );
+    });
+  }
 
   // Task-specific facts only; the protocol and safety rules arrive through the
   // coordinator's system prompt (agent.open.before), so nothing is sent twice.

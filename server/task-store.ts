@@ -122,7 +122,7 @@ export function readReviewRounds(
     "reviews",
   );
   // Every submission is kept: a re-review of the same delivery is a second verdict in that round.
-  const out: ReviewRoundView[] = [];
+  const out: (ReviewRoundView & { _seq: number })[] = [];
   if (existsSync(reviewsDir)) {
     for (const name of readdirSync(reviewsDir)) {
       if (!name.startsWith(`${stage}-`) || !name.endsWith(".json")) continue;
@@ -138,12 +138,15 @@ export function readReviewRounds(
       if (!verdict || round < 1) continue;
       const recordedAt = asNonEmptyString(raw.recordedAt) ?? undefined;
       const findings = toStringList(raw.findings);
+      const seqMatch = /-r\d+-(\d+)\.json$/.exec(name);
+      const _seq = seqMatch ? Number(seqMatch[1]) : 1;
       out.push({
         round,
         verdict,
         summary: asNonEmptyString(raw.summary) ?? "",
         ...(findings.length > 0 ? { findings } : {}),
         ...(recordedAt ? { recordedAt } : {}),
+        _seq,
       });
     }
   }
@@ -154,13 +157,17 @@ export function readReviewRounds(
       summary: latest.summary,
       ...(latest.findings?.length ? { findings: latest.findings } : {}),
       recordedAt: latest.updatedAt,
+      _seq: 1,
     });
   }
-  return out.sort(
-    (a, b) =>
-      a.round - b.round ||
-      (a.recordedAt ?? "").localeCompare(b.recordedAt ?? ""),
-  );
+  return out
+    .sort(
+      (a, b) =>
+        a.round - b.round ||
+        (a.recordedAt ?? "").localeCompare(b.recordedAt ?? "") ||
+        a._seq - b._seq,
+    )
+    .map(({ _seq: _, ...view }) => view);
 }
 
 export interface TaskDeliveryInfo {
@@ -273,15 +280,24 @@ export function buildInitialNodes(options: {
   preset: TeamPreset;
   isComplex: boolean;
   planReviewRequired: boolean;
+  planReviewWaived?: boolean;
   codeReviewRequired: boolean;
+  codeReviewWaived?: boolean;
   coordinatorAgentId?: string;
   coordinatorServerId?: string;
   goal: string;
   now: string;
   lang?: UiLanguage;
 }): TaskAgentNode[] {
-  const { preset, isComplex, planReviewRequired, codeReviewRequired, now } =
-    options;
+  const {
+    preset,
+    isComplex,
+    planReviewRequired,
+    planReviewWaived,
+    codeReviewRequired,
+    codeReviewWaived,
+    now,
+  } = options;
   const lang = options.lang ?? detectPromptLanguage(options.goal, "en");
   const zh = lang === "zh";
   const nodes: TaskAgentNode[] = [];
@@ -349,9 +365,13 @@ export function buildInitialNodes(options: {
         ? zh
           ? `首轮交叉审核 · ${reviewerPerspectiveLabel(perspective, "zh")}`
           : `Cross review · ${reviewerPerspectiveLabel(perspective, "en")}`
-        : zh
-          ? "未触发方案审查"
-          : "Plan review not required",
+        : planReviewWaived
+          ? zh
+            ? "用户已豁免方案审查"
+            : "Plan review waived by user"
+          : zh
+            ? "未触发方案审查"
+            : "Plan review not required",
       status: planReviewRequired ? "pending" : "skipped",
       updatedAt: now,
     });
@@ -389,10 +409,14 @@ export function buildInitialNodes(options: {
         ? zh
           ? `候选代码审查 · ${reviewerPerspectiveLabel(perspective, "zh")}`
           : `Cross review · ${reviewerPerspectiveLabel(perspective, "en")}`
-        : zh
-          ? "按改动规模或架构影响自动判定"
-          : "Triggered if diff size or architecture impact requires",
-      status: "pending",
+        : codeReviewWaived
+          ? zh
+            ? "用户已豁免代码审查"
+            : "Code review waived by user"
+          : zh
+            ? "按改动规模或架构影响自动判定"
+            : "Triggered if diff size or architecture impact requires",
+      status: codeReviewWaived ? "skipped" : "pending",
       updatedAt: now,
     });
   });
@@ -508,7 +532,9 @@ export function initTask(options: {
       preset: options.preset,
       isComplex,
       planReviewRequired,
+      planReviewWaived: skipRequested,
       codeReviewRequired,
+      codeReviewWaived: skipRequested,
       coordinatorAgentId: options.coordinatorAgentId,
       coordinatorServerId: options.coordinatorServerId,
       goal: options.goal,
@@ -628,7 +654,9 @@ function synthesizeNodesFromLegacy(
     preset,
     isComplex: Boolean(raw.isComplex) || planReview === "required",
     planReviewRequired: planReview === "required",
+    planReviewWaived: planReview === "waived",
     codeReviewRequired: codeReview === "required" || codeReviewers.length > 0,
+    codeReviewWaived: codeReview === "waived" && codeReviewers.length === 0,
     coordinatorAgentId: asNonEmptyString(raw.coordinatorAgentId) ?? undefined,
     goal: asNonEmptyString(raw.goal) ?? "",
     now: fallbackNow,
@@ -782,10 +810,16 @@ function normalizeLoadedTaskRecord(
     asNonEmptyString(rawObj.project) ??
     asNonEmptyString(rawObj.repo) ??
     asNonEmptyString(rawObj.cwd);
+  // Schema v2 records already store the canonical workspace root from initTask;
+  // skip shelling out to git on every historical task load.
+  const hasCanonicalV2Root =
+    rawObj.schemaVersion === 2 && Boolean(asNonEmptyString(rawObj.projectRoot));
   const projectRoot = rawRoot
-    ? existsSync(rawRoot)
-      ? resolveWorkspaceDirectory(rawRoot)
-      : path.resolve(rawRoot)
+    ? hasCanonicalV2Root
+      ? path.resolve(rawRoot)
+      : existsSync(rawRoot)
+        ? resolveWorkspaceDirectory(rawRoot)
+        : path.resolve(rawRoot)
     : path.dirname(path.dirname(resolvedPath));
   const projectSlug =
     asNonEmptyString(rawObj.projectSlug) ??

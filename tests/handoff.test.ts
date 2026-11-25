@@ -438,3 +438,28 @@ test("idle unsubmitted members stay pending and round history shows the latest v
   const r3Stage = finalSnap.stages.find((s) => s.stepId === "code-review-r3");
   assert.equal(r3Stage?.subtitle, "第 3/3 轮");
 });
+
+test("waived code review skips reviewer nodes immediately from task creation", (t) => {
+  const baseDir = mkdtempSync(path.join(os.tmpdir(), "paseo-team-waived-"));
+  t.after(() => rmSync(baseDir, { recursive: true, force: true }));
+  const cwd = path.join(baseDir, "workspace");
+  mkdirSync(cwd);
+  const stateRoot = path.join(baseDir, "state");
+  const { recordPath, record } = initTask({
+    cwd,
+    goal: "Quick tweak; skip code review",
+    teamName: "Standard",
+    preset,
+    skipReviewReason: "Quick tweak; skip code review",
+    stateRoot,
+  });
+  const codeNodes = record.nodes.filter((n) => n.role === "code-reviewer");
+  assert.ok(codeNodes.length > 0);
+  assert.ok(codeNodes.every((n) => n.status === "skipped"));
+  const snap = toPipelineSnapshot(recordPath, record, new Map(), "en");
+  assert.equal(
+    snap.stages.some((s) => s.stageId === "code-review"),
+    false,
+  );
+  assert.equal(snap.skippedStageCount, 2);
+});

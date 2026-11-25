@@ -191,16 +191,29 @@ export default function contribute(server: PluginServerContext) {
         }
       };
 
+      let agentDebounce: ReturnType<typeof setTimeout> | null = null;
+      const scheduleEmit = () => {
+        if (signal.aborted || agentDebounce) return;
+        agentDebounce = setTimeout(() => {
+          agentDebounce = null;
+          void emit();
+        }, 150);
+      };
+
       const unsubLocal = subscribeTaskChanges(() => {
         void emit();
       });
       const unsubAgents = paseo.agents.subscribe(() => {
-        void emit();
+        scheduleEmit();
       });
 
       signal.addEventListener(
         "abort",
         () => {
+          if (agentDebounce) {
+            clearTimeout(agentDebounce);
+            agentDebounce = null;
+          }
           unsubLocal();
           unsubAgents();
         },
@@ -340,16 +353,29 @@ export default function contribute(server: PluginServerContext) {
       }
     };
 
+    let agentDebounce: ReturnType<typeof setTimeout> | null = null;
+    const scheduleEmit = () => {
+      if (signal.aborted || agentDebounce) return;
+      agentDebounce = setTimeout(() => {
+        agentDebounce = null;
+        void emit();
+      }, 150);
+    };
+
     const unsubLocal = subscribeTaskChanges(() => {
       void emit();
     });
     const unsubAgents = paseo.agents.subscribe(() => {
-      void emit();
+      scheduleEmit();
     });
 
     signal.addEventListener(
       "abort",
       () => {
+        if (agentDebounce) {
+          clearTimeout(agentDebounce);
+          agentDebounce = null;
+        }
         unsubLocal();
         unsubAgents();
       },
