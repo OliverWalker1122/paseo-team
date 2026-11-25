@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  isAutoAllowedTeamTool,
+  isScopedCoordinatorPermissionResponse,
+} from "../index.server.ts";
+import {
   buildConversationGraph,
   memberOwnsHandoff,
   parseInlineTaskDirectives,
@@ -608,5 +612,128 @@ test("roles without a model block the task instead of guessing one", () => {
       complexMode: "expert",
     }),
     ["Expert"],
+  );
+});
+
+test("permission hook auto-allows coordinator read-only checks and scoped child permission responses across providers", () => {
+  // Provider-specific tool name prefixes (Antigravity mcp_paseo_*, Claude mcp__paseo__*, direct).
+  assert.equal(
+    isAutoAllowedTeamTool("coordinator", "mcp_paseo_list_pending_permissions"),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool(
+      "coordinator",
+      "mcp__paseo__list_pending_permissions",
+    ),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("coordinator", "mcp_paseo_list_hosts"),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("coordinator", "mcp_paseo_list_workspaces"),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("developer", "mcp_paseo_paseo_team_run_check"),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("developer", "paseo.paseo_team_submit_delivery"),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool(
+      "code-reviewer",
+      "mcp_paseo_paseo_team_submit_review",
+    ),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("coordinator", "paseo.create_agent"),
+    true,
+  );
+  // Non-coordinators must never be auto-allowed coordinator management tools.
+  assert.equal(
+    isAutoAllowedTeamTool("developer", "mcp_paseo_list_pending_permissions"),
+    false,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("coordinator", "mcp_paseo_respond_to_permission"),
+    false,
+  );
+
+  const taskRecord = {
+    nodes: [
+      { role: "coordinator" as const, agentId: "coord-1" },
+      { role: "developer" as const, agentId: "dev-1" },
+      { role: "code-reviewer" as const, agentId: "rev-1" },
+    ],
+  };
+  const autoAllowed = new Set(["permission:call_child_review"]);
+
+  // Allowed: responding to a child permission that the hook already auto-allowed.
+  assert.equal(
+    isScopedCoordinatorPermissionResponse({
+      role: "coordinator",
+      toolName: "mcp_paseo_respond_to_permission",
+      requestInput: {
+        agentId: "rev-1",
+        requestId: "permission:call_child_review",
+      },
+      taskRecord,
+      autoAllowedPermissionIds: autoAllowed,
+    }),
+    true,
+  );
+  // Allowed: responding to a registered child node of the same task.
+  assert.equal(
+    isScopedCoordinatorPermissionResponse({
+      role: "coordinator",
+      toolName: "paseo.respond_to_permission",
+      requestInput: { agentId: "dev-1", requestId: "permission:call_other" },
+      taskRecord,
+      autoAllowedPermissionIds: autoAllowed,
+    }),
+    true,
+  );
+  // Denied: responding to an unrelated session outside this task, or to coordinator itself.
+  assert.equal(
+    isScopedCoordinatorPermissionResponse({
+      role: "coordinator",
+      toolName: "mcp_paseo_respond_to_permission",
+      requestInput: {
+        agentId: "user-private-chat",
+        requestId: "permission:call_foreign",
+      },
+      taskRecord,
+      autoAllowedPermissionIds: autoAllowed,
+    }),
+    false,
+  );
+  assert.equal(
+    isScopedCoordinatorPermissionResponse({
+      role: "coordinator",
+      toolName: "mcp_paseo_respond_to_permission",
+      requestInput: { agentId: "coord-1", requestId: "permission:call_self" },
+      taskRecord,
+      autoAllowedPermissionIds: autoAllowed,
+    }),
+    false,
+  );
+  assert.equal(
+    isScopedCoordinatorPermissionResponse({
+      role: "developer",
+      toolName: "mcp_paseo_respond_to_permission",
+      requestInput: {
+        agentId: "rev-1",
+        requestId: "permission:call_child_review",
+      },
+      taskRecord,
+      autoAllowedPermissionIds: autoAllowed,
+    }),
+    false,
   );
 });

@@ -50,33 +50,63 @@ const HANDOFF_TOOL: Partial<Record<AgentRole, string>> = {
   "code-reviewer": "paseo_team_submit_review",
 };
 
-function isAutoAllowedTeamTool(
+export function isAutoAllowedTeamTool(
   role: AgentRole | undefined,
   toolName: string | null,
 ): boolean {
   if (!role || !toolName) return false;
   if (role === "coordinator") {
     return (
-      /(?:^|__|_|\/|:)(?:create_agent|send_agent_prompt|list_providers|list_models|inspect_provider|get_agent_status|get_agent_activity|list_agents)$/.test(
+      /(?:^|__|_|\/|:|\.)(?:create_agent|send_agent_prompt|list_providers|list_models|list_profiles|inspect_provider|get_agent_status|get_agent_activity|list_agents|list_hosts|list_workspaces|list_pending_permissions)$/.test(
         toolName,
       ) ||
-      /(?:^|__|_|\/|:)paseo_team_(?:task_summary|submit_plan|record_review|record_delivery|complete)$/.test(
+      /(?:^|__|_|\/|:|\.)paseo_team_(?:task_summary|submit_plan|record_review|record_delivery|complete)$/.test(
         toolName,
       )
     );
   }
   if (role === "developer") {
-    return /(?:^|__|_|\/|:)paseo_team_(?:run_check|submit_delivery)$/.test(
+    return /(?:^|__|_|\/|:|\.)paseo_team_(?:run_check|submit_delivery)$/.test(
       toolName,
     );
   }
   if (role === "expert") {
-    return /(?:^|__|_|\/|:)paseo_team_submit_plan$/.test(toolName);
+    return /(?:^|__|_|\/|:|\.)paseo_team_submit_plan$/.test(toolName);
   }
   if (role === "plan-reviewer" || role === "code-reviewer") {
-    return /(?:^|__|_|\/|:)paseo_team_submit_review$/.test(toolName);
+    return /(?:^|__|_|\/|:|\.)paseo_team_submit_review$/.test(toolName);
   }
   return false;
+}
+
+export function isScopedCoordinatorPermissionResponse(options: {
+  role: AgentRole | undefined;
+  toolName: string | null;
+  requestInput: unknown;
+  taskRecord?: { nodes: Array<{ role: AgentRole; agentId?: string }> };
+  autoAllowedPermissionIds?: ReadonlySet<string>;
+}): boolean {
+  if (options.role !== "coordinator" || !options.toolName) return false;
+  if (!/(?:^|__|_|\/|:|\.)respond_to_permission$/.test(options.toolName)) {
+    return false;
+  }
+  if (!options.requestInput || typeof options.requestInput !== "object") {
+    return false;
+  }
+  const input = options.requestInput as Record<string, unknown>;
+  const targetRequestId =
+    typeof input.requestId === "string" ? input.requestId : "";
+  if (
+    targetRequestId &&
+    options.autoAllowedPermissionIds?.has(targetRequestId)
+  ) {
+    return true;
+  }
+  const targetAgentId = typeof input.agentId === "string" ? input.agentId : "";
+  if (!targetAgentId || !options.taskRecord) return false;
+  return options.taskRecord.nodes.some(
+    (node) => node.role !== "coordinator" && node.agentId === targetAgentId,
+  );
 }
 
 function inferChildRole(options: {
@@ -140,6 +170,15 @@ function extractToolName(req: unknown): string | null {
 
 export default function contribute(server: PluginServerContext) {
   const cleanups: (() => void)[] = [];
+  const autoAllowedPermissionIds = new Set<string>();
+  const rememberAutoAllowedPermission = (requestId: string) => {
+    if (!requestId) return;
+    autoAllowedPermissionIds.add(requestId);
+    if (autoAllowedPermissionIds.size > 200) {
+      const oldest = autoAllowedPermissionIds.values().next().value;
+      if (oldest) autoAllowedPermissionIds.delete(oldest);
+    }
+  };
 
   server.handle(getConfigBundleRpc, async ({ cwd }, { paseo }) => {
     return buildConfigBundle(paseo, cwd);
@@ -646,19 +685,47 @@ export default function contribute(server: PluginServerContext) {
         try {
           if (request.kind !== "tool" && request.kind !== "other") return;
           const toolName = extractToolName(request);
-          let role = findTaskByAgentId(agent.id)?.matchedRole;
+          let match = findTaskByAgentId(agent.id);
+          let role = match?.matchedRole;
           if (!role && agent.parentAgentId) {
             const parentMatch = findTaskByAgentId(agent.parentAgentId);
             if (
               parentMatch?.matchedRole === "coordinator" &&
-              parentMatch.record.lifecycleStatus === "active" &&
-              toolName &&
-              /(?:^|__|_|\/|:)paseo_team_run_check$/.test(toolName)
+              parentMatch.record.lifecycleStatus === "active"
             ) {
-              role = "developer";
+              const inferred = inferChildRole({
+                title: agent.title,
+                planReviewRequired:
+                  parentMatch.record.planReview === "required",
+                hasDelivery: Boolean(
+                  parentMatch.record.delivery || parentMatch.record.candidate,
+                ),
+              });
+              if (inferred) {
+                role = inferred;
+                match = { ...parentMatch, matchedRole: inferred };
+              } else if (
+                toolName &&
+                /(?:^|__|_|\/|:|\.)paseo_team_run_check$/.test(toolName)
+              ) {
+                role = "developer";
+                match = { ...parentMatch, matchedRole: "developer" };
+              }
             }
           }
-          if (isAutoAllowedTeamTool(role, toolName)) {
+          if (
+            isAutoAllowedTeamTool(role, toolName) ||
+            isScopedCoordinatorPermissionResponse({
+              role,
+              toolName,
+              requestInput: request.input,
+              taskRecord: match?.record,
+              autoAllowedPermissionIds,
+            })
+          ) {
+            if (role !== "coordinator") {
+              rememberAutoAllowedPermission(request.id);
+            }
             const allowAction = Array.isArray(request.actions)
               ? request.actions.find((a) => a.behavior === "allow")
               : undefined;
