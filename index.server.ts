@@ -110,6 +110,9 @@ export function isScopedCoordinatorPermissionResponse(options: {
   );
 }
 
+const ROLE_SLOT_SUFFIX = String.raw`(?:\s*(?:#?\d+|[一二三四]))?`;
+const UNBRACKETED_ROLE_DELIM = String.raw`\s*(?:[:：\-–—·/]|$)`;
+
 export function inferChildRole(options: {
   metaRole?: string;
   labelRole?: string;
@@ -128,19 +131,35 @@ export function inferChildRole(options: {
   }
   const title = (options.title ?? "").trim();
   if (!title) return null;
-  if (/^\[(?:Developer|Handoff|开发)(?:\s*#\d+)?\]/i.test(title)) {
+  if (
+    new RegExp(
+      `^(?:\\[(?:Developer|Handoff|开发(?:者|成员)?)${ROLE_SLOT_SUFFIX}\\]|(?:Developer|Handoff|开发(?:者|成员)?)${ROLE_SLOT_SUFFIX}${UNBRACKETED_ROLE_DELIM})`,
+      "i",
+    ).test(title)
+  ) {
     return "developer";
   }
-  if (/^\[(?:Expert|Architect|专家)(?:\s*#\d+)?\]/i.test(title)) {
+  if (
+    new RegExp(
+      `^(?:\\[(?:Expert|Architect|专家)${ROLE_SLOT_SUFFIX}\\]|(?:Expert|Architect|专家)${ROLE_SLOT_SUFFIX}${UNBRACKETED_ROLE_DELIM})`,
+      "i",
+    ).test(title)
+  ) {
     return "expert";
   }
-  if (/^\[(?:Plan\s*Reviewer|方案审查)(?:\s*#\d+)?\]/i.test(title)) {
+  if (
+    new RegExp(
+      `^(?:\\[(?:Plan\\s*Reviewer|方案(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}\\]|(?:Plan\\s*Reviewer|方案(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}${UNBRACKETED_ROLE_DELIM})`,
+      "i",
+    ).test(title)
+  ) {
     return "plan-reviewer";
   }
   if (
-    /^\[(?:Code\s*Reviewer|Reviewer|Advisor|代码审查|审查)(?:\s*#\d+)?\]/i.test(
-      title,
-    )
+    new RegExp(
+      `^(?:\\[(?:Code\\s*Reviewer|Reviewer|Advisor|(?:代码)?(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}\\]|(?:Code\\s*Reviewer|Reviewer|Advisor|(?:代码)?(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}${UNBRACKETED_ROLE_DELIM})`,
+      "i",
+    ).test(title)
   ) {
     if (options.planReviewRequired && !options.hasDelivery) {
       return "plan-reviewer";
@@ -152,8 +171,13 @@ export function inferChildRole(options: {
 
 function stripRolePrefix(title: string | null | undefined): string {
   const raw = (title ?? "").trim();
-  const match = /^\[[^\]]+\]\s*(.+)$/.exec(raw);
-  return match?.[1]?.trim() || raw;
+  const bracketed = /^\[[^\]]+\]\s*(.+)$/.exec(raw);
+  if (bracketed?.[1]?.trim()) return bracketed[1].trim();
+  const prefixed = new RegExp(
+    `^(?:Plan\\s*Reviewer|Code\\s*Reviewer|Developer|Handoff|Expert|Architect|Reviewer|Advisor|开发(?:者|成员)?|专家|(?:方案|代码)?(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}\\s*[:：\\-–—·/]\\s*(.+)$`,
+    "i",
+  ).exec(raw);
+  return prefixed?.[1]?.trim() || raw;
 }
 
 export function extractToolName(req: unknown): string | null {
@@ -264,8 +288,10 @@ export default function contribute(server: PluginServerContext) {
     },
   );
 
+  let invalidateSessionOpenHooks = () => {};
+
   server.handle(startTeamTaskRpc, async (input, { paseo }) => {
-    return startTeamTask(paseo, input);
+    return startTeamTask(paseo, input, { invalidateSessionOpenHooks });
   });
 
   server.handle(
@@ -462,7 +488,7 @@ export default function contribute(server: PluginServerContext) {
     }),
   );
 
-  cleanups.push(
+  const registerOpenBeforeHook = () =>
     server.addHook("agent.open.before", async ({ request }) => {
       try {
         if (request.purpose === "history" || request.background) {
@@ -476,6 +502,7 @@ export default function contribute(server: PluginServerContext) {
             : null;
         const labelTaskId = request.labels?.["task"];
         const labelRole = request.labels?.["role"];
+        const parentAgentId = request.labels?.["paseo.parent-agent-id"];
 
         let recordPath =
           typeof metaObj?.recordPath === "string" ? metaObj.recordPath : "";
@@ -487,7 +514,28 @@ export default function contribute(server: PluginServerContext) {
           if (matched) {
             recordPath = matched.recordPath;
             role = role || matched.matchedRole;
-          } else if (request.cwd) {
+          } else if (parentAgentId) {
+            const parentMatch = findTaskByAgentId(parentAgentId);
+            if (
+              parentMatch?.matchedRole === "coordinator" &&
+              parentMatch.record.lifecycleStatus === "active"
+            ) {
+              const inferred = inferChildRole({
+                labelRole,
+                title: request.title,
+                planReviewRequired:
+                  parentMatch.record.planReview === "required",
+                hasDelivery: Boolean(
+                  parentMatch.record.delivery || parentMatch.record.candidate,
+                ),
+              });
+              if (inferred) {
+                recordPath = parentMatch.recordPath;
+                role = role || inferred;
+              }
+            }
+          }
+          if (!recordPath && request.cwd) {
             const projectTasks = listTasksForProject(request.cwd);
             if (labelTaskId) {
               const byId = projectTasks.find(
@@ -677,8 +725,14 @@ export default function contribute(server: PluginServerContext) {
         console.error("[paseo-team] agent.open.before error:", err);
         return undefined;
       }
-    }),
-  );
+    });
+
+  let disposeOpenBefore = registerOpenBeforeHook();
+  invalidateSessionOpenHooks = () => {
+    disposeOpenBefore();
+    disposeOpenBefore = registerOpenBeforeHook();
+  };
+  cleanups.push(() => disposeOpenBefore());
 
   cleanups.push(
     server.addHook(

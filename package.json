@@ -41,7 +41,7 @@
     "lint": "node scripts/check.mjs --lint",
     "check:plugin": "node scripts/check.mjs",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run check:plugin",
-    "test:unit": "node --experimental-strip-types --test tests/check.test.ts tests/task-store.test.ts tests/quality-gate.test.ts tests/run-check.test.ts tests/handoff.test.ts tests/prompts.test.ts",
+    "test:unit": "node --experimental-strip-types --test tests/check.test.ts tests/task-store.test.ts tests/quality-gate.test.ts tests/run-check.test.ts tests/handoff.test.ts tests/prompts.test.ts tests/client-ui.test.ts",
     "test:integration": "node --experimental-strip-types --test tests/hooks.integration.test.ts",
     "test:coverage": "node scripts/coverage.mjs --min-lines=80",
     "coverage:badge": "node scripts/coverage.mjs --write-badge --min-lines=80",

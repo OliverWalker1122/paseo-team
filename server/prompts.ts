@@ -265,10 +265,13 @@ export function buildKickoffPrompt(options: {
       `任务目标：${options.goal}`,
       `生效预设：\`${options.teamName}\`（模式：\`${options.complexMode}\`）`,
       "",
-      "### 成员派发参数（create_agent 直接使用）",
+      "### 成员派发参数（create_agent 原样传入 provider、settings 与 labels，不传 workspaceId）",
       ...options.rosterLines,
       "",
-      "按系统提示中的协调协议执行。",
+      "### 主控执行要点",
+      "- 当前对话直接作为主控（Coordinator）：主控不自己改业务代码或跑测试套件；通过 `create_agent` 按上方给定的 `provider`、`settings` 和 `labels` 派发成员（同工作区同一时刻只派 1 名 Developer），派发后立即结束本轮等待自动完成通知，不要轮询。",
+      "- 插件会根据 `labels` 自动向成员注入角色指引、安全红线与专属提交工具：Developer 修改后调 `paseo_team_run_check` 跑测试再调 `paseo_team_submit_delivery`；收到交付后再并行派发代码审查员调 `paseo_team_submit_review`（代录工具 `paseo_team_record_*` 仅在插件提醒后成员仍未提交时兜底）。",
+      "- 全部必需检查与审查通过后，调用 `paseo_team_complete` 完成验收闭环。",
     ].join("\n");
   }
   return [
@@ -276,10 +279,13 @@ export function buildKickoffPrompt(options: {
     `Goal: ${options.goal}`,
     `Active Preset: \`${options.teamName}\` (mode: \`${options.complexMode}\`)`,
     "",
-    "### Member Routing (use as-is in create_agent)",
+    "### Member Routing (pass provider, settings, and labels as-is to create_agent; omit workspaceId)",
     ...options.rosterLines,
     "",
-    "Follow the coordinator protocol in your system prompt.",
+    "### Coordinator Essentials",
+    "- This chat is the Coordinator: do not edit repository files or run full test suites yourself. Spawn subagents via `create_agent` with the exact `provider`, `settings`, and `labels` above (one Developer writing at a time), then end your turn immediately and wait for completion callbacks without polling.",
+    "- The plugin uses `labels` to inject each member's role prompt, safety rules, and handoff tools: Developer runs `paseo_team_run_check` then calls `paseo_team_submit_delivery`; dispatch Code Reviewers in parallel after delivery so each calls `paseo_team_submit_review` (`paseo_team_record_*` is fallback only after a reminder).",
+    "- Once all required checks and reviews pass, call `paseo_team_complete` to close out the task.",
   ].join("\n");
 }
 

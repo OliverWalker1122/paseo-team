@@ -8,7 +8,7 @@ English | [简体中文](./README.zh-CN.md)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg)](./package.json)
 [![Paseo](https://img.shields.io/badge/paseo-%3E%3D0.17.3-informational)](https://paseo.sh)
 
-A [Paseo](https://paseo.sh) plugin that turns one chat into a small engineering team. Each task gets its own coordinator session that scopes the work and makes the calls, a developer writes the code, and two code reviewers check it from opposing angles before a quality gate signs off.
+A [Paseo](https://paseo.sh) plugin that turns one chat into a small engineering team. Your open chat acts as the coordinator that scopes the work and makes the calls, a developer writes the code, and two code reviewers check it from opposing angles before a quality gate signs off.
 
 ## Why
 
@@ -16,14 +16,14 @@ When one agent writes code and then judges its own work, it tends to approve its
 
 ## Features
 
-- **Separated roles.** A new coordinator session per task scopes the work and dispatches one Developer at a time. Reviewers do not edit product code, while remaining free to run tests or reproduction checks to verify edge cases.
+- **Separated roles.** Your current chat acts directly as the coordinator (keeping all prior discussion context) and dispatches one Developer at a time. Reviewers do not edit product code, while remaining free to run tests or reproduction checks to verify edge cases.
 - **Checked handoffs.** Every member hands off through its own submit tool (delivery, plan or review). The tool rejects malformed input or a delivery without a passing check, and the plugin reminds a member once if its turn ends while it still owes a handoff (for example, rework was requested).
 - **Cross review.** Two reviewers examine each change independently from opposing angles (requirements and real edge cases vs. architecture and simpler alternatives). Neither sees the other's verdict.
 - **Two-round limit.** If review still fails after two rounds, the team stops and asks you instead of patching endlessly.
 - **Quality gate.** A task completes only when four evidence checks pass, and a blocked gate lists exactly what is missing and from whom (see [Quality gate](#quality-gate)).
 - **Your workspace, your commits.** Agents work in the Paseo workspace you opened: a project folder or a Paseo-managed worktree. The plugin never creates hidden worktrees and never commits or merges, so every edit shows up in Paseo's Changes panel and you decide when to commit.
 - **Pick models per role.** Choose provider, model and reasoning effort for each role. A task will not start while a role it needs has no model; a reviewer can be turned off instead.
-- **Live graph per chat.** A chat can start several team tasks; its graph shows each one as a subtree under that chat. History keeps every task, including each review round and its findings.
+- **Single live graph tab per workspace.** Running `/paseo-team` or clicking the status pill reuses one Team graph tab in the workspace instead of opening duplicate tabs, and hides the pill on chats without team tasks or subagents. History keeps every task, including each review round and its findings.
 - **English and Chinese.** The UI follows the Paseo app language. Agent prompts follow the language of your task goal.
 
 ## Requirements
@@ -64,11 +64,11 @@ After editing a local clone, run `paseo plugin reload paseo-team`.
 
 ### Commands
 
-| Command                   | What it does                                    |
-| ------------------------- | ----------------------------------------------- |
-| `/paseo-team <task goal>` | Starts a team task in a new coordinator session |
-| `/paseo-team setup`       | Opens model and preset setup                    |
-| `/paseo-team status`      | Opens this chat's team graph                    |
+| Command                   | What it does                                         |
+| ------------------------- | ---------------------------------------------------- |
+| `/paseo-team <task goal>` | Starts a team task with this chat as the coordinator |
+| `/paseo-team setup`       | Opens model and preset setup                         |
+| `/paseo-team status`      | Opens the workspace team graph                       |
 
 ### Phrases you can add to the goal
 
@@ -89,7 +89,7 @@ Without `with review`, the coordinator decides whether code review is needed; it
 
 ```mermaid
 flowchart LR
-  C["Coordinator (new session per task)"] --> E["Expert plan (complex tasks only)"]
+  C["Coordinator (current chat)"] --> E["Expert plan (complex tasks only)"]
   E --> P["Plan review (optional)"]
   C --> D["Developer"]
   P --> D

@@ -1330,22 +1330,53 @@ export async function buildConversationGraph(
   const lang = input.language ?? "en";
   const liveMap = await fetchLiveAgentMap(paseo);
   const recentTasks = listAllRecentTasks(undefined, 100);
-  const matchTask = (agentId: string) =>
-    recentTasks.find(
+  const isOpenTask = (status: TaskRecord["lifecycleStatus"]) =>
+    status !== "completed" && status !== "abandoned";
+  const openTasks = recentTasks.filter((t) =>
+    isOpenTask(t.record.lifecycleStatus),
+  );
+  const matchInList = (
+    list: typeof recentTasks,
+    agentId: string,
+    includeLauncher = false,
+  ) =>
+    list.find(
       (item) =>
         item.record.coordinatorAgentId === agentId ||
+        (includeLauncher && item.record.launcherAgentId === agentId) ||
         (Array.isArray(item.record.nodes) &&
           item.record.nodes.some((n) => n?.agentId === agentId)),
     ) ?? null;
+  const matchTask = (agentId: string) =>
+    matchInList(openTasks, agentId) ?? matchInList(recentTasks, agentId);
 
   let viewerAgentId = input.agentId?.trim() || null;
   if (!viewerAgentId && input.workspaceId) {
-    const wsAgents = [...liveMap.values()].filter(
-      (a) => a.workspaceId === input.workspaceId && a.id,
-    );
-    const withTeam = wsAgents.find((a) => Boolean(matchTask(a.id!)));
+    const wsAgents = [...liveMap.values()]
+      .filter((a) => a.workspaceId === input.workspaceId && a.id)
+      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    const wsAgentIds = new Set(wsAgents.map((a) => a.id!));
+    const pickTaskViewer = (list: typeof recentTasks): string | null => {
+      for (const item of list) {
+        const candidates = [
+          item.record.coordinatorAgentId,
+          item.record.launcherAgentId,
+          ...(Array.isArray(item.record.nodes)
+            ? item.record.nodes.map((n) => n?.agentId)
+            : []),
+        ];
+        const hit = candidates.find((id) => Boolean(id && wsAgentIds.has(id)));
+        if (hit) return hit;
+      }
+      return null;
+    };
     const topLevel = wsAgents.find((a) => !a.parentAgentId);
-    viewerAgentId = withTeam?.id ?? topLevel?.id ?? wsAgents[0]?.id ?? null;
+    viewerAgentId =
+      pickTaskViewer(openTasks) ??
+      pickTaskViewer(recentTasks) ??
+      topLevel?.id ??
+      wsAgents[0]?.id ??
+      null;
   }
 
   if (!viewerAgentId) {
@@ -1359,26 +1390,46 @@ export async function buildConversationGraph(
 
   const rootAgentId = resolveRootAgentId(viewerAgentId, liveMap);
 
-  // A chat that launched tasks shows them as subtrees, plus any task it
-  // coordinates itself (older tasks used the launching chat as coordinator).
-  const launched = recentTasks
-    .filter((item) => item.record.launcherAgentId === viewerAgentId)
-    .sort((a, b) => b.record.createdAt.localeCompare(a.record.createdAt));
-  if (launched.length > 0) {
-    const own = matchTask(viewerAgentId);
-    const items =
-      own && !launched.some((x) => x.recordPath === own.recordPath)
-        ? [...launched, own].sort((a, b) =>
-            b.record.createdAt.localeCompare(a.record.createdAt),
-          )
-        : launched;
+  // One chat can run multiple team tasks sequentially as coordinator (and may
+  // also hold legacy tasks it launched). A single coordinated task renders
+  // directly; multiple tasks or legacy launcher-only tasks render as subtrees.
+  const ownedTasks = recentTasks
+    .filter(
+      (item) =>
+        item.record.coordinatorAgentId === viewerAgentId ||
+        item.record.launcherAgentId === viewerAgentId,
+    )
+    .sort((a, b) => {
+      const aOpen = isOpenTask(a.record.lifecycleStatus) ? 1 : 0;
+      const bOpen = isOpenTask(b.record.lifecycleStatus) ? 1 : 0;
+      if (aOpen !== bOpen) return bOpen - aOpen;
+      return b.record.createdAt.localeCompare(a.record.createdAt);
+    });
+  if (
+    ownedTasks.length > 1 ||
+    (ownedTasks.length === 1 &&
+      ownedTasks[0].record.coordinatorAgentId !== viewerAgentId)
+  ) {
     return {
       mode: "launcher",
       viewerAgentId,
       rootAgentId,
       task: null,
-      tasks: items.map((item) =>
+      tasks: ownedTasks.map((item) =>
         toPipelineSnapshot(item.recordPath, item.record, liveMap, lang),
+      ),
+    };
+  }
+  if (ownedTasks.length === 1) {
+    return {
+      mode: "team_task",
+      viewerAgentId,
+      rootAgentId,
+      task: toPipelineSnapshot(
+        ownedTasks[0].recordPath,
+        ownedTasks[0].record,
+        liveMap,
+        lang,
       ),
     };
   }
@@ -1629,6 +1680,9 @@ export async function startTeamTask(
     requireReview?: boolean;
     language?: UiLanguage;
   },
+  options?: {
+    invalidateSessionOpenHooks?: () => void | Promise<void>;
+  },
 ): Promise<{
   taskId: string;
   recordPath: string;
@@ -1658,6 +1712,29 @@ export async function startTeamTask(
     );
   }
 
+  const coordinatorAgentId = input.agentId?.trim();
+  if (!coordinatorAgentId) {
+    throw new Error(
+      zh
+        ? "请在已打开的对话里用 /paseo-team 启动团队任务。"
+        : "Start a team task with /paseo-team inside an open chat.",
+    );
+  }
+
+  const coordHandle = paseo.agents.ref(coordinatorAgentId);
+  const refreshed = await coordHandle.refresh().catch(() => null);
+  const currentAgent = refreshed?.agent as Record<string, unknown> | undefined;
+  if (
+    currentAgent?.status === "running" ||
+    currentAgent?.status === "initializing"
+  ) {
+    throw new Error(
+      zh
+        ? "当前对话正在运行中，请等本轮回复结束后再启动 /paseo-team。"
+        : "This chat is currently running a turn. Wait for it to finish before starting /paseo-team.",
+    );
+  }
+
   const created = initTask({
     cwd: input.cwd,
     goal: parsed.goal,
@@ -1667,8 +1744,31 @@ export async function startTeamTask(
     requireReview: input.requireReview ?? parsed.requireReview,
     requirePlanReview: parsed.requirePlanReview,
     skipReviewReason: parsed.skipReviewReason,
-    ...(input.agentId ? { launcherAgentId: input.agentId } : {}),
+    coordinatorAgentId,
   });
+
+  if (typeof currentAgent?.provider === "string" && currentAgent.provider) {
+    const updated = loadTask(created.recordPath);
+    const coordNode = updated.nodes.find((n) => n.nodeId === "coordinator");
+    if (coordNode) {
+      const provider = currentAgent.provider;
+      const model =
+        typeof currentAgent.model === "string" && currentAgent.model
+          ? currentAgent.model
+          : undefined;
+      const thinking =
+        typeof currentAgent.thinkingOptionId === "string" &&
+        currentAgent.thinkingOptionId
+          ? currentAgent.thinkingOptionId
+          : undefined;
+      coordNode.agentId = coordinatorAgentId;
+      coordNode.provider = provider;
+      if (model) coordNode.model = model;
+      if (thinking) coordNode.thinkingOptionId = thinking;
+      coordNode.profile = model ? `${provider}/${model}` : provider;
+      saveTask(created.recordPath, updated);
+    }
+  }
 
   const devLaunch = resolveRoleLaunchSpec({
     role: "developer",
@@ -1678,6 +1778,7 @@ export async function startTeamTask(
 
   const formatLaunchLine = (
     launch: ReturnType<typeof resolveRoleLaunchSpec>,
+    role: "developer" | "expert" | "plan-reviewer" | "code-reviewer",
   ) => {
     const settingsObj: Record<string, unknown> = {};
     if (launch.modeId) settingsObj.modeId = launch.modeId;
@@ -1687,10 +1788,16 @@ export async function startTeamTask(
       Object.keys(settingsObj).length > 0
         ? ` settings=${JSON.stringify(settingsObj)}`
         : "";
-    return `provider="${launch.providerArg}"${settingsPart}`;
+    const labelsPart = ` labels=${JSON.stringify({
+      task: created.record.taskId,
+      role,
+    })}`;
+    return `provider="${launch.providerArg}"${settingsPart}${labelsPart}`;
   };
 
-  const rosterLines: string[] = [`- Developer: ${formatLaunchLine(devLaunch)}`];
+  const rosterLines: string[] = [
+    `- Developer: ${formatLaunchLine(devLaunch, "developer")}`,
+  ];
 
   if (eff.preset.complexMode === "expert") {
     const expLaunch = resolveRoleLaunchSpec({
@@ -1698,7 +1805,7 @@ export async function startTeamTask(
       spec: eff.preset.expert ?? { model: AUTO_MODEL },
       catalog: providers,
     });
-    rosterLines.push(`- Expert: ${formatLaunchLine(expLaunch)}`);
+    rosterLines.push(`- Expert: ${formatLaunchLine(expLaunch, "expert")}`);
   }
 
   if (created.record.planReview === "required" || created.record.isComplex) {
@@ -1713,7 +1820,7 @@ export async function startTeamTask(
         eff.preset.planReviewers.length,
       );
       rosterLines.push(
-        `- Plan Reviewer #${idx + 1} (${reviewerPerspectiveLabel(persp, promptLang)}): ${formatLaunchLine(launch)}`,
+        `- Plan Reviewer #${idx + 1} (${reviewerPerspectiveLabel(persp, promptLang)}): ${formatLaunchLine(launch, "plan-reviewer")}`,
       );
     });
   }
@@ -1736,13 +1843,14 @@ export async function startTeamTask(
         catalog: providers,
       });
       rosterLines.push(
-        `- Code Reviewer #${idx + 1} (${reviewerPerspectiveLabel(persp, promptLang)}): ${formatLaunchLine(revLaunch)}`,
+        `- Code Reviewer #${idx + 1} (${reviewerPerspectiveLabel(persp, promptLang)}): ${formatLaunchLine(revLaunch, "code-reviewer")}`,
       );
     });
   }
 
-  // Task-specific facts only; the protocol and safety rules arrive through the
-  // coordinator's system prompt (agent.open.before), so nothing is sent twice.
+  // Use the current chat directly as coordinator: update its task metadata,
+  // reload its live session so agent.open.before injects the coordinator
+  // protocol and tools while preserving conversation history, then send kickoff.
   const kickoffPrompt = buildKickoffPrompt({
     taskId: created.record.taskId,
     goal: parsed.goal,
@@ -1752,81 +1860,34 @@ export async function startTeamTask(
     lang: promptLang,
   });
 
-  if (!input.workspaceId) {
-    throw new Error("A workspace is required to start a team task.");
-  }
-
-  // Each task gets its own new coordinator session, so one chat can start
-  // several tasks; the coordinator inherits the launching chat's model.
-  let coordSpec: RoleModelSpec | null = null;
-  if (input.agentId) {
-    const launcher = (
-      await paseo.agents
-        .ref(input.agentId)
-        .refresh()
-        .catch(() => null)
-    )?.agent as Record<string, unknown> | undefined;
-    if (typeof launcher?.provider === "string") {
-      coordSpec = {
-        model:
-          typeof launcher.model === "string" && launcher.model
-            ? `${launcher.provider}/${launcher.model}`
-            : launcher.provider,
-        ...(typeof launcher.thinkingOptionId === "string"
-          ? { thinking: launcher.thinkingOptionId }
-          : {}),
-      };
-    }
-  }
-  if (!coordSpec) {
-    throw new Error(
-      zh
-        ? "读不到发起对话的模型，无法创建协调者。请在一个对话里用 /paseo-team 启动任务。"
-        : "Could not read the launching chat's model for the coordinator. Start the task with /paseo-team from a chat.",
-    );
-  }
-  const coordLaunch = resolveRoleLaunchSpec({
-    role: "coordinator",
-    spec: coordSpec,
-    catalog: providers,
-  });
-  const createdAgent = await paseo.workspaces
-    .ref(input.workspaceId)
-    .agents.create({
-      config: {
-        provider: coordLaunch.providerArg,
-        ...(coordLaunch.modeId ? { modeId: coordLaunch.modeId } : {}),
-        ...(coordLaunch.thinkingOptionId
-          ? { thinkingOptionId: coordLaunch.thinkingOptionId }
-          : {}),
-      },
-      title: `[Team] ${parsed.goal.slice(0, 42)}`,
-      labels: { task: created.record.taskId, role: "coordinator" },
-      metadata: {
+  try {
+    if (typeof coordHandle.setMetadata === "function") {
+      await coordHandle.setMetadata({
         "paseo-team.task": {
           taskId: created.record.taskId,
           recordPath: created.recordPath,
           role: "coordinator",
         },
-      },
-      prompt: kickoffPrompt,
-    });
-  const coordinatorAgentId = createdAgent.id;
-  const updated = loadTask(created.recordPath);
-  updated.coordinatorAgentId = coordinatorAgentId;
-  const coordNode = updated.nodes.find((n) => n.nodeId === "coordinator");
-  if (coordNode) {
-    // The coordinator is a new session now, so show its real model instead of "current chat".
-    const [provider, ...model] = coordLaunch.providerArg.split("/");
-    coordNode.agentId = coordinatorAgentId;
-    coordNode.profile = coordLaunch.providerArg;
-    coordNode.provider = provider;
-    if (model.length) coordNode.model = model.join("/");
-    if (coordLaunch.thinkingOptionId) {
-      coordNode.thinkingOptionId = coordLaunch.thinkingOptionId;
+      });
     }
+    // Do NOT call coordHandle.reload(): Paseo's refresh_agent_request wipes timeline
+    // (`rehydrateFromDisk: true`) and invokes `hydrateTimelineFromProvider`, which
+    // fails on Codex (`thread/items/list is not supported yet`). Instead, bump
+    // Paseo's `sessionOpenGeneration` via `invalidateSessionOpenHooks` so
+    // `coordHandle.send()` runs `reloadStalePluginSession` (`rehydrateFromDisk: false`),
+    // preserving conversation history while injecting coordinator prompts & tools.
+    if (
+      currentAgent?.status === "idle" &&
+      typeof options?.invalidateSessionOpenHooks === "function"
+    ) {
+      await options.invalidateSessionOpenHooks();
+    }
+    await coordHandle.send(kickoffPrompt);
+  } catch (err) {
+    throw new Error(
+      `Failed to start team task in current chat: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  saveTask(created.recordPath, updated);
 
   notifyTaskChanges();
   return {
@@ -1834,7 +1895,9 @@ export async function startTeamTask(
     recordPath: created.recordPath,
     coordinatorAgentId,
     teamName: eff.teamName,
-    message: zh ? "已启动团队协作流水线。" : "Team pipeline started.",
+    message: zh
+      ? "已在当前对话启动团队协作。"
+      : "Team pipeline started in this chat.",
   };
 }
 

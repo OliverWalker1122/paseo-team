@@ -41,6 +41,7 @@ function createPluginHarness(t: test.TestContext) {
   process.env.XDG_CONFIG_HOME = configHome;
 
   const hooks = new Map<string, HookHandler>();
+  const hookEvents: Array<{ action: "add" | "remove"; name: string }> = [];
   const rpcs = new Map<string, RpcHandler>();
   const sentMessages: Array<{ agentId: string; text: string }> = [];
   const permissionResponses: Array<{
@@ -49,6 +50,11 @@ function createPluginHarness(t: test.TestContext) {
     response: Record<string, unknown>;
   }> = [];
   const createdAgents: Array<Record<string, unknown>> = [];
+  const reloadedAgents: Array<{ agentId: string; requestId?: string }> = [];
+  const metadataUpdates: Array<{
+    agentId: string;
+    patch: Record<string, unknown>;
+  }> = [];
   const agentDirectory = new Map<string, Record<string, unknown>>();
 
   let createdSeq = 0;
@@ -144,6 +150,26 @@ function createPluginHarness(t: test.TestContext) {
             const agent = agentDirectory.get(agentId);
             return agent ? { agent } : null;
           },
+          async setMetadata(patch: Record<string, unknown>) {
+            metadataUpdates.push({ agentId, patch });
+            const existing = agentDirectory.get(agentId);
+            if (existing) {
+              existing.metadata = {
+                ...((existing.metadata as Record<string, unknown>) ?? {}),
+                ...patch,
+              };
+            }
+          },
+          async reload(opts?: { requestId?: string }) {
+            reloadedAgents.push({ agentId, requestId: opts?.requestId });
+            const agent = agentDirectory.get(agentId);
+            if (agent?.provider === "codex") {
+              throw new Error(
+                "thread/items/list is not supported yet requestType=refresh_agent_request code=agent_refresh_failed",
+              );
+            }
+            return agent ? { agent } : null;
+          },
           async send(text: string) {
             sentMessages.push({ agentId, text });
           },
@@ -168,8 +194,10 @@ function createPluginHarness(t: test.TestContext) {
     },
     addHook(name: string, handler: HookHandler) {
       hooks.set(name, handler);
+      hookEvents.push({ action: "add", name });
       return () => {
         hooks.delete(name);
+        hookEvents.push({ action: "remove", name });
       };
     },
   };
@@ -192,10 +220,13 @@ function createPluginHarness(t: test.TestContext) {
     stateRoot: path.join(stateHome, "paseo-team"),
     workspaceDir,
     hooks,
+    hookEvents,
     rpcs,
     sentMessages,
     permissionResponses,
     createdAgents,
+    reloadedAgents,
+    metadataUpdates,
     agentDirectory,
     async invokeHook(name: string, payload: Record<string, unknown>) {
       const fn = hooks.get(name);
@@ -527,6 +558,55 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
     },
   })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
   assert.match(resumedDev.appendSystemPrompt[1], /Developer 指引/);
+
+  // 7. Regression (Claude resumed coordinator): even when a second active task exists in the same workspace
+  // and create_agent omits `labels.task`/`labels.role`, `paseo.parent-agent-id` + colon-prefixed titles
+  // ("Developer: ...", "Reviewer #1: ...") deterministically attach member tools to the parent coordinator's task.
+  initTask({
+    cwd: h.workspaceDir,
+    goal: "另一个陈旧的未结项任务（验证多活跃任务下按 parent-agent-id 精准绑定）",
+    teamName: "标准",
+    preset: samplePreset,
+  });
+  const colonDev = (await h.invokeHook("agent.open.before", {
+    request: {
+      ...baseReq,
+      agentId: "dev-colon",
+      provider: "antigravity",
+      title: "Developer: edit temp file",
+      labels: { "paseo.parent-agent-id": "coord-open" },
+    },
+  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
+  assert.match(colonDev.appendSystemPrompt[1], /Developer 指引/);
+  assert.deepEqual(
+    colonDev.tools.map((tool) => tool.name),
+    ["existing_tool", "paseo_team_run_check", "paseo_team_submit_delivery"],
+  );
+  recordCandidateDelivery(recordPath, {
+    agentId: "dev-colon",
+    summary: "done",
+    architectureImpact: "无",
+    ciWaivedUserQuote: "waived for colon title test",
+  });
+  const colonRev = (await h.invokeHook("agent.open.before", {
+    request: {
+      ...baseReq,
+      agentId: "rev-colon-1",
+      provider: "claude",
+      title: "Reviewer #1: spec & edge cases",
+      labels: { "paseo.parent-agent-id": "coord-open" },
+    },
+  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
+  assert.match(colonRev.appendSystemPrompt[1], /独立代码审查指引/);
+  assert.deepEqual(
+    colonRev.tools.map((tool) => tool.name),
+    ["existing_tool", "paseo_team_submit_review"],
+  );
+  assert.equal(
+    loadTask(recordPath).nodes.find((n) => n.agentId === "rev-colon-1")
+      ?.briefSummary,
+    "spec & edge cases",
+  );
 });
 
 test("agent.permission.before handles multi-provider prefixes, prevents Antigravity coord+child deadlock, and blocks foreign/dangerous approvals", async (t) => {
@@ -927,13 +1007,35 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
       },
     },
   });
+  // Use Codex as the open chat provider to guard against refresh_agent_request /
+  // hydrateTimelineFromProvider (`thread/items/list is not supported yet`).
   h.agentDirectory.set("launcher-1", {
     id: "launcher-1",
-    provider: "antigravity",
-    model: "gemini-4-neon",
+    status: "idle",
+    provider: "codex",
+    model: "gpt-6.2-astra",
     thinkingOptionId: "high",
   });
 
+  // Guard: starting /paseo-team while the chat is mid-turn is rejected cleanly.
+  h.agentDirectory.set("busy-chat", {
+    id: "busy-chat",
+    status: "running",
+    provider: "claude",
+    model: "claude-sonnet-5-5",
+  });
+  await assert.rejects(
+    () =>
+      h.invokeRpc(startTeamTaskRpc.name, {
+        cwd: h.workspaceDir,
+        workspaceId: "wks_l2",
+        agentId: "busy-chat",
+        rawArgs: "Should not interrupt running chat",
+      }),
+    /currently running/,
+  );
+
+  const hookEventsBeforeStart = h.hookEvents.length;
   const started = (await h.invokeRpc(startTeamTaskRpc.name, {
     cwd: h.workspaceDir,
     workspaceId: "wks_l2",
@@ -941,9 +1043,23 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
     rawArgs: "Update label in app.txt, with code review",
   })) as { taskId: string; recordPath: string; coordinatorAgentId: string };
 
-  assert.equal(h.createdAgents.length, 1);
-  assert.match(String(h.createdAgents[0].prompt), /\[Team Kickoff\]/);
-  assert.match(String(h.createdAgents[0].prompt), /antigravity\/gemini-4-neon/);
+  // Current chat becomes the coordinator directly without spawning a separate coordinator agent
+  // and without calling reload() (instead bumping sessionOpenGeneration via agent.open.before toggle).
+  assert.equal(h.createdAgents.length, 0);
+  assert.equal(started.coordinatorAgentId, "launcher-1");
+  assert.equal(h.metadataUpdates.length, 1);
+  assert.equal(h.metadataUpdates[0].agentId, "launcher-1");
+  assert.equal(h.reloadedAgents.length, 0);
+  assert.deepEqual(h.hookEvents.slice(hookEventsBeforeStart), [
+    { action: "remove", name: "agent.open.before" },
+    { action: "add", name: "agent.open.before" },
+  ]);
+  assert.equal(h.hooks.has("agent.open.before"), true);
+  assert.equal(h.sentMessages.length, 1);
+  assert.equal(h.sentMessages[0].agentId, "launcher-1");
+  assert.match(h.sentMessages[0].text, /\[Team Kickoff\]/);
+  assert.match(h.sentMessages[0].text, /antigravity\/gemini-4-neon/);
+  h.sentMessages.length = 0;
 
   // Open coordinator and grab its real injected tools.
   const openToolMap = async (req: Record<string, unknown>) => {
@@ -1088,4 +1204,104 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
     });
   }
   assert.equal(h.sentMessages.length, 0);
+});
+
+test("regression: task started without plan review dynamically upgrades to planReview=required when user requests plan review mid-chat", async (t) => {
+  const h = createPluginHarness(t);
+  saveConfig({
+    schemaVersion: 5,
+    default: "标准",
+    projects: {},
+    teams: {
+      标准: {
+        developer: { model: "antigravity/gemini-4-neon", thinking: "xhigh" },
+        codeReviewers: [
+          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
+          { model: "codex/gpt-6.2-astra", thinking: "high" },
+        ],
+        separatePlanReviewers: true,
+        planReviewers: [
+          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
+          { model: "codex/gpt-6.2-astra", thinking: "high" },
+        ],
+        expert: { model: "claude/claude-sonnet-5-5", thinking: "medium" },
+        complexMode: "simple",
+      },
+    },
+  });
+  h.agentDirectory.set("main-chat-7e7bc091", {
+    id: "main-chat-7e7bc091",
+    status: "idle",
+    provider: "claude",
+    model: "claude-sonnet-5-5",
+    thinkingOptionId: "medium",
+  });
+
+  // 1. User runs `/paseo-team 开始开发，但是先别部署。` without mentioning plan review.
+  const started = (await h.invokeRpc(startTeamTaskRpc.name, {
+    cwd: h.workspaceDir,
+    workspaceId: "wks_pm",
+    agentId: "main-chat-7e7bc091",
+    rawArgs: "开始开发，但是先别部署。",
+  })) as { taskId: string; recordPath: string; coordinatorAgentId: string };
+
+  assert.equal(h.createdAgents.length, 0);
+  assert.equal(started.coordinatorAgentId, "main-chat-7e7bc091");
+  assert.equal(loadTask(started.recordPath).planReview, "not-required");
+
+  // 2. User later sends "需要方案评审" in the chat -> Coordinator writes plan.md, calls submit_plan, and spawns plan reviewers.
+  const openOut = (await h.invokeHook("agent.open.before", {
+    request: {
+      workspaceId: "wks_pm",
+      cwd: h.workspaceDir,
+      reason: "refresh",
+      purpose: "interactive",
+      background: false,
+      agentId: "main-chat-7e7bc091",
+      provider: "claude",
+      title: "搭建套利系统分层 Loss 回测",
+      labels: {},
+      metadata: h.agentDirectory.get("main-chat-7e7bc091")?.metadata ?? {},
+      appendSystemPrompt: [],
+      tools: [],
+      env: {},
+      mcpServers: {},
+    },
+  })) as {
+    tools: Array<{
+      name: string;
+      execute: (args: Record<string, unknown>) => Promise<{
+        text: string;
+        isError?: boolean;
+      }>;
+    }>;
+  };
+  const coordTools = new Map(openOut.tools.map((tool) => [tool.name, tool]));
+  const taskDir = path.dirname(started.recordPath);
+  writeFileSync(path.join(taskDir, "plan.md"), "# 方案 v1\n");
+  const planRes = await coordTools.get("paseo_team_submit_plan")!.execute({
+    planFile: "plan.md",
+    summary: "方案 v1",
+  });
+  assert.notEqual(planRes.isError, true);
+
+  await h.invokeHook("agent.create.after", {
+    agent: {
+      id: "plan-rev-1",
+      parentAgentId: "main-chat-7e7bc091",
+      provider: "claude",
+      cwd: h.workspaceDir,
+      title: "[Plan Reviewer #1] 需求规格与边界",
+      background: false,
+      metadata: {},
+    },
+  });
+
+  const upgraded = loadTask(started.recordPath);
+  assert.equal(upgraded.planReview, "required");
+  const blockedGate = await coordTools.get("paseo_team_complete")!.execute({
+    inspectOnly: true,
+  });
+  assert.equal(blockedGate.isError, true);
+  assert.match(blockedGate.text, /plan-rev-1/);
 });

@@ -9,8 +9,9 @@ import { useMemo, useState } from "react";
 import { registerTeamComposerPills } from "./client/composer-pill.tsx";
 import { SettingsTeamConfigSurface } from "./client/TeamConfigScreen.tsx";
 import {
-  AgentConversationGraphPanel,
+  focusWorkspaceGraphAgent,
   GlobalTeamGraphScreen,
+  WorkspaceConversationGraphPanel,
 } from "./client/TeamGraphPanel.tsx";
 import {
   type PipelineTaskSnapshotDto,
@@ -105,11 +106,11 @@ export default function contribute(client: PluginClientContext) {
   );
 
   cleanups.push(
-    client.addAgentPanel({
-      id: "team-agent-graph",
+    client.addWorkspacePanel({
+      id: "team-graph",
       title: titles.message("teamGraph"),
       icon: "Workflow",
-      Component: AgentConversationGraphPanel,
+      Component: WorkspaceConversationGraphPanel,
     }),
   );
 
@@ -131,8 +132,9 @@ export default function contribute(client: PluginClientContext) {
       icon: "Workflow",
       keywords: ["team", "graph", "pipeline", "agents", "subagents", "状态图"],
       context: "agent",
-      onSelect({ openPanel }) {
-        openPanel("team-agent-graph");
+      onSelect({ workspace, agent, openPanel }) {
+        focusWorkspaceGraphAgent(workspace.id, agent.id);
+        openPanel("team-graph");
       },
     }),
   );
@@ -154,7 +156,7 @@ export default function contribute(client: PluginClientContext) {
     client.addSlashCommand({
       name: "paseo-team",
       description:
-        "Start a team task in this chat, or open setup (setup) / the team graph (status)",
+        "Start a team task with this chat as coordinator, or open setup (setup) / the team graph (status)",
       argumentHint: '[setup | status | task goal (e.g. "with review")]',
       context: "agent",
       async onSubmit({ args, workspace, agent, rpc, openPanel, openScreen }) {
@@ -167,7 +169,8 @@ export default function contribute(client: PluginClientContext) {
           return;
         }
         if (!trimmed || trimmed === "status" || trimmed === "graph") {
-          openPanel("team-agent-graph");
+          focusWorkspaceGraphAgent(workspace.id, agent.id);
+          openPanel("team-graph");
           return;
         }
         await rpc(startTeamTaskRpc, {
@@ -176,7 +179,8 @@ export default function contribute(client: PluginClientContext) {
           agentId: agent.id,
           rawArgs: trimmed,
         });
-        openPanel("team-agent-graph");
+        focusWorkspaceGraphAgent(workspace.id, agent.id);
+        openPanel("team-graph");
       },
     }),
   );

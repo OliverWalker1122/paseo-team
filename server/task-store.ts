@@ -1089,17 +1089,26 @@ export function findTaskByAgentId(
   agentId: string,
   stateRoot = defaultStateRoot(),
 ): { recordPath: string; record: TaskRecord; matchedRole: AgentRole } | null {
-  for (const item of listAllRecentTasks(stateRoot, 100)) {
-    if (item.record.coordinatorAgentId === agentId) {
-      return { ...item, matchedRole: "coordinator" };
+  const recent = listAllRecentTasks(stateRoot, 100);
+  const matchIn = (items: typeof recent) => {
+    for (const item of items) {
+      if (item.record.coordinatorAgentId === agentId) {
+        return { ...item, matchedRole: "coordinator" as const };
+      }
+      const nodes = Array.isArray(item.record.nodes) ? item.record.nodes : [];
+      const node = nodes.find((n) => n?.agentId === agentId);
+      if (node) {
+        return { ...item, matchedRole: node.role };
+      }
     }
-    const nodes = Array.isArray(item.record.nodes) ? item.record.nodes : [];
-    const node = nodes.find((n) => n?.agentId === agentId);
-    if (node) {
-      return { ...item, matchedRole: node.role };
-    }
-  }
-  return null;
+    return null;
+  };
+  const openTasks = recent.filter(
+    (item) =>
+      item.record.lifecycleStatus !== "completed" &&
+      item.record.lifecycleStatus !== "abandoned",
+  );
+  return matchIn(openTasks) ?? matchIn(recent);
 }
 
 export function registerTaskAgent(

@@ -13,6 +13,7 @@ const TEST_FILES = [
   "tests/run-check.test.ts",
   "tests/handoff.test.ts",
   "tests/prompts.test.ts",
+  "tests/client-ui.test.ts",
   "tests/hooks.integration.test.ts",
 ];
 

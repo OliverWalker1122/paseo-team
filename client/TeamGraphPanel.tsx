@@ -1,7 +1,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import {
-  type PluginAgentPanelProps,
   type PluginScreenProps,
+  type PluginWorkspacePanelProps,
   useRpc,
   useSubscription,
   useWorkspace,
@@ -1681,14 +1681,49 @@ function LauncherTaskTree({
   );
 }
 
-export function AgentConversationGraphPanel({
+const focusedAgentByWorkspace = new Map<string, string>();
+const focusListeners = new Set<() => void>();
+
+/** Points a workspace's single Team Graph tab at the chat that opened it. */
+export function focusWorkspaceGraphAgent(
+  workspaceId: string,
+  agentId: string,
+): void {
+  const ws = workspaceId.trim();
+  const aid = agentId.trim();
+  if (!ws || !aid) return;
+  if (focusedAgentByWorkspace.get(ws) === aid) return;
+  focusedAgentByWorkspace.set(ws, aid);
+  for (const fn of focusListeners) {
+    fn();
+  }
+}
+
+function useFocusedWorkspaceGraphAgent(
+  workspaceId: string,
+): string | undefined {
+  const [agentId, setAgentId] = useState<string | undefined>(() =>
+    focusedAgentByWorkspace.get(workspaceId),
+  );
+  useEffect(() => {
+    setAgentId(focusedAgentByWorkspace.get(workspaceId));
+    const sync = () => setAgentId(focusedAgentByWorkspace.get(workspaceId));
+    focusListeners.add(sync);
+    return () => {
+      focusListeners.delete(sync);
+    };
+  }, [workspaceId]);
+  return agentId;
+}
+
+export function WorkspaceConversationGraphPanel({
   theme,
   layout,
   workspaceId,
-  params,
   navigation,
-}: PluginAgentPanelProps) {
+}: PluginWorkspacePanelProps) {
   const directory = useWorkspace(workspaceId, (ws) => ws?.directory ?? "");
+  const focusedAgentId = useFocusedWorkspaceGraphAgent(workspaceId);
   const [viewMode, setViewMode] = useState<"graph" | "config">("graph");
   const lang = useUiLanguage();
 
@@ -1750,7 +1785,7 @@ export function AgentConversationGraphPanel({
     <SingleConversationGraphView
       theme={theme}
       compact={layout.compact}
-      agentId={params.agentId}
+      agentId={focusedAgentId}
       workspaceId={workspaceId}
       cwd={directory || undefined}
       onOpenAgent={

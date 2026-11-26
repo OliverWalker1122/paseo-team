@@ -18,9 +18,11 @@ import {
 import { inspectQualityGate } from "../server/quality-gate.ts";
 import {
   checkTurnHandoff,
+  findTaskByAgentId,
   initTask,
   loadTask,
   listTasksByLauncher,
+  markTaskCompleted,
   nextReviewRound,
   readReviewRounds,
   recordCandidateDelivery,
@@ -156,7 +158,7 @@ test("lists only the tasks started from one launcher chat", (t) => {
   assert.equal(listTasksByLauncher("nobody", stateRoot).length, 0);
 });
 
-test("a launcher chat that also coordinated an old task shows both as subtrees", async (t) => {
+test("single coordinated task renders directly while multiple sequential tasks on one chat render as subtrees with active task prioritized", async (t) => {
   const baseDir = mkdtempSync(path.join(os.tmpdir(), "paseo-team-graph-"));
   const prevState = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = baseDir;
@@ -167,20 +169,103 @@ test("a launcher chat that also coordinated an old task shows both as subtrees",
   });
   const cwd = path.join(baseDir, "workspace");
   mkdirSync(cwd);
-  const base = { cwd, teamName: "Standard", preset };
-  initTask({ ...base, goal: "Old task", coordinatorAgentId: "chat-1" });
-  initTask({ ...base, goal: "New task", launcherAgentId: "chat-1" });
+  const stateRoot = path.join(baseDir, "paseo-team");
+  const base = { cwd, teamName: "Standard", preset, stateRoot };
 
-  const paseo = { agents: { list: async () => ({ entries: [] }) } };
-  const graph = await buildConversationGraph(
+  const first = initTask({
+    ...base,
+    goal: "First coordinated task",
+    coordinatorAgentId: "chat-1",
+  });
+  const paseo = {
+    agents: {
+      list: async () => ({
+        entries: [
+          {
+            agent: {
+              id: "chat-1",
+              workspaceId: "wks-1",
+              status: "idle",
+              provider: "claude",
+            },
+          },
+        ],
+      }),
+    },
+  };
+
+  // Single task coordinated by chat-1 renders directly in team_task mode (and resolves by workspaceId alone).
+  const singleGraph = await buildConversationGraph(
+    paseo as unknown as Parameters<typeof buildConversationGraph>[0],
+    { workspaceId: "wks-1" },
+  );
+  assert.equal(singleGraph.mode, "team_task");
+  assert.equal(singleGraph.task?.goal, "First coordinated task");
+
+  markTaskCompleted(first.recordPath);
+  const second = initTask({
+    ...base,
+    goal: "Second active coordinated task",
+    coordinatorAgentId: "chat-1",
+  });
+  // Touch completed task later to prove open tasks still win priority.
+  markTaskCompleted(first.recordPath);
+
+  assert.equal(
+    findTaskByAgentId("chat-1", stateRoot)?.record.taskId,
+    second.record.taskId,
+  );
+
+  const multiGraph = await buildConversationGraph(
     paseo as unknown as Parameters<typeof buildConversationGraph>[0],
     { agentId: "chat-1" },
   );
-  assert.equal(graph.mode, "launcher");
-  assert.deepEqual(graph.tasks?.map((x) => x.goal).sort(), [
-    "New task",
-    "Old task",
-  ]);
+  assert.equal(multiGraph.mode, "launcher");
+  assert.deepEqual(
+    multiGraph.tasks?.map((x) => x.goal),
+    ["Second active coordinated task", "First coordinated task"],
+  );
+
+  // Regression: if another chat in the same workspace has an older stale active task
+  // whose agent updatedAt happens to be newer, workspace-only lookup still picks the newest active task.
+  await new Promise((r) => setTimeout(r, 15));
+  initTask({
+    ...base,
+    goal: "Newest task on chat-2",
+    coordinatorAgentId: "chat-2",
+  });
+  const twoChatPaseo = {
+    agents: {
+      list: async () => ({
+        entries: [
+          {
+            agent: {
+              id: "chat-1",
+              workspaceId: "wks-1",
+              status: "closed",
+              provider: "claude",
+              updatedAt: "2099-01-01T00:00:00.000Z",
+            },
+          },
+          {
+            agent: {
+              id: "chat-2",
+              workspaceId: "wks-1",
+              status: "idle",
+              provider: "codex",
+              updatedAt: "2026-11-26T00:00:00.000Z",
+            },
+          },
+        ],
+      }),
+    },
+  };
+  const wsLatest = await buildConversationGraph(
+    twoChatPaseo as unknown as Parameters<typeof buildConversationGraph>[0],
+    { workspaceId: "wks-1" },
+  );
+  assert.equal(wsLatest.mode, "team_task");
+  assert.equal(wsLatest.task?.goal, "Newest task on chat-2");
 });
 
 test("coordinator may record for a member only after its reminder failed", (t) => {

@@ -5,6 +5,7 @@ import type {
 import { watchTasksSubscription } from "../shared/contracts.ts";
 import { UI_TEXT } from "../shared/i18n.ts";
 import { toUiLanguage } from "./locale.ts";
+import { focusWorkspaceGraphAgent } from "./TeamGraphPanel.tsx";
 
 interface TrackedAgent {
   id: string;
@@ -36,7 +37,7 @@ export function registerTeamComposerPills(
     return cur;
   };
 
-  const computeLabelForAgent = (agentId: string): string => {
+  const computeLabelForAgent = (agentId: string): string | null => {
     const t = UI_TEXT[currentLang()];
     const rootId = findRootId(agentId);
     const teamDirect =
@@ -71,7 +72,8 @@ export function registerTeamComposerPills(
     if (childCount > 0) {
       return t.pillSubagents(childCount);
     }
-    return t.pillDefault;
+    // Hide the pill on standalone chats with neither a team task nor subagents.
+    return null;
   };
 
   const syncAllPills = () => {
@@ -79,6 +81,13 @@ export function registerTeamComposerPills(
       if (info.background || !info.workspaceId) continue;
       const label = computeLabelForAgent(agentId);
       const existing = pills.get(agentId);
+      if (!label) {
+        if (existing) {
+          existing.remove();
+          pills.delete(agentId);
+        }
+        continue;
+      }
       if (existing) {
         existing.update({
           label,
@@ -98,9 +107,9 @@ export function registerTeamComposerPills(
               behavior: {
                 kind: "action",
                 onPress() {
-                  client.openPanel("team-agent-graph", {
+                  focusWorkspaceGraphAgent(info.workspaceId, agentId);
+                  client.openPanel("team-graph", {
                     workspaceId: info.workspaceId,
-                    agentId,
                   });
                 },
               },
@@ -123,7 +132,18 @@ export function registerTeamComposerPills(
     (event) => {
       const t = UI_TEXT[currentLang()];
       teamLabelByAgent.clear();
-      for (const task of event.tasks) {
+      const ordered = [...event.tasks].sort((a, b) => {
+        const aOpen =
+          a.lifecycleStatus !== "completed" && a.lifecycleStatus !== "abandoned"
+            ? 1
+            : 0;
+        const bOpen =
+          b.lifecycleStatus !== "completed" && b.lifecycleStatus !== "abandoned"
+            ? 1
+            : 0;
+        return bOpen - aOpen;
+      });
+      for (const task of ordered) {
         let badge = `Team · ${task.teamName}`;
         if (task.lifecycleStatus === "abandoned") {
           badge = t.pillDefault;
@@ -146,6 +166,12 @@ export function registerTeamComposerPills(
           !teamLabelByAgent.has(task.coordinatorAgentId)
         ) {
           teamLabelByAgent.set(task.coordinatorAgentId, badge);
+        }
+        if (
+          task.launcherAgentId &&
+          !teamLabelByAgent.has(task.launcherAgentId)
+        ) {
+          teamLabelByAgent.set(task.launcherAgentId, badge);
         }
         for (const st of task.stages) {
           for (const n of st.nodes) {

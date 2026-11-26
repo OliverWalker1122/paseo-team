@@ -181,35 +181,63 @@ async function resolveLauncherAgentId({
   cwd,
   provider,
   defaultModel,
+  catalogProviders,
   envOverride,
 }) {
   if (envOverride) return { agentId: envOverride, ephemeral: false };
-  try {
-    const existing = (await listWorkspaceAgents(client, cwd)).find(
-      (a) =>
-        a?.provider === provider &&
-        !a?.archivedAt &&
-        a?.status !== "running" &&
-        typeof a?.model === "string" &&
-        a.model.length > 0,
-    );
-    if (existing?.id) return { agentId: existing.id, ephemeral: false };
-  } catch {
-    // Fall back to creating a lightweight ephemeral launcher session.
-  }
 
+  const cat = Array.isArray(catalogProviders)
+    ? catalogProviders.find((p) => p?.provider === provider)
+    : null;
+  const models = Array.isArray(cat?.models) ? cat.models : [];
+  const modelEntry =
+    models.find((m) => m.id === defaultModel) ??
+    models.find((m) => m.isDefault) ??
+    models[0];
+  const resolvedModelId = modelEntry?.id ?? defaultModel;
+  const thinkingOptions = Array.isArray(modelEntry?.thinkingOptions)
+    ? modelEntry.thinkingOptions
+    : [];
+  const preferredThinking =
+    thinkingOptions.find((t) => t.id === "medium")?.id ??
+    modelEntry?.defaultThinkingId;
+
+  // Create a clean interactive chat in the target workspace, complete one real user turn
+  // so it has live session state + prior conversation history (matching a user's open chat),
+  // and archive it in `finally` so user history is never polluted.
   const created = await client.createAgent({
     workspaceId,
     config: {
-      provider: `${provider}/${defaultModel}`,
+      provider,
+      model: resolvedModelId,
+      cwd,
       modeId: provider === "codex" ? "auto-review" : "auto",
+      ...(preferredThinking ? { thinkingOptionId: preferredThinking } : {}),
     },
-    title: `[L3 E2E Launcher] ${provider}/${defaultModel}`,
-    background: true,
-    prompt: "Reply with OK only. Do not run tools or edit files.",
+    title: `[L3 E2E Coordinator] ${provider}/${resolvedModelId}`,
+    background: false,
   });
   const agentId = created?.id ?? created?.agent?.id;
-  assert.ok(agentId, `Failed to create ephemeral launcher for ${provider}`);
+  assert.ok(agentId, `Failed to create ephemeral coordinator for ${provider}`);
+  await client.sendAgentMessage(
+    agentId,
+    "Remember marker E2E_PRIOR_CHAT_OK and reply with OK only. Do not run tools or edit files.",
+  );
+  let sawTurnComplete = false;
+  const readyDeadline = Date.now() + 90_000;
+  while (Date.now() < readyDeadline) {
+    await new Promise((r) => setTimeout(r, 1_000));
+    const snap = await client.fetchAgent(agentId).catch(() => null);
+    const agent = snap?.agent ?? snap;
+    if (agent?.lastUserMessageAt && agent?.status === "idle") {
+      sawTurnComplete = true;
+      break;
+    }
+  }
+  assert.ok(
+    sawTurnComplete,
+    `Ephemeral chat ${agentId} did not finish its initial pre-team turn within 90s`,
+  );
   return { agentId, ephemeral: true };
 }
 
@@ -256,6 +284,7 @@ async function runLiveScenario({
       cwd,
       provider: launcherProvider,
       defaultModel: launcherModel,
+      catalogProviders: configBundle?.providers,
       envOverride: process.env[launcherEnvVar],
     });
     if (launcherInfo.ephemeral) {
@@ -270,6 +299,9 @@ async function runLiveScenario({
       `${reviewPhrase}, use preset ${resolvedPreset}.`,
     ].join("");
 
+    const preAgents = await listWorkspaceAgents(client, cwd);
+    const preAgentIds = new Set(preAgents.map((a) => a?.id).filter(Boolean));
+
     const started = await client.invokePluginRpc(
       "paseo-team",
       "paseo_team.tasks.start",
@@ -282,12 +314,70 @@ async function runLiveScenario({
     );
     assert.ok(started?.taskId, "tasks.start must return taskId");
     assert.ok(started?.recordPath, "tasks.start must return recordPath");
-    assert.ok(
+    assert.equal(
       started?.coordinatorAgentId,
-      "tasks.start must return coordinatorAgentId",
+      launcherInfo.agentId,
+      "tasks.start must reuse the open chat directly as coordinatorAgentId",
     );
     recordPath = started.recordPath;
-    ownedSessionIds.add(started.coordinatorAgentId);
+
+    // Verify no extra "[Team] ..." coordinator session was spawned alongside the open chat,
+    // and workspace-scoped conversation.get (used by the single Team Graph tab) resolves cleanly without cross-project bleed.
+    const postStartAgents = await listWorkspaceAgents(client, cwd);
+    const extraTeamCoords = postStartAgents.filter(
+      (a) =>
+        a?.id &&
+        !preAgentIds.has(a.id) &&
+        String(a.title ?? "").startsWith("[Team]"),
+    );
+    assert.deepEqual(
+      extraTeamCoords.map((a) => a.id),
+      [],
+      "must not spawn a separate [Team] coordinator chat",
+    );
+
+    if (launcherInfo.ephemeral) {
+      const promptHistory = await client.listAgentTimelinePrompts(
+        launcherInfo.agentId,
+      );
+      const promptTexts = JSON.stringify(promptHistory ?? {});
+      assert.match(
+        promptTexts,
+        /E2E_PRIOR_CHAT_OK/,
+        "reusing the open chat as coordinator must preserve prior conversation timeline",
+      );
+    }
+
+    const wsGraph = await client.invokePluginRpc(
+      "paseo-team",
+      "paseo_team.conversation.get",
+      {
+        workspaceId,
+        cwd,
+        language: "zh",
+      },
+    );
+    assert.ok(
+      wsGraph?.mode === "team_task" || wsGraph?.mode === "launcher",
+      `expected workspace graph mode team_task/launcher, got ${wsGraph?.mode}`,
+    );
+    const activeGraphTask =
+      wsGraph.mode === "team_task" ? wsGraph.task : wsGraph.tasks?.[0];
+    assert.equal(activeGraphTask?.taskId, started.taskId);
+    assert.equal(activeGraphTask?.projectRoot, realpathSync(cwd));
+
+    // Unrelated standalone chat ID must resolve to mode="empty" without leaking another project's task.
+    const emptyGraph = await client.invokePluginRpc(
+      "paseo-team",
+      "paseo_team.conversation.get",
+      {
+        agentId: "00000000-0000-0000-0000-000000000000",
+        workspaceId,
+        cwd,
+        language: "zh",
+      },
+    );
+    assert.equal(emptyGraph?.mode, "empty");
 
     const deadline = Date.now() + TIMEOUT_MS;
     const permissionFirstSeen = new Map();
@@ -432,7 +522,7 @@ const SCENARIOS = [
     title:
       "L3 Live E2E [smoke]: Codex Coordinator + smoke/default preset (no review)",
     launcherProvider: "codex",
-    launcherModel: "gpt-6-astra",
+    launcherModel: "gpt-6.2-astra",
     launcherEnvVar: "PASEO_E2E_CODEX_LAUNCHER",
     presetName: process.env.PASEO_E2E_SMOKE_PRESET || "",
     requireReview: false,
@@ -443,7 +533,7 @@ const SCENARIOS = [
     title:
       "L3 Live E2E [standard]: Codex Coordinator + default/standard preset (with code review)",
     launcherProvider: "codex",
-    launcherModel: "gpt-6-astra",
+    launcherModel: "gpt-6.2-astra",
     launcherEnvVar: "PASEO_E2E_CODEX_LAUNCHER",
     presetName: process.env.PASEO_E2E_STANDARD_PRESET || "",
     requireReview: true,
