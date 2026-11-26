@@ -895,6 +895,20 @@ test("permission hook auto-allows coordinator read-only checks and scoped child 
     isAutoAllowedTeamTool("coordinator", "paseo.create_agent"),
     true,
   );
+  assert.equal(isAutoAllowedTeamTool("coordinator", "paseo_team"), true);
+  assert.equal(
+    isAutoAllowedTeamTool("coordinator", "mcp_paseo_paseo_team"),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("coordinator", "mcp__paseo__paseo_team"),
+    true,
+  );
+  assert.equal(isAutoAllowedTeamTool(undefined, "mcp_paseo_paseo_team"), false);
+  assert.equal(
+    isAutoAllowedTeamTool("developer", "mcp_paseo_paseo_team"),
+    false,
+  );
   assert.equal(
     isAutoAllowedTeamTool("coordinator", "mcp_paseo_paseo_team_set_route"),
     true,

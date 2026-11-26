@@ -566,6 +566,8 @@ function createClientMock() {
   const rowBadges: Array<Record<string, unknown>> = [];
   const commandItems: Array<Record<string, unknown>> = [];
   const slashCommands: Array<Record<string, unknown>> = [];
+  const timelineTransformers: Array<Record<string, unknown>> = [];
+  const timelineRenderers: Array<Record<string, unknown>> = [];
   const openedPanels: Array<{
     panelId: string;
     workspaceId: string;
@@ -700,6 +702,20 @@ function createClientMock() {
         if (i >= 0) slashCommands.splice(i, 1);
       };
     },
+    addTimelineTransformer(c: Record<string, unknown>) {
+      timelineTransformers.push(c);
+      return () => {
+        const i = timelineTransformers.indexOf(c);
+        if (i >= 0) timelineTransformers.splice(i, 1);
+      };
+    },
+    addTimelineRenderer(c: Record<string, unknown>) {
+      timelineRenderers.push(c);
+      return () => {
+        const i = timelineRenderers.indexOf(c);
+        if (i >= 0) timelineRenderers.splice(i, 1);
+      };
+    },
     openPanel(
       panelId: string,
       options: { workspaceId: string; agentId?: string },
@@ -737,6 +753,8 @@ function createClientMock() {
     rowBadges,
     commandItems,
     slashCommands,
+    timelineTransformers,
+    timelineRenderers,
     openedPanels,
     openedScreens,
     pills,
@@ -1336,4 +1354,178 @@ test("UI components: WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, and
   assert.match(decidedText, /方案审查 #1/);
   assert.match(decidedText, /验收门禁/);
   assert.doesNotMatch(decidedText, /评估复杂度中/);
+});
+
+test("UI timeline renderer: collapses /paseo-team kickoff prompts into compact goal bubbles with expand toggle while leaving normal messages untouched", async () => {
+  uiSandbox.reset();
+  const { default: contribute } = await import("../index.client.tsx");
+  const { buildKickoffPrompt } = await import("../server/prompts.ts");
+
+  const mock = createClientMock();
+  const cleanup = contribute(mock.client as never);
+
+  assert.equal(mock.timelineTransformers.length, 1);
+  assert.equal(mock.timelineRenderers.length, 1);
+
+  const transformer = mock.timelineTransformers[0] as {
+    id: string;
+    query: { itemType: string };
+    transform: (input: {
+      item: { type: "user_message"; text: string };
+      phase: "streaming" | "complete";
+    }) =>
+      | {
+          items: Array<{
+            type: "plugin";
+            kind: string;
+            version: number;
+            data: Record<string, unknown>;
+          }>;
+        }
+      | undefined;
+  };
+  const renderer = mock.timelineRenderers[0] as {
+    kind: string;
+    version: number;
+    schema: { parse: (val: unknown) => Record<string, unknown> };
+    Component: (props: Record<string, unknown>) => unknown;
+  };
+
+  assert.equal(transformer.query.itemType, "user_message");
+  assert.equal(renderer.kind, "team-kickoff");
+  assert.equal(renderer.version, 1);
+
+  // 1. Ordinary user messages must pass through untouched.
+  assert.equal(
+    transformer.transform({
+      item: { type: "user_message", text: "帮我查一下 todo.mjs 的 bug" },
+      phase: "complete",
+    }),
+    undefined,
+  );
+  assert.equal(
+    transformer.transform({
+      item: { type: "user_message", text: "[Team 任务启动] malformed" },
+      phase: "complete",
+    }),
+    undefined,
+  );
+
+  // 2. Chinese kickoff message (including multiline goal) transforms & renders compactly by default.
+  const zhPrompt = buildKickoffPrompt({
+    taskId: "20261126-1243",
+    goal: "整体项目，清理，开始1243\n保留现有测试",
+    teamName: "标准",
+    complexMode: "simple",
+    taskDir: "/tmp/evidence/20261126-1243",
+    rosterLines: [
+      '- Developer: provider="antigravity/gemini-4-neon" settings={"modeId":"auto"} labels={"task":"20261126-1243","role":"developer"}',
+    ],
+    lang: "zh",
+  });
+  const zhTransformed = transformer.transform({
+    item: { type: "user_message", text: zhPrompt },
+    phase: "complete",
+  });
+  assert.ok(zhTransformed, "zh kickoff should be transformed");
+  assert.equal(zhTransformed.items.length, 1);
+  assert.equal(zhTransformed.items[0].kind, "team-kickoff");
+  const zhData = renderer.schema.parse(zhTransformed.items[0].data);
+  assert.equal(zhData.goal, "整体项目，清理，开始1243\n保留现有测试");
+  assert.equal(zhData.teamName, "标准");
+
+  uiSandbox.locale = "zh-CN";
+  const zhVnode = {
+    __vnode: true,
+    type: renderer.Component,
+    props: {
+      agentId: "coord-1",
+      theme: THEME,
+      host: "web",
+      layout: "desktop",
+      timestamp: new Date("2026-11-26T14:15:00.000Z"),
+      item: {
+        type: "plugin",
+        kind: "team-kickoff",
+        version: 1,
+        data: zhData,
+      },
+    },
+  };
+  uiSandbox.renderer.render(zhVnode);
+  const collapsedZh = collectText(uiSandbox.renderer.root);
+  assert.match(collapsedZh, /\/paseo-team/);
+  assert.match(collapsedZh, /标准/);
+  assert.match(collapsedZh, /整体项目，清理，开始1243/);
+  assert.match(collapsedZh, /展开参数/);
+  assert.doesNotMatch(collapsedZh, /成员派发参数/);
+  assert.doesNotMatch(collapsedZh, /antigravity\/gemini-4-neon/);
+
+  // Clicking "展开参数" reveals the raw kickoff prompt and flips label to "收起".
+  const toggleBtn = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Pressable" && collectText(n).includes("展开参数"),
+  )[0];
+  assert.ok(toggleBtn);
+  (toggleBtn.props.onPress as () => void)();
+  uiSandbox.renderer.rerender();
+  const expandedZh = collectText(uiSandbox.renderer.root);
+  assert.match(expandedZh, /收起/);
+  assert.match(expandedZh, /成员派发参数/);
+  assert.match(expandedZh, /antigravity\/gemini-4-neon/);
+
+  // Clicking "收起" collapses it again.
+  const hideBtn = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Pressable" && collectText(n).includes("收起"),
+  )[0];
+  (hideBtn.props.onPress as () => void)();
+  uiSandbox.renderer.rerender();
+  assert.doesNotMatch(collectText(uiSandbox.renderer.root), /成员派发参数/);
+
+  // 3. English kickoff message transforms & renders cleanly in English locale.
+  const enPrompt = buildKickoffPrompt({
+    taskId: "20261126-en",
+    goal: "Refactor store persistence layer",
+    teamName: "Standard",
+    complexMode: "expert",
+    rosterLines: ['- Developer: provider="codex/gpt-6.2-astra"'],
+    lang: "en",
+  });
+  const enTransformed = transformer.transform({
+    item: { type: "user_message", text: enPrompt },
+    phase: "complete",
+  });
+  assert.ok(enTransformed, "en kickoff should be transformed");
+  const enData = renderer.schema.parse(enTransformed.items[0].data);
+  assert.equal(enData.goal, "Refactor store persistence layer");
+
+  uiSandbox.locale = "en-US";
+  uiSandbox.renderer.render({
+    __vnode: true,
+    type: renderer.Component,
+    props: {
+      agentId: "coord-en",
+      theme: THEME,
+      host: "web",
+      layout: "desktop",
+      timestamp: new Date("2026-11-26T14:20:00.000Z"),
+      item: {
+        type: "plugin",
+        kind: "team-kickoff",
+        version: 1,
+        data: enData,
+      },
+    },
+  });
+  const collapsedEn = collectText(uiSandbox.renderer.root);
+  assert.match(collapsedEn, /\/paseo-team/);
+  assert.match(collapsedEn, /Standard/);
+  assert.match(collapsedEn, /Refactor store persistence layer/);
+  assert.match(collapsedEn, /Details/);
+  assert.doesNotMatch(collapsedEn, /Member Routing/);
+
+  cleanup();
+  assert.equal(mock.timelineTransformers.length, 0);
+  assert.equal(mock.timelineRenderers.length, 0);
 });

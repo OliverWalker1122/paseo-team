@@ -375,6 +375,8 @@ export const UI_TEXT = {
     pillDone: "Team · Done",
     badgeHalted: "Team halted",
     badgeRunning: (n: number) => `Team · ${n} running`,
+    kickoffDetails: "Details",
+    kickoffHide: "Hide",
   },
   zh: {
     // Navigation
@@ -541,5 +543,7 @@ export const UI_TEXT = {
     pillDone: "团队 · 已完成",
     badgeHalted: "团队已熔断",
     badgeRunning: (n: number) => `团队 · ${n} 运行中`,
+    kickoffDetails: "展开参数",
+    kickoffHide: "收起",
   },
 } as const;

@@ -441,7 +441,52 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
     undefined,
   );
 
-  // 1. Coordinator via metadata (also updates coordinatorAgentId).
+  // 0a. Normal non-team interactive top-level chat gets the single persistent `paseo_team`
+  // tool with ZERO appendSystemPrompt pollution (preserving prompt cache on future /paseo-team).
+  const normalChatOut = (await h.invokeHook("agent.open.before", {
+    request: {
+      ...baseReq,
+      agentId: "normal-chat-1",
+      provider: "codex",
+      title: "Casual question",
+    },
+  })) as {
+    appendSystemPrompt: string[];
+    tools: Array<{
+      name: string;
+      execute: (
+        args: Record<string, unknown>,
+        ctx: Record<string, unknown>,
+      ) => Promise<{ text: string; isError?: boolean }>;
+    }>;
+  };
+  assert.deepEqual(normalChatOut.appendSystemPrompt, ["EXISTING_SYS_PROMPT"]);
+  assert.deepEqual(
+    normalChatOut.tools.map((tool) => tool.name),
+    ["existing_tool", "paseo_team"],
+  );
+  const noTaskRes = await normalChatOut.tools[1].execute(
+    { action: "summary" },
+    { agent: { id: "normal-chat-1", metadata: {} } },
+  );
+  assert.equal(noTaskRes.isError, true);
+  assert.match(noTaskRes.text, /No active Paseo Team task/);
+
+  // 0b. Non-team subagent (with parent-agent-id not matching a team role) gets undefined.
+  assert.equal(
+    await h.invokeHook("agent.open.before", {
+      request: {
+        ...baseReq,
+        agentId: "unrelated-sub-1",
+        provider: "claude",
+        title: "Random helper",
+        labels: { "paseo.parent-agent-id": "normal-chat-1" },
+      },
+    }),
+    undefined,
+  );
+
+  // 1. Coordinator via metadata (also updates coordinatorAgentId, without mutating appendSystemPrompt).
   const coordOut = (await h.invokeHook("agent.open.before", {
     request: {
       ...baseReq,
@@ -457,19 +502,10 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
       },
     },
   })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.equal(coordOut.appendSystemPrompt[0], "EXISTING_SYS_PROMPT");
-  assert.match(coordOut.appendSystemPrompt[1], /主控协调协议/);
+  assert.deepEqual(coordOut.appendSystemPrompt, ["EXISTING_SYS_PROMPT"]);
   assert.deepEqual(
     coordOut.tools.map((tool) => tool.name),
-    [
-      "existing_tool",
-      "paseo_team_task_summary",
-      "paseo_team_set_route",
-      "paseo_team_submit_plan",
-      "paseo_team_record_delivery",
-      "paseo_team_record_review",
-      "paseo_team_complete",
-    ],
+    ["existing_tool", "paseo_team"],
   );
   assert.equal(loadTask(recordPath).coordinatorAgentId, "coord-open");
 
@@ -1036,37 +1072,6 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
     /currently running/,
   );
 
-  const hookEventsBeforeStart = h.hookEvents.length;
-  const started = (await h.invokeRpc(startTeamTaskRpc.name, {
-    cwd: h.workspaceDir,
-    workspaceId: "wks_l2",
-    agentId: "launcher-1",
-    rawArgs: "Update label in app.txt, with code review",
-  })) as { taskId: string; recordPath: string; coordinatorAgentId: string };
-
-  // Current chat becomes the coordinator directly without spawning a separate coordinator agent
-  // and without calling reload() (instead bumping sessionOpenGeneration via agent.open.before toggle).
-  assert.equal(h.createdAgents.length, 0);
-  assert.equal(started.coordinatorAgentId, "launcher-1");
-  assert.equal(h.metadataUpdates.length, 1);
-  assert.equal(h.metadataUpdates[0].agentId, "launcher-1");
-  assert.equal(h.reloadedAgents.length, 0);
-  assert.deepEqual(h.hookEvents.slice(hookEventsBeforeStart), [
-    { action: "remove", name: "agent.open.before" },
-    { action: "add", name: "agent.open.before" },
-  ]);
-  assert.equal(h.hooks.has("agent.open.before"), true);
-  assert.equal(h.sentMessages.length, 1);
-  assert.equal(h.sentMessages[0].agentId, "launcher-1");
-  assert.match(h.sentMessages[0].text, /\[Team Kickoff\]/);
-  assert.match(h.sentMessages[0].text, /paseo_team_set_route/);
-  assert.match(h.sentMessages[0].text, /Plan Reviewer #1/);
-  assert.match(h.sentMessages[0].text, /antigravity\/gemini-4-neon/);
-  // Task starts in pending-route state until coordinator declares complexity & route.
-  assert.equal(loadTask(started.recordPath).routeDecided, false);
-  h.sentMessages.length = 0;
-
-  // Open coordinator and grab its real injected tools.
   const openToolMap = async (req: Record<string, unknown>) => {
     const out = (await h.invokeHook("agent.open.before", {
       request: {
@@ -1086,7 +1091,10 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
     })) as {
       tools: Array<{
         name: string;
-        execute: (args: Record<string, unknown>) => Promise<{
+        execute: (
+          args: Record<string, unknown>,
+          context?: Record<string, unknown>,
+        ) => Promise<{
           text: string;
           isError?: boolean;
         }>;
@@ -1095,27 +1103,86 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
     return new Map(out.tools.map((tool) => [tool.name, tool]));
   };
 
+  // Simulate opening the user's normal chat BEFORE `/paseo-team` is ever invoked.
+  // Its persistent `paseo_team` tool is registered once at initial open and never reloaded!
   const coordTools = await openToolMap({
-    agentId: started.coordinatorAgentId,
-    provider: "antigravity",
-    title: "[Team] Update label",
-    metadata: {
-      "paseo-team.task": {
-        taskId: started.taskId,
-        recordPath: started.recordPath,
-        role: "coordinator",
-      },
+    agentId: "launcher-1",
+    provider: "codex",
+    title: "Existing user chat",
+  });
+  assert.ok(coordTools.has("paseo_team"));
+
+  const hookEventsBeforeStart = h.hookEvents.length;
+  const started = (await h.invokeRpc(startTeamTaskRpc.name, {
+    cwd: h.workspaceDir,
+    workspaceId: "wks_l2",
+    agentId: "launcher-1",
+    rawArgs: "Update label in app.txt, with code review",
+  })) as { taskId: string; recordPath: string; coordinatorAgentId: string };
+
+  // Current chat becomes the coordinator directly with ZERO reloads and ZERO hook invalidations,
+  // keeping prompt prefix caches 100% intact across all providers.
+  assert.equal(h.createdAgents.length, 0);
+  assert.equal(started.coordinatorAgentId, "launcher-1");
+  assert.equal(h.metadataUpdates.length, 1);
+  assert.equal(h.metadataUpdates[0].agentId, "launcher-1");
+  assert.equal(h.reloadedAgents.length, 0);
+  assert.deepEqual(h.hookEvents.slice(hookEventsBeforeStart), []);
+  assert.equal(h.hooks.has("agent.open.before"), true);
+  assert.equal(h.sentMessages.length, 1);
+  assert.equal(h.sentMessages[0].agentId, "launcher-1");
+  assert.match(h.sentMessages[0].text, /\[Team Kickoff\]/);
+  assert.match(h.sentMessages[0].text, /`paseo_team`/);
+  assert.match(h.sentMessages[0].text, /action: "set_route"/);
+  assert.match(h.sentMessages[0].text, /Plan Reviewer #1/);
+  assert.match(h.sentMessages[0].text, /antigravity\/gemini-4-neon/);
+  // Task starts in pending-route state until coordinator declares complexity & route.
+  assert.equal(loadTask(started.recordPath).routeDecided, false);
+  h.sentMessages.length = 0;
+
+  const coordCtx = () => ({
+    agent: {
+      id: "launcher-1",
+      metadata: h.agentDirectory.get("launcher-1")?.metadata ?? {},
     },
   });
+  const teamTool = coordTools.get("paseo_team")!;
 
-  // Coordinator assesses complexity & locks route via paseo_team_set_route before dispatching members.
-  const routeRes = await coordTools.get("paseo_team_set_route")!.execute({
-    isComplex: false,
-    planReview: false,
-    codeReview: true,
-    reason:
-      "Localized single-file label update with user-requested code review",
-  });
+  // Validation guards on missing fields return clean errors without mutating task state.
+  assert.equal(
+    (await teamTool.execute({ action: "set_route" }, coordCtx())).isError,
+    true,
+  );
+  assert.equal(
+    (await teamTool.execute({ action: "submit_plan" }, coordCtx())).isError,
+    true,
+  );
+  assert.equal(
+    (await teamTool.execute({ action: "record_delivery" }, coordCtx())).isError,
+    true,
+  );
+  assert.equal(
+    (await teamTool.execute({ action: "record_review" }, coordCtx())).isError,
+    true,
+  );
+
+  // Summary works immediately via dynamic context resolution without any reload.
+  const sumRes = await teamTool.execute({ action: "summary" }, coordCtx());
+  assert.notEqual(sumRes.isError, true);
+  assert.match(sumRes.text, new RegExp(started.taskId));
+
+  // Coordinator assesses complexity & locks route via paseo_team(set_route) before dispatching members.
+  const routeRes = await teamTool.execute(
+    {
+      action: "set_route",
+      isComplex: false,
+      planReview: false,
+      codeReview: true,
+      reason:
+        "Localized single-file label update with user-requested code review",
+    },
+    coordCtx(),
+  );
   assert.notEqual(routeRes.isError, true);
   assert.equal(loadTask(started.recordPath).routeDecided, true);
   assert.equal(loadTask(started.recordPath).planReview, "not-required");
@@ -1174,9 +1241,10 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
   });
   assert.notEqual(r1v1.isError, true);
 
-  const blockedComplete = await coordTools
-    .get("paseo_team_complete")!
-    .execute({});
+  const blockedComplete = await teamTool.execute(
+    { action: "complete" },
+    coordCtx(),
+  );
   assert.equal(blockedComplete.isError, true);
   assert.match(blockedComplete.text, /Quality gate BLOCKED/);
 
@@ -1208,10 +1276,37 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
   });
 
   // Final quality gate passes and marks task completed.
-  const done = await coordTools.get("paseo_team_complete")!.execute({});
+  const done = await teamTool.execute({ action: "complete" }, coordCtx());
   assert.equal(done.isError, false);
   assert.match(done.text, /Quality gate READY; task completed/);
   assert.equal(loadTask(started.recordPath).lifecycleStatus, "completed");
+
+  // Mutating an already-completed task is rejected cleanly until a new task starts.
+  const mutateCompleted = await teamTool.execute(
+    {
+      action: "set_route",
+      isComplex: false,
+      planReview: false,
+      codeReview: false,
+      reason: "late edit",
+    },
+    coordCtx(),
+  );
+  assert.equal(mutateCompleted.isError, true);
+  assert.match(mutateCompleted.text, /already completed/);
+
+  // Starting a 2nd task on the SAME chat automatically routes the same persistent `paseo_team`
+  // tool to task #2 with ZERO reload!
+  const started2 = (await h.invokeRpc(startTeamTaskRpc.name, {
+    cwd: h.workspaceDir,
+    workspaceId: "wks_l2",
+    agentId: "launcher-1",
+    rawArgs: "Second follow-up task, no review",
+  })) as { taskId: string; recordPath: string };
+  assert.notEqual(started2.taskId, started.taskId);
+  const sum2 = await teamTool.execute({ action: "summary" }, coordCtx());
+  assert.match(sum2.text, new RegExp(started2.taskId));
+  h.sentMessages.length = 0;
 
   // No spurious turn.after reminders after all members submitted cleanly.
   for (const memberId of ["dev-l2", "rev-l2-0", "rev-l2-1"]) {
@@ -1272,7 +1367,7 @@ test("regression: task started without plan review dynamically upgrades to planR
     request: {
       workspaceId: "wks_pm",
       cwd: h.workspaceDir,
-      reason: "refresh",
+      reason: "create",
       purpose: "interactive",
       background: false,
       agentId: "main-chat-7e7bc091",
@@ -1288,19 +1383,32 @@ test("regression: task started without plan review dynamically upgrades to planR
   })) as {
     tools: Array<{
       name: string;
-      execute: (args: Record<string, unknown>) => Promise<{
+      execute: (
+        args: Record<string, unknown>,
+        context?: Record<string, unknown>,
+      ) => Promise<{
         text: string;
         isError?: boolean;
       }>;
     }>;
   };
   const coordTools = new Map(openOut.tools.map((tool) => [tool.name, tool]));
+  const coordCtx = {
+    agent: {
+      id: "main-chat-7e7bc091",
+      metadata: h.agentDirectory.get("main-chat-7e7bc091")?.metadata ?? {},
+    },
+  };
   const taskDir = path.dirname(started.recordPath);
   writeFileSync(path.join(taskDir, "plan.md"), "# 方案 v1\n");
-  const planRes = await coordTools.get("paseo_team_submit_plan")!.execute({
-    planFile: "plan.md",
-    summary: "方案 v1",
-  });
+  const planRes = await coordTools.get("paseo_team")!.execute(
+    {
+      action: "submit_plan",
+      planFile: "plan.md",
+      summary: "方案 v1",
+    },
+    coordCtx,
+  );
   assert.notEqual(planRes.isError, true);
 
   await h.invokeHook("agent.create.after", {
@@ -1317,9 +1425,13 @@ test("regression: task started without plan review dynamically upgrades to planR
 
   const upgraded = loadTask(started.recordPath);
   assert.equal(upgraded.planReview, "required");
-  const blockedGate = await coordTools.get("paseo_team_complete")!.execute({
-    inspectOnly: true,
-  });
+  const blockedGate = await coordTools.get("paseo_team")!.execute(
+    {
+      action: "complete",
+      inspectOnly: true,
+    },
+    coordCtx,
+  );
   assert.equal(blockedGate.isError, true);
   assert.match(blockedGate.text, /plan-rev-1/);
 });

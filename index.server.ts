@@ -15,7 +15,7 @@ import { saveConfig } from "./server/config-store.ts";
 import {
   buildConfigBundle,
   buildConversationGraph,
-  createCoordinatorTools,
+  createCoordinatorTool,
   createDeveloperTools,
   createExpertTools,
   createReviewerTools,
@@ -26,7 +26,6 @@ import {
 } from "./server/handlers.ts";
 import {
   assignReviewerPerspective,
-  buildCoordinatorSystemPrompt,
   buildDeveloperPrompt,
   buildExpertPrompt,
   buildReviewerPrompt,
@@ -61,7 +60,7 @@ export function isAutoAllowedTeamTool(
       /(?:^|__|_|\/|:|\.)(?:create_agent|send_agent_prompt|list_providers|list_models|list_profiles|inspect_provider|get_agent_status|get_agent_activity|list_agents|list_hosts|list_workspaces|list_pending_permissions)$/.test(
         toolName,
       ) ||
-      /(?:^|__|_|\/|:|\.)paseo_team_(?:task_summary|set_route|submit_plan|record_review|record_delivery|complete)$/.test(
+      /(?:^|__|_|\/|:|\.)paseo_team(?:_(?:task_summary|set_route|submit_plan|record_review|record_delivery|complete))?$/.test(
         toolName,
       )
     );
@@ -288,10 +287,8 @@ export default function contribute(server: PluginServerContext) {
     },
   );
 
-  let invalidateSessionOpenHooks = () => {};
-
   server.handle(startTeamTaskRpc, async (input, { paseo }) => {
-    return startTeamTask(paseo, input, { invalidateSessionOpenHooks });
+    return startTeamTask(paseo, input);
   });
 
   server.handle(
@@ -488,7 +485,7 @@ export default function contribute(server: PluginServerContext) {
     }),
   );
 
-  const registerOpenBeforeHook = () =>
+  cleanups.push(
     server.addHook("agent.open.before", async ({ request }) => {
       try {
         if (request.purpose === "history" || request.background) {
@@ -584,117 +581,82 @@ export default function contribute(server: PluginServerContext) {
           }
         }
 
-        if (!recordPath || !role) {
-          return undefined;
-        }
+        const subagentRole =
+          role === "developer" ||
+          role === "expert" ||
+          role === "plan-reviewer" ||
+          role === "code-reviewer"
+            ? role
+            : null;
 
-        let record;
-        try {
-          record = loadTask(recordPath);
-        } catch {
-          return undefined;
-        }
-
-        if (
-          (role === "developer" ||
-            role === "expert" ||
-            role === "plan-reviewer" ||
-            role === "code-reviewer") &&
-          !record.nodes.some((n) => n.agentId === request.agentId)
-        ) {
+        if (recordPath && subagentRole) {
+          let record;
           try {
-            record = registerTaskAgent(recordPath, {
-              role,
-              agentId: request.agentId,
-              profile: "auto",
-              provider: request.provider,
-              briefSummary: stripRolePrefix(request.title) || `Running ${role}`,
-            });
-            notifyTaskChanges();
+            record = loadTask(recordPath);
           } catch {
-            // Non-fatal
+            return undefined;
           }
-        }
 
-        const taskDir = path.dirname(path.resolve(recordPath));
-        const promptLang = detectPromptLanguage(record.goal);
-
-        if (role === "coordinator") {
-          if (record.coordinatorAgentId !== request.agentId) {
-            record.coordinatorAgentId = request.agentId;
-            const coordNode = record.nodes.find(
-              (n) => n.nodeId === "coordinator",
-            );
-            if (coordNode) {
-              coordNode.agentId = request.agentId;
-              coordNode.provider = request.provider;
-            }
+          if (!record.nodes.some((n) => n.agentId === request.agentId)) {
             try {
-              saveTask(recordPath, record);
+              record = registerTaskAgent(recordPath, {
+                role: subagentRole,
+                agentId: request.agentId,
+                profile: "auto",
+                provider: request.provider,
+                briefSummary:
+                  stripRolePrefix(request.title) || `Running ${subagentRole}`,
+              });
               notifyTaskChanges();
             } catch {
               // Non-fatal
             }
           }
-          return {
-            ...request,
-            appendSystemPrompt: [
-              ...(request.appendSystemPrompt ?? []),
-              buildCoordinatorSystemPrompt({
-                taskId: record.taskId,
-                taskDir,
-                teamName: record.teamName,
-                complexMode: record.complexMode,
-                lang: promptLang,
-              }),
-            ],
-            tools: [
-              ...(request.tools ?? []),
-              ...createCoordinatorTools(recordPath),
-            ],
-          };
-        }
 
-        if (role === "developer") {
-          return {
-            ...request,
-            appendSystemPrompt: [
-              ...(request.appendSystemPrompt ?? []),
-              buildDeveloperPrompt({
-                taskId: record.taskId,
-                taskDir,
-                lang: promptLang,
-              }),
-            ],
-            tools: [
-              ...(request.tools ?? []),
-              ...createDeveloperTools(recordPath, request.agentId),
-            ],
-          };
-        }
+          const taskDir = path.dirname(path.resolve(recordPath));
+          const promptLang = detectPromptLanguage(record.goal);
 
-        if (role === "expert") {
-          return {
-            ...request,
-            appendSystemPrompt: [
-              ...(request.appendSystemPrompt ?? []),
-              buildExpertPrompt({
-                taskId: record.taskId,
-                taskDir,
-                lang: promptLang,
-              }),
-            ],
-            tools: [
-              ...(request.tools ?? []),
-              ...createExpertTools(recordPath, request.agentId),
-            ],
-          };
-        }
+          if (subagentRole === "developer") {
+            return {
+              ...request,
+              appendSystemPrompt: [
+                ...(request.appendSystemPrompt ?? []),
+                buildDeveloperPrompt({
+                  taskId: record.taskId,
+                  taskDir,
+                  lang: promptLang,
+                }),
+              ],
+              tools: [
+                ...(request.tools ?? []),
+                ...createDeveloperTools(recordPath, request.agentId),
+              ],
+            };
+          }
 
-        if (role === "plan-reviewer" || role === "code-reviewer") {
+          if (subagentRole === "expert") {
+            return {
+              ...request,
+              appendSystemPrompt: [
+                ...(request.appendSystemPrompt ?? []),
+                buildExpertPrompt({
+                  taskId: record.taskId,
+                  taskDir,
+                  lang: promptLang,
+                }),
+              ],
+              tools: [
+                ...(request.tools ?? []),
+                ...createExpertTools(recordPath, request.agentId),
+              ],
+            };
+          }
+
           const nodes = Array.isArray(record.nodes) ? record.nodes : [];
           const node = nodes.find((n) => n?.agentId === request.agentId);
-          const sameRoleCount = nodes.filter((n) => n?.role === role).length;
+          const sameRoleCount = nodes.filter(
+            (n) => n?.role === subagentRole,
+          ).length;
           const perspective =
             node?.perspective ??
             assignReviewerPerspective(node?.slotIndex ?? 0, sameRoleCount || 1);
@@ -705,7 +667,7 @@ export default function contribute(server: PluginServerContext) {
               buildReviewerPrompt({
                 taskId: record.taskId,
                 perspective,
-                stage: role === "plan-reviewer" ? "plan" : "code",
+                stage: subagentRole === "plan-reviewer" ? "plan" : "code",
                 lang: promptLang,
               }),
             ],
@@ -714,25 +676,52 @@ export default function contribute(server: PluginServerContext) {
               ...createReviewerTools(
                 recordPath,
                 request.agentId,
-                role === "plan-reviewer" ? "plan" : "code",
+                subagentRole === "plan-reviewer" ? "plan" : "code",
               ),
             ],
           };
         }
 
-        return undefined;
+        if (role === "coordinator" && recordPath) {
+          try {
+            const record = loadTask(recordPath);
+            if (record.coordinatorAgentId !== request.agentId) {
+              record.coordinatorAgentId = request.agentId;
+              const coordNode = record.nodes.find(
+                (n) => n.nodeId === "coordinator",
+              );
+              if (coordNode) {
+                coordNode.agentId = request.agentId;
+                coordNode.provider = request.provider;
+              }
+              saveTask(recordPath, record);
+              notifyTaskChanges();
+            }
+          } catch {
+            // Non-fatal
+          }
+        } else if (parentAgentId) {
+          // Non-team subagents should not receive the coordinator tool.
+          return undefined;
+        }
+
+        // Attach the single compact `paseo_team` coordinator tool persistently on
+        // interactive top-level chats without modifying `appendSystemPrompt`.
+        // Starting `/paseo-team` later then needs zero reload and keeps prompt cache intact.
+        const existingTools = request.tools ?? [];
+        if (existingTools.some((t) => t.name === "paseo_team")) {
+          return undefined;
+        }
+        return {
+          ...request,
+          tools: [...existingTools, createCoordinatorTool()],
+        };
       } catch (err) {
         console.error("[paseo-team] agent.open.before error:", err);
         return undefined;
       }
-    });
-
-  let disposeOpenBefore = registerOpenBeforeHook();
-  invalidateSessionOpenHooks = () => {
-    disposeOpenBefore();
-    disposeOpenBefore = registerOpenBeforeHook();
-  };
-  cleanups.push(() => disposeOpenBefore());
+    }),
+  );
 
   cleanups.push(
     server.addHook(

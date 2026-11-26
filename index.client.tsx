@@ -7,6 +7,12 @@ import {
 import { SidebarRow, WorkspaceRowBadge } from "@getpaseo/plugin/client/ui";
 import { useMemo, useState } from "react";
 import { registerTeamComposerPills } from "./client/composer-pill.tsx";
+import {
+  KICKOFF_TIMELINE_KIND,
+  kickoffTimelineDataSchema,
+  parseKickoffMessage,
+  TeamKickoffBubble,
+} from "./client/KickoffTimelineItem.tsx";
 import { SettingsTeamConfigSurface } from "./client/TeamConfigScreen.tsx";
 import {
   focusWorkspaceGraphAgent,
@@ -124,6 +130,40 @@ export default function contribute(client: PluginClientContext) {
   );
 
   cleanups.push(registerTeamComposerPills(client));
+
+  if (
+    typeof client.addTimelineTransformer === "function" &&
+    typeof client.addTimelineRenderer === "function"
+  ) {
+    cleanups.push(
+      client.addTimelineTransformer({
+        id: "team-kickoff-compact",
+        query: { itemType: "user_message" },
+        transform({ item }) {
+          const parsed = parseKickoffMessage(item.text);
+          if (!parsed) return undefined;
+          return {
+            items: [
+              {
+                type: "plugin",
+                kind: KICKOFF_TIMELINE_KIND,
+                version: 1,
+                data: parsed,
+              },
+            ],
+          };
+        },
+      }),
+    );
+    cleanups.push(
+      client.addTimelineRenderer({
+        kind: KICKOFF_TIMELINE_KIND,
+        version: 1,
+        schema: kickoffTimelineDataSchema,
+        Component: TeamKickoffBubble,
+      }),
+    );
+  }
 
   cleanups.push(
     client.addCommandCenterItem({

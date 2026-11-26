@@ -34,7 +34,7 @@ process.env.SKIP_DOTENV = "true";
 process.env.DOTENV_CONFIG_PATH = "/dev/null";
 
 function extractPluginToolMentions(text: string): string[] {
-  const matches = text.match(/`paseo_team_[a-z_]+`/g) ?? [];
+  const matches = text.match(/`paseo_team(?:_[a-z_]+)?`/g) ?? [];
   return [...new Set(matches.map((m) => m.slice(1, -1)))].sort();
 }
 
@@ -128,13 +128,15 @@ test("coordinator system prompt covers both languages, both complex modes, and o
       // Every plugin tool mentioned in coordinator prompt must actually exist.
       const mentioned = extractPluginToolMentions(prompt);
       assert.ok(
-        mentioned.includes("paseo_team_complete"),
-        "coordinator prompt must mention paseo_team_complete",
+        mentioned.includes("paseo_team"),
+        "coordinator prompt must mention paseo_team",
       );
-      assert.ok(
-        mentioned.includes("paseo_team_set_route"),
-        "coordinator prompt must mention paseo_team_set_route",
-      );
+      assert.match(prompt, /action:\s*"set_route"/);
+      assert.match(prompt, /action:\s*"submit_plan"/);
+      assert.match(prompt, /action:\s*"record_delivery"/);
+      assert.match(prompt, /action:\s*"record_review"/);
+      assert.match(prompt, /action:\s*"complete"/);
+      assert.match(prompt, /action:\s*"summary"/);
       assert.ok(
         mentioned.includes("paseo_team_submit_delivery"),
         "coordinator prompt must mention paseo_team_submit_delivery",
@@ -142,14 +144,6 @@ test("coordinator system prompt covers both languages, both complex modes, and o
       assert.ok(
         mentioned.includes("paseo_team_submit_review"),
         "coordinator prompt must mention paseo_team_submit_review",
-      );
-      assert.ok(
-        mentioned.includes("paseo_team_record_delivery"),
-        "coordinator prompt must mention paseo_team_record_delivery",
-      );
-      assert.ok(
-        mentioned.includes("paseo_team_record_review"),
-        "coordinator prompt must mention paseo_team_record_review",
       );
       for (const toolName of mentioned) {
         assert.ok(
@@ -312,13 +306,19 @@ test("kickoff prompt, recovery brief, and turn handoff reminders stay structured
     goal: "更新按钮文案",
     teamName: "标准",
     complexMode: "simple",
+    taskDir: "/tmp/evidence/t-kick-zh",
     rosterLines: ['- Developer: provider="antigravity/gemini-4-neon"'],
     userConstraints: ["- 用户已明确要求方案评审"],
     lang: "zh",
   });
   assert.match(zhKickoff, /\[Team 任务启动\]/);
   assert.match(zhKickoff, /create_agent/);
-  assert.match(zhKickoff, /paseo_team_set_route/);
+  assert.match(zhKickoff, /`paseo_team`/);
+  assert.match(zhKickoff, /action: "set_route"/);
+  assert.match(zhKickoff, /action: "complete"/);
+  assert.match(zhKickoff, /CIRCUIT_BROKEN/);
+  assert.match(zhKickoff, /\/tmp\/evidence\/t-kick-zh/);
+  assert.ok(zhKickoff.includes(SAFETY_RULES_ZH));
   assert.match(zhKickoff, /用户已明确要求方案评审/);
   assert.match(zhKickoff, /antigravity\/gemini-4-neon/);
 
@@ -327,13 +327,19 @@ test("kickoff prompt, recovery brief, and turn handoff reminders stay structured
     goal: "Update button label",
     teamName: "Standard",
     complexMode: "expert",
+    taskDir: "/tmp/evidence/t-kick-en",
     rosterLines: ['- Expert: provider="claude/claude-opus-5-5"'],
     userConstraints: ["- User explicitly requested plan review"],
     lang: "en",
   });
   assert.match(enKickoff, /\[Team Kickoff\]/);
   assert.match(enKickoff, /mode: `expert`/);
-  assert.match(enKickoff, /paseo_team_set_route/);
+  assert.match(enKickoff, /`paseo_team`/);
+  assert.match(enKickoff, /action: "set_route"/);
+  assert.match(enKickoff, /action: "complete"/);
+  assert.match(enKickoff, /CIRCUIT_BROKEN/);
+  assert.match(enKickoff, /\/tmp\/evidence\/t-kick-en/);
+  assert.ok(enKickoff.includes(SAFETY_RULES_EN));
   assert.match(enKickoff, /User explicitly requested plan review/);
   assert.match(enKickoff, /claude\/claude-opus-5-5/);
 

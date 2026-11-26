@@ -46,6 +46,7 @@ import {
 import { runCheck } from "./run-check.ts";
 import {
   buildRecoveryBrief,
+  findTaskByAgentId,
   handoffOwed,
   initTask,
   listAllRecentTasks,
@@ -1617,7 +1618,7 @@ export function parseInlineTaskDirectives(rawArgs: string): {
   }
 
   // Only explicit expert-mode directives pre-mark isComplex; otherwise the coordinator
-  // assesses real complexity from full conversation & codebase context via paseo_team_set_route.
+  // assesses real complexity from full conversation & codebase context via paseo_team(set_route).
   const isComplex = hasModeOverride && complexModeOverride === "expert";
 
   text = text.replace(/^start\s+/i, "").trim();
@@ -1718,9 +1719,6 @@ export async function startTeamTask(
     isComplex?: boolean;
     requireReview?: boolean;
     language?: UiLanguage;
-  },
-  options?: {
-    invalidateSessionOpenHooks?: () => void | Promise<void>;
   },
 ): Promise<{
   taskId: string;
@@ -1930,14 +1928,15 @@ export async function startTeamTask(
     );
   }
 
-  // Use the current chat directly as coordinator: update its task metadata,
-  // bump sessionOpenGeneration so send() refreshes plugin hooks without wiping
-  // timeline history, then send kickoff.
+  // Use the current chat directly as coordinator with zero session reload:
+  // `paseo_team` is already persistently attached at initial open, so updating
+  // metadata and sending the kickoff message preserves the entire prompt cache.
   const kickoffPrompt = buildKickoffPrompt({
     taskId: created.record.taskId,
     goal: parsed.goal,
     teamName: eff.teamName,
     complexMode: eff.preset.complexMode,
+    taskDir: path.dirname(path.resolve(created.recordPath)),
     rosterLines,
     ...(userConstraints.length > 0 ? { userConstraints } : {}),
     lang: promptLang,
@@ -1952,18 +1951,6 @@ export async function startTeamTask(
           role: "coordinator",
         },
       });
-    }
-    // Do NOT call coordHandle.reload(): Paseo's refresh_agent_request wipes timeline
-    // (`rehydrateFromDisk: true`) and invokes `hydrateTimelineFromProvider`, which
-    // fails on Codex (`thread/items/list is not supported yet`). Instead, bump
-    // Paseo's `sessionOpenGeneration` via `invalidateSessionOpenHooks` so
-    // `coordHandle.send()` runs `reloadStalePluginSession` (`rehydrateFromDisk: false`),
-    // preserving conversation history while injecting coordinator prompts & tools.
-    if (
-      currentAgent?.status === "idle" &&
-      typeof options?.invalidateSessionOpenHooks === "function"
-    ) {
-      await options.invalidateSessionOpenHooks();
     }
     await coordHandle.send(kickoffPrompt);
   } catch (err) {
@@ -1984,148 +1971,258 @@ export async function startTeamTask(
   };
 }
 
-export function createCoordinatorTools(
-  recordPath: string,
-): AgentToolDefinition[] {
-  const summaryTool = defineAgentTool({
-    name: "paseo_team_task_summary",
-    title: "Get Task Recovery Summary",
-    description:
-      "Read the deterministic Paseo Team recovery brief, registered subagent IDs, review rounds, and pending quality checks.",
-    input: z.object({}),
-    async execute() {
-      const record = loadTask(recordPath);
-      return {
-        text: buildRecoveryBrief(record),
-        structuredContent: {
-          taskId: record.taskId,
-          recordPath,
-          lifecycleStatus: record.lifecycleStatus,
-          planReviewRound: record.planReviewRound,
-          codeReviewRound: record.codeReviewRound,
-          circuitBroken: record.circuitBroken,
-        },
-      };
-    },
-  });
+const verdictSchema = z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]);
+const findingsSchema = z
+  .array(z.string().min(1))
+  .max(30)
+  .optional()
+  .describe('One issue per item, prefixed "blocking:" or "advice:".');
 
-  const setRouteTool = defineAgentTool({
-    name: "paseo_team_set_route",
-    title: "Set Task Complexity & Review Route",
-    description:
-      "Declare your complexity assessment and execution route (whether plan review, expert drafting, and code review are needed) before dispatching subagents. Expands the workflow graph and locks required quality gates.",
-    input: z.object({
-      isComplex: z
-        .boolean()
-        .describe(
-          "True for architectural, cross-module, concurrency/state/data-migration, or unclear root-cause tasks.",
-        ),
-      planReview: z
-        .boolean()
-        .describe(
-          "True when a written plan/design should be independently cross-reviewed before coding.",
-        ),
-      codeReview: z
-        .boolean()
-        .describe(
-          "True when implementation should undergo independent code review before completion.",
-        ),
-      useExpert: z
-        .boolean()
-        .optional()
-        .describe(
-          "Optional: true to dispatch the configured Expert role to draft the plan.",
-        ),
-      reason: z
-        .string()
-        .min(1)
-        .describe(
-          "Concise one-line rationale for your complexity and review route decision.",
-        ),
-    }),
-    async execute(args) {
-      const { record, preserved } = setTaskRoute(recordPath, args);
-      notifyTaskChanges();
-      const preservedNote =
-        preserved.length > 0
-          ? ` (preserved user-required: ${preserved.join(", ")})`
-          : "";
-      return {
-        text: `Route locked: isComplex=${record.isComplex}, planReview=${record.planReview}, codeReview=${record.codeReview}, complexMode=${record.complexMode}.${preservedNote}`,
-        structuredContent: {
-          isComplex: record.isComplex,
-          routeDecided: record.routeDecided,
-          routeReason: record.routeReason,
-          planReview: record.planReview,
-          codeReview: record.codeReview,
-          complexMode: record.complexMode,
-          preserved,
-        },
-      };
-    },
-  });
+const coordinatorToolInputSchema = z.object({
+  action: z.enum([
+    "set_route",
+    "submit_plan",
+    "record_delivery",
+    "record_review",
+    "complete",
+    "summary",
+  ]),
+  isComplex: z.boolean().optional(),
+  planReview: z.boolean().optional(),
+  codeReview: z.boolean().optional(),
+  useExpert: z.boolean().optional(),
+  reason: z.string().min(1).optional(),
+  planFile: z.string().min(1).optional(),
+  summary: z.string().min(1).optional(),
+  agentId: z.string().min(1).optional(),
+  architectureImpact: z.string().min(1).optional(),
+  ciLog: z.string().optional(),
+  ciWaivedUserQuote: z.string().optional(),
+  requireCodeReview: z.boolean().optional(),
+  codeReviewReason: z.string().optional(),
+  stage: z.enum(["plan", "code"]).optional(),
+  verdict: verdictSchema.optional(),
+  findings: findingsSchema,
+  round: z.number().int().min(1).optional(),
+  profile: z.string().optional(),
+  targetVersionOrCommit: z.string().optional(),
+  userAuthorizedExtraRound: z.string().optional(),
+  inspectOnly: z.boolean().optional(),
+});
 
-  const recordDeliveryTool = defineAgentTool({
-    name: "paseo_team_record_delivery",
-    title: "Record Developer Delivery",
-    description:
-      "Fallback: record a delivery on the Developer's behalf (or a user-quoted CI waiver) when it did not call paseo_team_submit_delivery itself.",
-    input: z.object({
-      agentId: z.string().min(1).optional(),
-      summary: z.string().min(1),
-      ciLog: z.string().optional(),
-      ciWaivedUserQuote: z.string().optional(),
-      architectureImpact: z.string().min(1),
-      requireCodeReview: z.boolean().optional(),
-      codeReviewReason: z.string().optional(),
-    }),
-    async execute(args) {
-      const owned = memberOwnsHandoff(recordPath, args.agentId, "developer");
-      if (owned) return { text: owned, isError: true };
-      return deliveryResult(recordCandidateDelivery(recordPath, args));
-    },
-  });
+function resolveCoordinatorRecordPath(
+  fixedRecordPath: string | undefined,
+  context:
+    { agent?: { id?: string; metadata?: Record<string, unknown> } } | undefined,
+): string | null {
+  if (fixedRecordPath) return fixedRecordPath;
+  const meta = context?.agent?.metadata?.["paseo-team.task"];
+  const metaObj =
+    meta && typeof meta === "object" && !Array.isArray(meta)
+      ? (meta as Record<string, unknown>)
+      : null;
+  const metaRecordPath =
+    metaObj?.role === "coordinator" &&
+    typeof metaObj.recordPath === "string" &&
+    existsSync(metaObj.recordPath)
+      ? metaObj.recordPath
+      : null;
+  const agentId = context?.agent?.id;
+  if (agentId) {
+    const matched = findTaskByAgentId(agentId);
+    if (matched?.matchedRole === "coordinator") {
+      if (metaRecordPath && metaRecordPath !== matched.recordPath) {
+        try {
+          const metaRec = loadTask(metaRecordPath);
+          if (
+            metaRec.lifecycleStatus !== "completed" &&
+            metaRec.lifecycleStatus !== "abandoned"
+          ) {
+            return metaRecordPath;
+          }
+        } catch {
+          // Fall back to disk lookup result.
+        }
+      }
+      return matched.recordPath;
+    }
+  }
+  return metaRecordPath;
+}
 
-  const recordReviewTool = defineAgentTool({
-    name: "paseo_team_record_review",
-    title: "Record Review Verdict & Circuit Breaker Check",
+export function createCoordinatorTool(
+  fixedRecordPath?: string,
+): AgentToolDefinition {
+  return defineAgentTool({
+    name: "paseo_team",
+    title: "Paseo Team Coordinator",
     description:
-      "Fallback: record a reviewer's verdict on its behalf when it did not call paseo_team_submit_review. The round is derived automatically; past the limit (default 2) the task is flagged for a user decision.",
-    input: z.object({
-      stage: z.enum(["plan", "code"]),
-      agentId: z.string().min(1),
-      profile: z.string().optional(),
-      targetVersionOrCommit: z
-        .string()
-        .optional()
-        .describe(
-          "Plan version tag (for plan stage only; ignored for code stage).",
-        ),
-      round: z.number().int().min(1).optional(),
-      verdict: verdictSchema,
-      summary: z.string().min(1),
-      findings: findingsSchema,
-      userAuthorizedExtraRound: z.string().optional(),
-    }),
-    async execute(args) {
-      const owned = memberOwnsHandoff(recordPath, args.agentId);
-      if (owned) return { text: owned, isError: true };
-      return submitReview(recordPath, {
-        ...args,
-        source: "coordinator",
-      });
-    },
-  });
+      "Paseo Team workflow tool (use only during an active /paseo-team task). Actions: set_route, submit_plan, record_delivery, record_review, complete, summary.",
+    input: coordinatorToolInputSchema,
+    async execute(args, context) {
+      const recordPath = resolveCoordinatorRecordPath(fixedRecordPath, context);
+      if (!recordPath) {
+        return {
+          text: "No active Paseo Team task on this chat. Only use paseo_team during an active /paseo-team task.",
+          isError: true,
+        };
+      }
 
-  const completeTool = defineAgentTool({
-    name: "paseo_team_complete",
-    title: "Verify Quality Gate & Complete Task",
-    description:
-      "Verify the latest CI run passed and required reviews approved in their latest round, then mark the task completed.",
-    input: z.object({
-      inspectOnly: z.boolean().optional(),
-    }),
-    async execute(args) {
+      if (args.action === "summary") {
+        const record = loadTask(recordPath);
+        return {
+          text: buildRecoveryBrief(record),
+          structuredContent: {
+            taskId: record.taskId,
+            recordPath,
+            lifecycleStatus: record.lifecycleStatus,
+            planReviewRound: record.planReviewRound,
+            codeReviewRound: record.codeReviewRound,
+            circuitBroken: record.circuitBroken,
+          },
+        };
+      }
+
+      const current = loadTask(recordPath);
+      if (
+        args.action !== "complete" &&
+        (current.lifecycleStatus === "completed" ||
+          current.lifecycleStatus === "abandoned")
+      ) {
+        return {
+          text: `Task ${current.taskId} is already ${current.lifecycleStatus}. Start a new task with /paseo-team first.`,
+          isError: true,
+        };
+      }
+
+      if (args.action === "set_route") {
+        if (
+          typeof args.isComplex !== "boolean" ||
+          typeof args.planReview !== "boolean" ||
+          typeof args.codeReview !== "boolean" ||
+          !args.reason?.trim()
+        ) {
+          return {
+            text: 'action="set_route" requires boolean isComplex, planReview, codeReview, and non-empty reason.',
+            isError: true,
+          };
+        }
+        const { record, preserved } = setTaskRoute(recordPath, {
+          isComplex: args.isComplex,
+          planReview: args.planReview,
+          codeReview: args.codeReview,
+          ...(args.useExpert !== undefined
+            ? { useExpert: args.useExpert }
+            : {}),
+          reason: args.reason,
+        });
+        notifyTaskChanges();
+        const preservedNote =
+          preserved.length > 0
+            ? ` (preserved user-required: ${preserved.join(", ")})`
+            : "";
+        return {
+          text: `Route locked: isComplex=${record.isComplex}, planReview=${record.planReview}, codeReview=${record.codeReview}, complexMode=${record.complexMode}.${preservedNote}`,
+          structuredContent: {
+            isComplex: record.isComplex,
+            routeDecided: record.routeDecided,
+            routeReason: record.routeReason,
+            planReview: record.planReview,
+            codeReview: record.codeReview,
+            complexMode: record.complexMode,
+            preserved,
+          },
+        };
+      }
+
+      if (args.action === "submit_plan") {
+        if (!args.planFile?.trim() || !args.summary?.trim()) {
+          return {
+            text: 'action="submit_plan" requires non-empty planFile and summary.',
+            isError: true,
+          };
+        }
+        try {
+          const updated = recordPlanSubmission(recordPath, {
+            planFile: args.planFile,
+            summary: args.summary,
+          });
+          notifyTaskChanges();
+          return { text: `Recorded plan ${updated.planVersion}.` };
+        } catch (err) {
+          return {
+            text: err instanceof Error ? err.message : String(err),
+            isError: true,
+          };
+        }
+      }
+
+      if (args.action === "record_delivery") {
+        if (!args.summary?.trim() || !args.architectureImpact?.trim()) {
+          return {
+            text: 'action="record_delivery" requires non-empty summary and architectureImpact.',
+            isError: true,
+          };
+        }
+        const owned = memberOwnsHandoff(recordPath, args.agentId, "developer");
+        if (owned) return { text: owned, isError: true };
+        return deliveryResult(
+          recordCandidateDelivery(recordPath, {
+            ...(args.agentId ? { agentId: args.agentId } : {}),
+            summary: args.summary,
+            architectureImpact: args.architectureImpact,
+            ...(args.ciLog !== undefined ? { ciLog: args.ciLog } : {}),
+            ...(args.ciWaivedUserQuote !== undefined
+              ? { ciWaivedUserQuote: args.ciWaivedUserQuote }
+              : {}),
+            ...(args.requireCodeReview !== undefined
+              ? { requireCodeReview: args.requireCodeReview }
+              : {}),
+            ...(args.codeReviewReason !== undefined
+              ? { codeReviewReason: args.codeReviewReason }
+              : {}),
+          }),
+        );
+      }
+
+      if (args.action === "record_review") {
+        if (
+          !args.stage ||
+          !args.agentId?.trim() ||
+          !args.verdict ||
+          !args.summary?.trim()
+        ) {
+          return {
+            text: 'action="record_review" requires stage, agentId, verdict, and non-empty summary.',
+            isError: true,
+          };
+        }
+        const owned = memberOwnsHandoff(recordPath, args.agentId);
+        if (owned) return { text: owned, isError: true };
+        return submitReview(recordPath, {
+          stage: args.stage,
+          agentId: args.agentId,
+          verdict: args.verdict,
+          summary: args.summary,
+          ...(args.findings ? { findings: args.findings } : {}),
+          ...(args.round !== undefined ? { round: args.round } : {}),
+          ...(args.profile !== undefined ? { profile: args.profile } : {}),
+          ...(args.targetVersionOrCommit !== undefined
+            ? { targetVersionOrCommit: args.targetVersionOrCommit }
+            : {}),
+          ...(args.userAuthorizedExtraRound !== undefined
+            ? { userAuthorizedExtraRound: args.userAuthorizedExtraRound }
+            : {}),
+          source: "coordinator",
+        });
+      }
+
+      if (current.lifecycleStatus === "abandoned") {
+        return {
+          text: `Task ${current.taskId} was abandoned.`,
+          isError: true,
+        };
+      }
       const rep = inspectQualityGate({ recordPath });
       if (rep.status === "READY" && !args.inspectOnly) {
         markTaskCompleted(recordPath);
@@ -2143,23 +2240,13 @@ export function createCoordinatorTools(
       };
     },
   });
-
-  return [
-    summaryTool,
-    setRouteTool,
-    createSubmitPlanTool(recordPath),
-    recordDeliveryTool,
-    recordReviewTool,
-    completeTool,
-  ];
 }
 
-const verdictSchema = z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]);
-const findingsSchema = z
-  .array(z.string().min(1))
-  .max(30)
-  .optional()
-  .describe('One issue per item, prefixed "blocking:" or "advice:".');
+export function createCoordinatorTools(
+  recordPath?: string,
+): AgentToolDefinition[] {
+  return [createCoordinatorTool(recordPath)];
+}
 
 /** Handoff format check for a review: finding prefixes must match the verdict. */
 export function reviewInputProblem(

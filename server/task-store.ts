@@ -1325,7 +1325,7 @@ export function registerTaskAgent(
     record.codeReview = "required";
     record.codeReviewReason = "triggered by coordinator dispatch";
   }
-  // Fallback when a coordinator dispatches a role directly without calling paseo_team_set_route first.
+  // Fallback when a coordinator dispatches a role directly without calling paseo_team(set_route) first.
   if (record.routeDecided === false) {
     record.routeDecided = true;
     if (stage === "plan-review" || stage === "expert") {
@@ -1896,7 +1896,7 @@ export function buildRecoveryBrief(record: TaskRecord): string {
     `- Preset/Mode: ${record.teamName} (${record.complexMode}) | Workspace: ${record.projectRoot}`,
     `- Route: ${
       record.routeDecided === false
-        ? "pending coordinator complexity assessment (call paseo_team_set_route)"
+        ? 'pending coordinator complexity assessment (call paseo_team with action="set_route")'
         : `decided (isComplex=${record.isComplex}${record.routeReason ? `, reason: ${record.routeReason}` : ""})`
     }`,
     `- Reviews: planReview=${record.planReview}(R${record.planReviewRound}/${2 + (record.extraRounds ?? 0)}) | codeReview=${record.codeReview}(R${record.codeReviewRound}/${2 + (record.extraRounds ?? 0)})`,
