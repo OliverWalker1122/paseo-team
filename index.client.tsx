@@ -220,7 +220,6 @@ export default function contribute(client: PluginClientContext) {
           rawArgs: trimmed,
         });
         focusWorkspaceGraphAgent(workspace.id, agent.id);
-        openPanel("team-graph");
       },
     }),
   );

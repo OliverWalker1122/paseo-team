@@ -919,19 +919,25 @@ test("UI regression: registers one workspace-scoped team-graph panel (zero agent
   assert.equal(mock.openedScreens[0].screenId, "team-center");
 
   await slash.onSubmit({ ...makeActionCtx("todo-coord-1"), args: "status" });
+  const panelsBeforeStart = mock.openedPanels.length;
   await slash.onSubmit({
     ...makeActionCtx("todo-coord-1"),
     args: "新增 clear 子命令；需要审查",
   });
   assert.equal(startRpcCalls.length, 1);
   assert.equal(startRpcCalls[0].agentId, "todo-coord-1");
+  assert.equal(
+    mock.openedPanels.length,
+    panelsBeforeStart,
+    "starting a team task via /paseo-team <goal> must stay in the current chat without jumping to team-graph",
+  );
 
   const openGraphCmd = mock.commandItems.find(
     (c) => c.id === "open-team-agent-graph",
   ) as { onSelect: (ctx: Record<string, unknown>) => void };
   openGraphCmd.onSelect(makeActionCtx("todo-plan-rev-1"));
 
-  assert.equal(mock.openedPanels.length, 5);
+  assert.equal(mock.openedPanels.length, 4);
   for (const opened of mock.openedPanels) {
     assert.equal(opened.panelId, "team-graph");
     assert.equal(opened.workspaceId, "wks_todo");
