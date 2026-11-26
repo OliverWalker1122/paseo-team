@@ -61,7 +61,7 @@ export function isAutoAllowedTeamTool(
       /(?:^|__|_|\/|:|\.)(?:create_agent|send_agent_prompt|list_providers|list_models|list_profiles|inspect_provider|get_agent_status|get_agent_activity|list_agents|list_hosts|list_workspaces|list_pending_permissions)$/.test(
         toolName,
       ) ||
-      /(?:^|__|_|\/|:|\.)paseo_team_(?:task_summary|submit_plan|record_review|record_delivery|complete)$/.test(
+      /(?:^|__|_|\/|:|\.)paseo_team_(?:task_summary|set_route|submit_plan|record_review|record_delivery|complete)$/.test(
         toolName,
       )
     );

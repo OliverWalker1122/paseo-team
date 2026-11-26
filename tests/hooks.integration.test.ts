@@ -464,6 +464,7 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
     [
       "existing_tool",
       "paseo_team_task_summary",
+      "paseo_team_set_route",
       "paseo_team_submit_plan",
       "paseo_team_record_delivery",
       "paseo_team_record_review",
@@ -1058,7 +1059,11 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
   assert.equal(h.sentMessages.length, 1);
   assert.equal(h.sentMessages[0].agentId, "launcher-1");
   assert.match(h.sentMessages[0].text, /\[Team Kickoff\]/);
+  assert.match(h.sentMessages[0].text, /paseo_team_set_route/);
+  assert.match(h.sentMessages[0].text, /Plan Reviewer #1/);
   assert.match(h.sentMessages[0].text, /antigravity\/gemini-4-neon/);
+  // Task starts in pending-route state until coordinator declares complexity & route.
+  assert.equal(loadTask(started.recordPath).routeDecided, false);
   h.sentMessages.length = 0;
 
   // Open coordinator and grab its real injected tools.
@@ -1102,6 +1107,19 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
       },
     },
   });
+
+  // Coordinator assesses complexity & locks route via paseo_team_set_route before dispatching members.
+  const routeRes = await coordTools.get("paseo_team_set_route")!.execute({
+    isComplex: false,
+    planReview: false,
+    codeReview: true,
+    reason:
+      "Localized single-file label update with user-requested code review",
+  });
+  assert.notEqual(routeRes.isError, true);
+  assert.equal(loadTask(started.recordPath).routeDecided, true);
+  assert.equal(loadTask(started.recordPath).planReview, "not-required");
+  assert.equal(loadTask(started.recordPath).codeReview, "required");
   const devTools = await openToolMap({
     agentId: "dev-l2",
     provider: "antigravity",

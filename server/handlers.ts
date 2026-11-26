@@ -61,6 +61,7 @@ import {
   recordPlanSubmission,
   recordReviewVerdict,
   saveTask,
+  setTaskRoute,
   type TaskRecord,
 } from "./task-store.ts";
 
@@ -426,6 +427,11 @@ function localizeNodeBrief(
     node.role === "coordinator" &&
     KNOWN_DEFAULT_COORD_BRIEFS.has(node.briefSummary)
   ) {
+    if (record.routeDecided === false) {
+      return zh
+        ? "正在结合上下文评估需求复杂度，决定是否启用方案评审与代码审查"
+        : "Evaluating task complexity from chat context to decide plan & code review";
+    }
     return record.complexMode === "simple" && record.isComplex
       ? zh
         ? "兼任架构设计 · 统筹目标、派发与验收"
@@ -640,401 +646,431 @@ export function toPipelineSnapshot(
     });
   };
 
+  const hasDispatchedMember = record.nodes.some(
+    (n) => n.role !== "coordinator" && n.role !== "gate" && Boolean(n.agentId),
+  );
+  const routePending = record.routeDecided === false && !hasDispatchedMember;
+
   // 1. Coordinator
   const coordNodes = resolvedNodes
     .filter((n) => n.raw.stage === "coordinator")
     .map((n) => n.view);
-  pushStep("coordinator", "coordinator", coordNodes);
+  pushStep("coordinator", "coordinator", coordNodes, {
+    ...(routePending
+      ? {
+          subtitle: zh
+            ? "评估需求复杂度与执行路径"
+            : "Assessing complexity & execution route",
+        }
+      : {}),
+  });
 
-  // 2. Expert + Plan Review (expands dynamically across revision rounds)
-  const expertBase = resolvedNodes.filter((n) => n.raw.stage === "expert");
-  const planRevBase = resolvedNodes.filter(
-    (n) => n.raw.stage === "plan-review",
-  );
-  const expertSkipped = isStageSkipped(expertBase);
-  const planRevSkipped = isStageSkipped(planRevBase);
-  if (expertSkipped) skippedStageCount += 1;
-  if (planRevSkipped) skippedStageCount += 1;
+  if (!routePending) {
+    // 2. Expert + Plan Review (expands dynamically across revision rounds)
+    const expertBase = resolvedNodes.filter((n) => n.raw.stage === "expert");
+    const planRevBase = resolvedNodes.filter(
+      (n) => n.raw.stage === "plan-review",
+    );
+    const expertSkipped = isStageSkipped(expertBase);
+    const planRevSkipped = isStageSkipped(planRevBase);
+    if (expertSkipped) skippedStageCount += 1;
+    if (planRevSkipped) skippedStageCount += 1;
 
-  const expertVisible = expertBase.length > 0 && !expertSkipped;
-  const planRevVisible = planRevBase.length > 0 && !planRevSkipped;
+    const expertVisible = expertBase.length > 0 && !expertSkipped;
+    const planRevVisible = planRevBase.length > 0 && !planRevSkipped;
 
-  const maxRounds = 2 + (record.extraRounds ?? 0);
-  const ownMaxRound = (item: BaseResolvedNode) =>
-    item.rounds.reduce((m, r) => Math.max(m, r.round), 0);
+    const maxRounds = 2 + (record.extraRounds ?? 0);
+    const ownMaxRound = (item: BaseResolvedNode) =>
+      item.rounds.reduce((m, r) => Math.max(m, r.round), 0);
 
-  if (expertVisible || planRevVisible) {
-    const recordedPlanRoundSet = new Set<number>();
-    for (const item of planRevBase) {
-      for (const r of item.rounds) recordedPlanRoundSet.add(r.round);
+    if (expertVisible || planRevVisible) {
+      const recordedPlanRoundSet = new Set<number>();
+      for (const item of planRevBase) {
+        for (const r of item.rounds) recordedPlanRoundSet.add(r.round);
+      }
+      const recordedPlanRounds = [...recordedPlanRoundSet].sort(
+        (a, b) => a - b,
+      );
+      const maxPlanRecorded =
+        recordedPlanRounds.length > 0 ? Math.max(...recordedPlanRounds) : 0;
+      const planSubmissions = record.planSubmissions ?? 0;
+      const lastPlanRoundFailed =
+        maxPlanRecorded >= 1 &&
+        planRevBase.some((item) => {
+          const last = item.rounds
+            .filter((x) => x.round === maxPlanRecorded)
+            .at(-1);
+          return Boolean(last && last.verdict !== "APPROVE");
+        });
+
+      const nextLiveExpertRound =
+        maxPlanRecorded >= 1 &&
+        maxPlanRecorded >= planSubmissions &&
+        lastPlanRoundFailed &&
+        expertBase.some((n) => n.isLiveActive)
+          ? maxPlanRecorded + 1
+          : 0;
+      const planTargetRound = Math.max(1, maxPlanRecorded, planSubmissions);
+      const nextLivePlanRevRound = planRevBase.some(
+        (n) => n.isLiveActive && ownMaxRound(n) < planTargetRound,
+      )
+        ? planTargetRound
+        : 0;
+
+      const planCycleRounds = [
+        ...new Set<number>([
+          ...(recordedPlanRounds.length > 0 ? recordedPlanRounds : [1]),
+          ...(nextLiveExpertRound ? [nextLiveExpertRound] : []),
+          ...(nextLivePlanRevRound ? [nextLivePlanRevRound] : []),
+        ]),
+      ].sort((a, b) => a - b);
+      const multiPlan = planCycleRounds.length > 1;
+      const maxPlanCycle = planCycleRounds[planCycleRounds.length - 1] ?? 1;
+
+      for (const r of planCycleRounds) {
+        if (
+          expertVisible &&
+          (r === 1 || r <= planSubmissions || r === nextLiveExpertRound)
+        ) {
+          const expRoundNodes = expertBase.map((item): PipelineNodeViewDto => {
+            const settledEarlier = r < maxPlanCycle || r <= maxPlanRecorded;
+            return {
+              ...item.view,
+              nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
+              label: localizeNodeRoleLabel(
+                lang,
+                "expert",
+                item.raw.slotIndex,
+                item.raw.label,
+                false,
+                expertBase.length,
+                r,
+                multiPlan,
+              ),
+              round: r,
+              visualStatus: settledEarlier
+                ? "completed"
+                : item.view.visualStatus,
+              liveState:
+                settledEarlier && item.isLiveActive
+                  ? "idle"
+                  : item.view.liveState,
+            };
+          });
+          pushStep(
+            r === 1 ? "expert" : `expert-r${r}`,
+            "expert",
+            expRoundNodes,
+            {
+              round: multiPlan || r > 1 ? r : undefined,
+              multiRound: multiPlan,
+            },
+          );
+        }
+
+        const shouldEmitPlanRev =
+          planRevVisible &&
+          (recordedPlanRoundSet.has(r) ||
+            r === nextLivePlanRevRound ||
+            recordedPlanRounds.length === 0);
+
+        if (shouldEmitPlanRev) {
+          const prNodes: PipelineNodeViewDto[] = [];
+          for (const item of planRevBase) {
+            const roundEntries = item.rounds.filter((x) => x.round === r);
+            const roundEntry = roundEntries.at(-1);
+            const include =
+              recordedPlanRounds.length === 0 ||
+              Boolean(roundEntry) ||
+              (r === nextLivePlanRevRound && item.isLiveActive);
+            if (!include) continue;
+
+            prNodes.push({
+              ...item.view,
+              nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
+              label: localizeNodeRoleLabel(
+                lang,
+                "plan-reviewer",
+                item.raw.slotIndex,
+                item.raw.label,
+                false,
+                planRevBase.length,
+                r,
+                multiPlan,
+              ),
+              round: r,
+              verdict:
+                roundEntry?.verdict ??
+                (r === 1 ? item.view.verdict : undefined),
+              summary:
+                roundEntry?.summary ||
+                (recordedPlanRounds.length === 0
+                  ? item.view.summary
+                  : undefined),
+              rounds: roundEntries.length > 0 ? roundEntries : undefined,
+              visualStatus: roundEntry
+                ? verdictToVisualStatus(roundEntry.verdict)
+                : r === nextLivePlanRevRound && item.isLiveActive
+                  ? item.view.visualStatus
+                  : item.view.visualStatus,
+              liveState:
+                roundEntry && r < maxPlanCycle && item.isLiveActive
+                  ? "idle"
+                  : item.view.liveState,
+            });
+          }
+          pushStep(
+            r === 1 ? "plan-review" : `plan-review-r${r}`,
+            "plan-review",
+            prNodes,
+            {
+              round: multiPlan || r > 1 ? r : undefined,
+              multiRound: multiPlan,
+              subtitle:
+                record.planReview === "required"
+                  ? zh
+                    ? `第 ${r}/${maxRounds} 轮 · 交叉审核`
+                    : `Round ${r}/${maxRounds} · Cross review`
+                  : zh
+                    ? "已豁免"
+                    : "Waived",
+            },
+          );
+        }
+      }
     }
-    const recordedPlanRounds = [...recordedPlanRoundSet].sort((a, b) => a - b);
-    const maxPlanRecorded =
-      recordedPlanRounds.length > 0 ? Math.max(...recordedPlanRounds) : 0;
-    const planSubmissions = record.planSubmissions ?? 0;
-    const lastPlanRoundFailed =
-      maxPlanRecorded >= 1 &&
-      planRevBase.some((item) => {
+
+    // 3. Development + Code Review (expands dynamically as revisions & re-reviews occur)
+    const devBase = resolvedNodes.filter((n) => n.raw.stage === "development");
+    const codeRevBase = resolvedNodes.filter(
+      (n) => n.raw.stage === "code-review",
+    );
+    const codeRevSkipped = isStageSkipped(codeRevBase);
+    if (codeRevSkipped) skippedStageCount += 1;
+    const codeRevVisible = codeRevBase.length > 0 && !codeRevSkipped;
+
+    const recordedCodeRoundSet = new Set<number>();
+    for (const item of codeRevBase) {
+      for (const r of item.rounds) recordedCodeRoundSet.add(r.round);
+    }
+    const recordedCodeRounds = [...recordedCodeRoundSet].sort((a, b) => a - b);
+    const maxCodeRecorded =
+      recordedCodeRounds.length > 0 ? Math.max(...recordedCodeRounds) : 0;
+
+    const deliveries = record.deliveries ?? [];
+    const recordedDevRoundSet = new Set<number>(deliveries.map((d) => d.round));
+    const maxDeliveryRound = deliveries.reduce(
+      (m, d) => Math.max(m, d.round),
+      0,
+    );
+    const lastCodeRoundFailed =
+      maxCodeRecorded >= 1 &&
+      codeRevBase.some((item) => {
         const last = item.rounds
-          .filter((x) => x.round === maxPlanRecorded)
+          .filter((x) => x.round === maxCodeRecorded)
           .at(-1);
         return Boolean(last && last.verdict !== "APPROVE");
       });
 
-    const nextLiveExpertRound =
-      maxPlanRecorded >= 1 &&
-      maxPlanRecorded >= planSubmissions &&
-      lastPlanRoundFailed &&
-      expertBase.some((n) => n.isLiveActive)
-        ? maxPlanRecorded + 1
+    const nextLiveDevRound =
+      maxCodeRecorded >= 1 &&
+      maxCodeRecorded >= maxDeliveryRound &&
+      lastCodeRoundFailed &&
+      devBase.some((n) => n.isLiveActive)
+        ? Math.max(maxCodeRecorded + 1, ...devBase.map((n) => n.raw.round ?? 0))
         : 0;
-    const planTargetRound = Math.max(1, maxPlanRecorded, planSubmissions);
-    const nextLivePlanRevRound = planRevBase.some(
-      (n) => n.isLiveActive && ownMaxRound(n) < planTargetRound,
+    const codeTargetRound = Math.max(1, maxCodeRecorded, maxDeliveryRound);
+    const nextLiveCodeRound = codeRevBase.some(
+      (n) => n.isLiveActive && ownMaxRound(n) < codeTargetRound,
     )
-      ? planTargetRound
+      ? codeTargetRound
       : 0;
 
-    const planCycleRounds = [
+    const codeCycleRounds = [
       ...new Set<number>([
-        ...(recordedPlanRounds.length > 0 ? recordedPlanRounds : [1]),
-        ...(nextLiveExpertRound ? [nextLiveExpertRound] : []),
-        ...(nextLivePlanRevRound ? [nextLivePlanRevRound] : []),
+        ...(recordedCodeRounds.length > 0 ? recordedCodeRounds : [1]),
+        ...recordedDevRoundSet,
+        ...(nextLiveDevRound ? [nextLiveDevRound] : []),
+        ...(nextLiveCodeRound ? [nextLiveCodeRound] : []),
       ]),
     ].sort((a, b) => a - b);
-    const multiPlan = planCycleRounds.length > 1;
-    const maxPlanCycle = planCycleRounds[planCycleRounds.length - 1] ?? 1;
 
-    for (const r of planCycleRounds) {
+    const multiCodeCycle = codeCycleRounds.length > 1;
+    const maxCodeCycle = codeCycleRounds[codeCycleRounds.length - 1] ?? 1;
+
+    for (const r of codeCycleRounds) {
       if (
-        expertVisible &&
-        (r === 1 || r <= planSubmissions || r === nextLiveExpertRound)
+        devBase.length > 0 &&
+        (r === 1 || recordedDevRoundSet.has(r) || r === nextLiveDevRound)
       ) {
-        const expRoundNodes = expertBase.map((item): PipelineNodeViewDto => {
-          const settledEarlier = r < maxPlanCycle || r <= maxPlanRecorded;
+        const roundDeliveries = deliveries.filter((d) => d.round === r);
+        const settledDevRound =
+          r < maxCodeCycle ||
+          roundDeliveries.length > 0 ||
+          recordedCodeRoundSet.has(r) ||
+          (codeCycleRounds.length === 1 &&
+            (Boolean(record.delivery) ||
+              Boolean(record.candidate) ||
+              record.lifecycleStatus === "completed"));
+
+        const devRoundNodes = devBase.map((item): PipelineNodeViewDto => {
+          const matchedDelivery =
+            roundDeliveries.find((d) => d.agentId === item.raw.agentId) ??
+            (devBase.length === 1 ? roundDeliveries[0] : undefined);
+          const fallbackSummary =
+            matchedDelivery?.summary ??
+            (r === maxCodeCycle
+              ? item.view.summary || record.delivery?.summary
+              : roundDeliveries[0]?.summary);
+
           return {
             ...item.view,
             nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
             label: localizeNodeRoleLabel(
               lang,
-              "expert",
+              "developer",
               item.raw.slotIndex,
               item.raw.label,
               false,
-              expertBase.length,
-              r,
-              multiPlan,
+              totalDevelopers,
+              multiCodeCycle ? r : undefined,
+              multiCodeCycle,
             ),
-            round: r,
-            visualStatus: settledEarlier ? "completed" : item.view.visualStatus,
+            ...(multiCodeCycle ? { round: r } : {}),
+            summary:
+              fallbackSummary ||
+              (r > 1 && item.isLiveActive
+                ? undefined
+                : r === 1 && !multiCodeCycle
+                  ? item.view.summary
+                  : undefined),
+            briefSummary:
+              r > 1 && !matchedDelivery
+                ? zh
+                  ? `根据第 ${r - 1} 轮审查意见修订代码并重跑完整测试`
+                  : `Revises code for Round ${r - 1} review findings & reruns CI`
+                : item.view.briefSummary,
+            visualStatus:
+              r === nextLiveDevRound &&
+              item.isLiveActive &&
+              roundDeliveries.length === 0
+                ? item.view.visualStatus
+                : settledDevRound
+                  ? "completed"
+                  : item.view.visualStatus,
             liveState:
-              settledEarlier && item.isLiveActive
+              settledDevRound && r < maxCodeCycle && item.isLiveActive
                 ? "idle"
                 : item.view.liveState,
           };
         });
-        pushStep(r === 1 ? "expert" : `expert-r${r}`, "expert", expRoundNodes, {
-          round: multiPlan || r > 1 ? r : undefined,
-          multiRound: multiPlan,
-        });
+
+        pushStep(
+          r === 1 ? "development" : `development-r${r}`,
+          "development",
+          devRoundNodes,
+          {
+            round: multiCodeCycle ? r : undefined,
+            multiRound: multiCodeCycle,
+          },
+        );
       }
 
-      const shouldEmitPlanRev =
-        planRevVisible &&
-        (recordedPlanRoundSet.has(r) ||
-          r === nextLivePlanRevRound ||
-          recordedPlanRounds.length === 0);
+      const shouldEmitCodeRev =
+        codeRevVisible &&
+        (recordedCodeRoundSet.has(r) ||
+          r === nextLiveCodeRound ||
+          (recordedCodeRounds.length === 0 && r === 1));
 
-      if (shouldEmitPlanRev) {
-        const prNodes: PipelineNodeViewDto[] = [];
-        for (const item of planRevBase) {
+      if (shouldEmitCodeRev) {
+        const crNodes: PipelineNodeViewDto[] = [];
+        for (const item of codeRevBase) {
           const roundEntries = item.rounds.filter((x) => x.round === r);
           const roundEntry = roundEntries.at(-1);
           const include =
-            recordedPlanRounds.length === 0 ||
+            recordedCodeRounds.length === 0 ||
             Boolean(roundEntry) ||
-            (r === nextLivePlanRevRound && item.isLiveActive);
+            (r === nextLiveCodeRound &&
+              (item.isLiveActive || item.raw.round === r));
           if (!include) continue;
 
-          prNodes.push({
+          const showRoundTag = multiCodeCycle || r > 1;
+          crNodes.push({
             ...item.view,
             nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
             label: localizeNodeRoleLabel(
               lang,
-              "plan-reviewer",
+              "code-reviewer",
               item.raw.slotIndex,
               item.raw.label,
               false,
-              planRevBase.length,
-              r,
-              multiPlan,
+              codeRevBase.length,
+              showRoundTag ? r : undefined,
+              multiCodeCycle,
             ),
-            round: r,
+            round:
+              roundEntry?.round ??
+              (recordedCodeRounds.length === 0 ? item.view.round : r),
             verdict:
-              roundEntry?.verdict ?? (r === 1 ? item.view.verdict : undefined),
+              roundEntry?.verdict ??
+              (recordedCodeRounds.length === 0 ? item.view.verdict : undefined),
             summary:
               roundEntry?.summary ||
-              (recordedPlanRounds.length === 0 ? item.view.summary : undefined),
+              (recordedCodeRounds.length === 0 ? item.view.summary : undefined),
             rounds: roundEntries.length > 0 ? roundEntries : undefined,
             visualStatus: roundEntry
               ? verdictToVisualStatus(roundEntry.verdict)
-              : r === nextLivePlanRevRound && item.isLiveActive
+              : r === nextLiveCodeRound && item.isLiveActive
                 ? item.view.visualStatus
                 : item.view.visualStatus,
             liveState:
-              roundEntry && r < maxPlanCycle && item.isLiveActive
+              roundEntry && r < maxCodeCycle && item.isLiveActive
                 ? "idle"
                 : item.view.liveState,
           });
         }
+
         pushStep(
-          r === 1 ? "plan-review" : `plan-review-r${r}`,
-          "plan-review",
-          prNodes,
+          r === 1 ? "code-review" : `code-review-r${r}`,
+          "code-review",
+          crNodes,
           {
-            round: multiPlan || r > 1 ? r : undefined,
-            multiRound: multiPlan,
+            round: multiCodeCycle || r > 1 ? r : undefined,
+            multiRound: multiCodeCycle,
             subtitle:
-              record.planReview === "required"
+              record.codeReview === "required"
                 ? zh
-                  ? `第 ${r}/${maxRounds} 轮 · 交叉审核`
-                  : `Round ${r}/${maxRounds} · Cross review`
-                : zh
-                  ? "已豁免"
-                  : "Waived",
+                  ? `第 ${r}/${maxRounds} 轮`
+                  : `Round ${r}/${maxRounds}`
+                : record.codeReview === "waived"
+                  ? zh
+                    ? "已豁免"
+                    : "Waived"
+                  : zh
+                    ? "按改动规模自动判定"
+                    : "Conditional on diff",
           },
         );
       }
     }
-  }
 
-  // 3. Development + Code Review (expands dynamically as revisions & re-reviews occur)
-  const devBase = resolvedNodes.filter((n) => n.raw.stage === "development");
-  const codeRevBase = resolvedNodes.filter(
-    (n) => n.raw.stage === "code-review",
-  );
-  const codeRevSkipped = isStageSkipped(codeRevBase);
-  if (codeRevSkipped) skippedStageCount += 1;
-  const codeRevVisible = codeRevBase.length > 0 && !codeRevSkipped;
-
-  const recordedCodeRoundSet = new Set<number>();
-  for (const item of codeRevBase) {
-    for (const r of item.rounds) recordedCodeRoundSet.add(r.round);
-  }
-  const recordedCodeRounds = [...recordedCodeRoundSet].sort((a, b) => a - b);
-  const maxCodeRecorded =
-    recordedCodeRounds.length > 0 ? Math.max(...recordedCodeRounds) : 0;
-
-  const deliveries = record.deliveries ?? [];
-  const recordedDevRoundSet = new Set<number>(deliveries.map((d) => d.round));
-  const maxDeliveryRound = deliveries.reduce((m, d) => Math.max(m, d.round), 0);
-  const lastCodeRoundFailed =
-    maxCodeRecorded >= 1 &&
-    codeRevBase.some((item) => {
-      const last = item.rounds
-        .filter((x) => x.round === maxCodeRecorded)
-        .at(-1);
-      return Boolean(last && last.verdict !== "APPROVE");
-    });
-
-  const nextLiveDevRound =
-    maxCodeRecorded >= 1 &&
-    maxCodeRecorded >= maxDeliveryRound &&
-    lastCodeRoundFailed &&
-    devBase.some((n) => n.isLiveActive)
-      ? Math.max(maxCodeRecorded + 1, ...devBase.map((n) => n.raw.round ?? 0))
-      : 0;
-  const codeTargetRound = Math.max(1, maxCodeRecorded, maxDeliveryRound);
-  const nextLiveCodeRound = codeRevBase.some(
-    (n) => n.isLiveActive && ownMaxRound(n) < codeTargetRound,
-  )
-    ? codeTargetRound
-    : 0;
-
-  const codeCycleRounds = [
-    ...new Set<number>([
-      ...(recordedCodeRounds.length > 0 ? recordedCodeRounds : [1]),
-      ...recordedDevRoundSet,
-      ...(nextLiveDevRound ? [nextLiveDevRound] : []),
-      ...(nextLiveCodeRound ? [nextLiveCodeRound] : []),
-    ]),
-  ].sort((a, b) => a - b);
-
-  const multiCodeCycle = codeCycleRounds.length > 1;
-  const maxCodeCycle = codeCycleRounds[codeCycleRounds.length - 1] ?? 1;
-
-  for (const r of codeCycleRounds) {
-    if (
-      devBase.length > 0 &&
-      (r === 1 || recordedDevRoundSet.has(r) || r === nextLiveDevRound)
-    ) {
-      const roundDeliveries = deliveries.filter((d) => d.round === r);
-      const settledDevRound =
-        r < maxCodeCycle ||
-        roundDeliveries.length > 0 ||
-        recordedCodeRoundSet.has(r) ||
-        (codeCycleRounds.length === 1 &&
-          (Boolean(record.delivery) ||
-            Boolean(record.candidate) ||
-            record.lifecycleStatus === "completed"));
-
-      const devRoundNodes = devBase.map((item): PipelineNodeViewDto => {
-        const matchedDelivery =
-          roundDeliveries.find((d) => d.agentId === item.raw.agentId) ??
-          (devBase.length === 1 ? roundDeliveries[0] : undefined);
-        const fallbackSummary =
-          matchedDelivery?.summary ??
-          (r === maxCodeCycle
-            ? item.view.summary || record.delivery?.summary
-            : roundDeliveries[0]?.summary);
-
-        return {
-          ...item.view,
-          nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
-          label: localizeNodeRoleLabel(
-            lang,
-            "developer",
-            item.raw.slotIndex,
-            item.raw.label,
-            false,
-            totalDevelopers,
-            multiCodeCycle ? r : undefined,
-            multiCodeCycle,
-          ),
-          ...(multiCodeCycle ? { round: r } : {}),
-          summary:
-            fallbackSummary ||
-            (r > 1 && item.isLiveActive
-              ? undefined
-              : r === 1 && !multiCodeCycle
-                ? item.view.summary
-                : undefined),
-          briefSummary:
-            r > 1 && !matchedDelivery
-              ? zh
-                ? `根据第 ${r - 1} 轮审查意见修订代码并重跑完整测试`
-                : `Revises code for Round ${r - 1} review findings & reruns CI`
-              : item.view.briefSummary,
-          visualStatus:
-            r === nextLiveDevRound &&
-            item.isLiveActive &&
-            roundDeliveries.length === 0
-              ? item.view.visualStatus
-              : settledDevRound
-                ? "completed"
-                : item.view.visualStatus,
-          liveState:
-            settledDevRound && r < maxCodeCycle && item.isLiveActive
-              ? "idle"
-              : item.view.liveState,
-        };
-      });
-
-      pushStep(
-        r === 1 ? "development" : `development-r${r}`,
-        "development",
-        devRoundNodes,
-        {
-          round: multiCodeCycle ? r : undefined,
-          multiRound: multiCodeCycle,
-        },
-      );
-    }
-
-    const shouldEmitCodeRev =
-      codeRevVisible &&
-      (recordedCodeRoundSet.has(r) ||
-        r === nextLiveCodeRound ||
-        (recordedCodeRounds.length === 0 && r === 1));
-
-    if (shouldEmitCodeRev) {
-      const crNodes: PipelineNodeViewDto[] = [];
-      for (const item of codeRevBase) {
-        const roundEntries = item.rounds.filter((x) => x.round === r);
-        const roundEntry = roundEntries.at(-1);
-        const include =
-          recordedCodeRounds.length === 0 ||
-          Boolean(roundEntry) ||
-          (r === nextLiveCodeRound &&
-            (item.isLiveActive || item.raw.round === r));
-        if (!include) continue;
-
-        const showRoundTag = multiCodeCycle || r > 1;
-        crNodes.push({
-          ...item.view,
-          nodeId: r === 1 ? item.view.nodeId : `${item.view.nodeId}-r${r}`,
-          label: localizeNodeRoleLabel(
-            lang,
-            "code-reviewer",
-            item.raw.slotIndex,
-            item.raw.label,
-            false,
-            codeRevBase.length,
-            showRoundTag ? r : undefined,
-            multiCodeCycle,
-          ),
-          round:
-            roundEntry?.round ??
-            (recordedCodeRounds.length === 0 ? item.view.round : r),
-          verdict:
-            roundEntry?.verdict ??
-            (recordedCodeRounds.length === 0 ? item.view.verdict : undefined),
-          summary:
-            roundEntry?.summary ||
-            (recordedCodeRounds.length === 0 ? item.view.summary : undefined),
-          rounds: roundEntries.length > 0 ? roundEntries : undefined,
-          visualStatus: roundEntry
-            ? verdictToVisualStatus(roundEntry.verdict)
-            : r === nextLiveCodeRound && item.isLiveActive
-              ? item.view.visualStatus
-              : item.view.visualStatus,
-          liveState:
-            roundEntry && r < maxCodeCycle && item.isLiveActive
-              ? "idle"
-              : item.view.liveState,
-        });
-      }
-
-      pushStep(
-        r === 1 ? "code-review" : `code-review-r${r}`,
-        "code-review",
-        crNodes,
-        {
-          round: multiCodeCycle || r > 1 ? r : undefined,
-          multiRound: multiCodeCycle,
-          subtitle:
-            record.codeReview === "required"
-              ? zh
-                ? `第 ${r}/${maxRounds} 轮`
-                : `Round ${r}/${maxRounds}`
-              : record.codeReview === "waived"
-                ? zh
-                  ? "已豁免"
-                  : "Waived"
-                : zh
-                  ? "按改动规模自动判定"
-                  : "Conditional on diff",
-        },
-      );
-    }
-  }
-
-  // 4. Quality Gate
-  const gateNodes = resolvedNodes
-    .filter((n) => n.raw.stage === "merge-gate")
-    .map((n) => n.view);
-  pushStep("merge-gate", "merge-gate", gateNodes, {
-    subtitle:
-      record.lifecycleStatus === "completed"
-        ? zh
-          ? "已完成验收"
-          : "Signed off"
-        : gateReady
+    // 4. Quality Gate
+    const gateNodes = resolvedNodes
+      .filter((n) => n.raw.stage === "merge-gate")
+      .map((n) => n.view);
+    pushStep("merge-gate", "merge-gate", gateNodes, {
+      subtitle:
+        record.lifecycleStatus === "completed"
           ? zh
-            ? "验收项已就绪"
-            : "Ready to complete"
-          : STAGE_LABELS[lang]["merge-gate"].subtitle,
-  });
+            ? "已完成验收"
+            : "Signed off"
+          : gateReady
+            ? zh
+              ? "验收项已就绪"
+              : "Ready to complete"
+            : STAGE_LABELS[lang]["merge-gate"].subtitle,
+    });
+  }
 
   const ciStatus: PipelineTaskSnapshotDto["ciStatus"] = record.ci?.waived
     ? "waived"
@@ -1051,6 +1087,8 @@ export function toPipelineSnapshot(
     projectRoot: record.projectRoot,
     goal: record.goal,
     isComplex: record.isComplex,
+    routeDecided: !routePending,
+    ...(record.routeReason ? { routeReason: record.routeReason } : {}),
     teamName: record.teamName,
     complexMode: record.complexMode,
     ...(record.coordinatorAgentId
@@ -1063,6 +1101,9 @@ export function toPipelineSnapshot(
       ? { launcherAgentId: record.launcherAgentId }
       : {}),
     planReview: record.planReview,
+    ...(record.planReviewReason
+      ? { planReviewReason: record.planReviewReason }
+      : {}),
     planReviewRound: record.planReviewRound,
     codeReview: record.codeReview,
     ...(record.codeReviewReason
@@ -1559,27 +1600,25 @@ export function parseInlineTaskDirectives(rawArgs: string): {
   }
 
   if (
-    /(?:不要|不需要|免除|跳过)(?:代码|方案)?审查|免审|\b(?:no|skip|without)\s+(?:(?:code|plan)\s+)?review\b/i.test(
+    /(?:不要|不需要|免除|跳过)(?:代码|方案)?(?:审查|评审)|免审|\b(?:no|skip|without)\s+(?:(?:code|plan)\s+)?review\b/i.test(
       text,
     )
   ) {
     skipReviewReason = rawArgs.trim();
   } else if (
-    /(?:需要|开启|必须)(?:代码|方案)?审查|方案审查|\b(?:with|require|enable)\s+(?:(?:code|plan)\s+)?review\b|\bplan\s+review\b/i.test(
+    /(?:需要|开启|必须)(?:代码|方案)?(?:审查|评审)|方案(?:审查|评审)|\b(?:with|require|enable)\s+(?:(?:code|plan)\s+)?review\b|\bplan\s+review\b/i.test(
       text,
     )
   ) {
     requireReview = true;
-    if (/方案审查|\bplan\s+review\b/i.test(text)) {
+    if (/方案(?:审查|评审)|\bplan\s+review\b/i.test(text)) {
       requirePlanReview = true;
     }
   }
 
-  const isComplex =
-    /重构|架构|迁移|并发|资金|事务|跨模块|根因|生产事故|\b(?:refactor|architecture|migration|concurrency|transaction|cross-module|root\s+cause|incident)\b/i.test(
-      text,
-    ) ||
-    (hasModeOverride && complexModeOverride === "expert");
+  // Only explicit expert-mode directives pre-mark isComplex; otherwise the coordinator
+  // assesses real complexity from full conversation & codebase context via paseo_team_set_route.
+  const isComplex = hasModeOverride && complexModeOverride === "expert";
 
   text = text.replace(/^start\s+/i, "").trim();
   return {
@@ -1741,6 +1780,7 @@ export async function startTeamTask(
     teamName: eff.teamName,
     preset: eff.preset,
     isComplex: input.isComplex ?? parsed.isComplex,
+    routeDecided: Boolean(parsed.skipReviewReason),
     requireReview: input.requireReview ?? parsed.requireReview,
     requirePlanReview: parsed.requirePlanReview,
     skipReviewReason: parsed.skipReviewReason,
@@ -1799,16 +1839,35 @@ export async function startTeamTask(
     `- Developer: ${formatLaunchLine(devLaunch, "developer")}`,
   ];
 
-  if (eff.preset.complexMode === "expert") {
+  if (
+    eff.preset.expert?.model &&
+    eff.preset.expert.model !== AUTO_MODEL &&
+    (eff.preset.complexMode === "expert" ||
+      created.record.planReview !== "waived")
+  ) {
     const expLaunch = resolveRoleLaunchSpec({
       role: "expert",
-      spec: eff.preset.expert ?? { model: AUTO_MODEL },
+      spec: eff.preset.expert,
       catalog: providers,
     });
-    rosterLines.push(`- Expert: ${formatLaunchLine(expLaunch, "expert")}`);
+    const note =
+      eff.preset.complexMode === "expert"
+        ? ""
+        : zh
+          ? "（可选，需独立起草方案时使用）"
+          : " (optional, for dedicated plan drafting)";
+    rosterLines.push(
+      `- Expert${note}: ${formatLaunchLine(expLaunch, "expert")}`,
+    );
   }
 
-  if (created.record.planReview === "required" || created.record.isComplex) {
+  if (created.record.planReview === "waived") {
+    rosterLines.push(
+      zh
+        ? "- 方案评审：用户已豁免（无需派发方案审查员）"
+        : "- Plan Review: waived by user (do not dispatch plan reviewers)",
+    );
+  } else {
     eff.preset.planReviewers.forEach((spec, idx) => {
       const launch = resolveRoleLaunchSpec({
         role: "plan-reviewer",
@@ -1848,15 +1907,39 @@ export async function startTeamTask(
     });
   }
 
+  const userConstraints: string[] = [];
+  if (created.record.planReview === "required") {
+    userConstraints.push(
+      zh
+        ? "- 用户已明确要求**方案评审**（`planReview: true` 不可降级）。"
+        : "- User explicitly requested **plan review** (`planReview: true` cannot be downgraded).",
+    );
+  }
+  if (created.record.codeReview === "required") {
+    userConstraints.push(
+      zh
+        ? "- 用户已明确要求**代码审查**（`codeReview: true` 不可降级）。"
+        : "- User explicitly requested **code review** (`codeReview: true` cannot be downgraded).",
+    );
+  }
+  if (created.record.codeReview === "waived") {
+    userConstraints.push(
+      zh
+        ? "- 用户已明确豁免本任务审查（免审）。"
+        : "- User explicitly waived review for this task.",
+    );
+  }
+
   // Use the current chat directly as coordinator: update its task metadata,
-  // reload its live session so agent.open.before injects the coordinator
-  // protocol and tools while preserving conversation history, then send kickoff.
+  // bump sessionOpenGeneration so send() refreshes plugin hooks without wiping
+  // timeline history, then send kickoff.
   const kickoffPrompt = buildKickoffPrompt({
     taskId: created.record.taskId,
     goal: parsed.goal,
     teamName: eff.teamName,
     complexMode: eff.preset.complexMode,
     rosterLines,
+    ...(userConstraints.length > 0 ? { userConstraints } : {}),
     lang: promptLang,
   });
 
@@ -1921,6 +2004,62 @@ export function createCoordinatorTools(
           planReviewRound: record.planReviewRound,
           codeReviewRound: record.codeReviewRound,
           circuitBroken: record.circuitBroken,
+        },
+      };
+    },
+  });
+
+  const setRouteTool = defineAgentTool({
+    name: "paseo_team_set_route",
+    title: "Set Task Complexity & Review Route",
+    description:
+      "Declare your complexity assessment and execution route (whether plan review, expert drafting, and code review are needed) before dispatching subagents. Expands the workflow graph and locks required quality gates.",
+    input: z.object({
+      isComplex: z
+        .boolean()
+        .describe(
+          "True for architectural, cross-module, concurrency/state/data-migration, or unclear root-cause tasks.",
+        ),
+      planReview: z
+        .boolean()
+        .describe(
+          "True when a written plan/design should be independently cross-reviewed before coding.",
+        ),
+      codeReview: z
+        .boolean()
+        .describe(
+          "True when implementation should undergo independent code review before completion.",
+        ),
+      useExpert: z
+        .boolean()
+        .optional()
+        .describe(
+          "Optional: true to dispatch the configured Expert role to draft the plan.",
+        ),
+      reason: z
+        .string()
+        .min(1)
+        .describe(
+          "Concise one-line rationale for your complexity and review route decision.",
+        ),
+    }),
+    async execute(args) {
+      const { record, preserved } = setTaskRoute(recordPath, args);
+      notifyTaskChanges();
+      const preservedNote =
+        preserved.length > 0
+          ? ` (preserved user-required: ${preserved.join(", ")})`
+          : "";
+      return {
+        text: `Route locked: isComplex=${record.isComplex}, planReview=${record.planReview}, codeReview=${record.codeReview}, complexMode=${record.complexMode}.${preservedNote}`,
+        structuredContent: {
+          isComplex: record.isComplex,
+          routeDecided: record.routeDecided,
+          routeReason: record.routeReason,
+          planReview: record.planReview,
+          codeReview: record.codeReview,
+          complexMode: record.complexMode,
+          preserved,
         },
       };
     },
@@ -2007,6 +2146,7 @@ export function createCoordinatorTools(
 
   return [
     summaryTool,
+    setRouteTool,
     createSubmitPlanTool(recordPath),
     recordDeliveryTool,
     recordReviewTool,

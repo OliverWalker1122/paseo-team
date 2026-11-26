@@ -149,6 +149,8 @@ export const PipelineTaskSnapshotSchema = z.object({
   projectRoot: z.string(),
   goal: z.string(),
   isComplex: z.boolean(),
+  routeDecided: z.boolean().optional(),
+  routeReason: z.string().optional(),
   teamName: z.string(),
   complexMode: ComplexModeSchema,
   coordinatorAgentId: z.string().optional(),
@@ -156,6 +158,7 @@ export const PipelineTaskSnapshotSchema = z.object({
   /** The chat that started the task; team chats link back to it. */
   launcherAgentId: z.string().optional(),
   planReview: z.enum(["required", "not-required", "waived"]),
+  planReviewReason: z.string().optional(),
   planReviewRound: z.number(),
   codeReview: z.enum(["required", "not-required", "waived"]),
   codeReviewReason: z.string().optional(),

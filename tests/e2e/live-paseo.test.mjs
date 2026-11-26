@@ -365,6 +365,13 @@ async function runLiveScenario({
       wsGraph.mode === "team_task" ? wsGraph.task : wsGraph.tasks?.[0];
     assert.equal(activeGraphTask?.taskId, started.taskId);
     assert.equal(activeGraphTask?.projectRoot, realpathSync(cwd));
+    if (requireReview) {
+      // Before coordinator decides route or dispatches members, graph starts with Coordinator only.
+      assert.ok(
+        activeGraphTask?.stages?.[0]?.stageId === "coordinator",
+        "first stage must be coordinator",
+      );
+    }
 
     // Unrelated standalone chat ID must resolve to mode="empty" without leaking another project's task.
     const emptyGraph = await client.invokePluginRpc(
@@ -441,8 +448,9 @@ async function runLiveScenario({
       `Scenario "${name}" timed out after ${TIMEOUT_MS}ms (record: ${recordPath})`,
     );
 
-    // 1. Probe file must hold exact expected content.
+    // 1. Probe file must hold exact expected content & route must be decided.
     assert.equal(readFileSync(probePath, "utf8").trim(), expectedLine);
+    assert.equal(finalRecord.routeDecided, true);
 
     // 2. Developer & (if required) Reviewers must be registered and completed/approved.
     const devNode = finalRecord.nodes.find((n) => n.role === "developer");

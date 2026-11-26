@@ -132,6 +132,10 @@ test("coordinator system prompt covers both languages, both complex modes, and o
         "coordinator prompt must mention paseo_team_complete",
       );
       assert.ok(
+        mentioned.includes("paseo_team_set_route"),
+        "coordinator prompt must mention paseo_team_set_route",
+      );
+      assert.ok(
         mentioned.includes("paseo_team_submit_delivery"),
         "coordinator prompt must mention paseo_team_submit_delivery",
       );
@@ -309,10 +313,13 @@ test("kickoff prompt, recovery brief, and turn handoff reminders stay structured
     teamName: "标准",
     complexMode: "simple",
     rosterLines: ['- Developer: provider="antigravity/gemini-4-neon"'],
+    userConstraints: ["- 用户已明确要求方案评审"],
     lang: "zh",
   });
   assert.match(zhKickoff, /\[Team 任务启动\]/);
   assert.match(zhKickoff, /create_agent/);
+  assert.match(zhKickoff, /paseo_team_set_route/);
+  assert.match(zhKickoff, /用户已明确要求方案评审/);
   assert.match(zhKickoff, /antigravity\/gemini-4-neon/);
 
   const enKickoff = buildKickoffPrompt({
@@ -321,10 +328,13 @@ test("kickoff prompt, recovery brief, and turn handoff reminders stay structured
     teamName: "Standard",
     complexMode: "expert",
     rosterLines: ['- Expert: provider="claude/claude-opus-5-5"'],
+    userConstraints: ["- User explicitly requested plan review"],
     lang: "en",
   });
   assert.match(enKickoff, /\[Team Kickoff\]/);
   assert.match(enKickoff, /mode: `expert`/);
+  assert.match(enKickoff, /paseo_team_set_route/);
+  assert.match(enKickoff, /User explicitly requested plan review/);
   assert.match(enKickoff, /claude\/claude-opus-5-5/);
 
   for (const toolName of [

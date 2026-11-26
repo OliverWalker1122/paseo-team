@@ -198,6 +198,9 @@ export interface TaskRecord {
   candidate: string | null;
   goal: string;
   isComplex: boolean;
+  /** False until the coordinator evaluates task complexity & locks the route (or dispatches a role). */
+  routeDecided?: boolean;
+  routeReason?: string;
   teamName: string;
   complexMode: ComplexMode;
   team: TeamPreset;
@@ -444,6 +447,7 @@ export function initTask(options: {
   teamName: string;
   preset: TeamPreset;
   isComplex?: boolean;
+  routeDecided?: boolean;
   requireReview?: boolean;
   requirePlanReview?: boolean;
   skipReviewReason?: string;
@@ -475,6 +479,7 @@ export function initTask(options: {
   mkdirSync(path.join(taskDir, "reviews"), { recursive: true, mode: 0o700 });
 
   const isComplex = Boolean(options.isComplex);
+  const routeDecided = options.routeDecided ?? true;
   const skipRequested = Boolean(options.skipReviewReason?.trim());
   const planReviewRequired =
     !skipRequested && (isComplex || Boolean(options.requirePlanReview));
@@ -490,6 +495,7 @@ export function initTask(options: {
     candidate: null,
     goal: options.goal.trim(),
     isComplex,
+    routeDecided,
     teamName: options.teamName,
     complexMode: options.preset.complexMode,
     team: options.preset,
@@ -924,6 +930,11 @@ function normalizeLoadedTaskRecord(
     candidate,
     goal,
     isComplex: Boolean(rawObj.isComplex),
+    routeDecided:
+      typeof rawObj.routeDecided === "boolean" ? rawObj.routeDecided : true,
+    ...(asNonEmptyString(rawObj.routeReason)
+      ? { routeReason: asNonEmptyString(rawObj.routeReason)! }
+      : {}),
     teamName,
     complexMode,
     team,
@@ -1111,6 +1122,173 @@ export function findTaskByAgentId(
   return matchIn(openTasks) ?? matchIn(recent);
 }
 
+function syncUnassignedNodesForRoute(record: TaskRecord, now: string): void {
+  const lang = detectPromptLanguage(record.goal, "en");
+  const zh = lang === "zh";
+
+  const coordNode = record.nodes.find((n) => n.nodeId === "coordinator");
+  if (coordNode) {
+    if (record.routeReason) {
+      coordNode.summary = record.routeReason;
+    }
+    coordNode.briefSummary =
+      record.complexMode === "simple" && record.isComplex
+        ? zh
+          ? "兼任架构设计 · 统筹目标、派发与验收"
+          : "Drafts design · Scopes, dispatches & adjudicates"
+        : zh
+          ? "目标拆解、派发协调与证据裁决"
+          : "Scopes goal, dispatches roles & adjudicates by evidence";
+    coordNode.updatedAt = now;
+  }
+
+  let expertNode = record.nodes.find((n) => n.role === "expert");
+  if (record.complexMode === "expert") {
+    if (!expertNode) {
+      expertNode = {
+        nodeId: "expert",
+        stage: "expert",
+        role: "expert",
+        slotIndex: 0,
+        label: zh ? "专家 Expert" : "Expert",
+        profile: formatRoleSpecShort(record.team.expert, lang),
+        briefSummary: "",
+        status: "pending",
+        updatedAt: now,
+      };
+      const coordIdx = record.nodes.findIndex(
+        (n) => n.nodeId === "coordinator",
+      );
+      record.nodes.splice(coordIdx >= 0 ? coordIdx + 1 : 0, 0, expertNode);
+    }
+    if (!expertNode.agentId) {
+      expertNode.status = record.isComplex ? "pending" : "skipped";
+      expertNode.briefSummary = record.isComplex
+        ? zh
+          ? "起草复杂方案与根因分析（只写任务目录）"
+          : "Drafts architecture & root-cause analysis in task dir"
+        : zh
+          ? "简单任务默认跳过"
+          : "Skipped for non-complex tasks";
+      expertNode.updatedAt = now;
+    }
+  } else if (expertNode && !expertNode.agentId) {
+    expertNode.status = "skipped";
+    expertNode.updatedAt = now;
+  }
+
+  for (const node of record.nodes) {
+    if (node.agentId) continue;
+    if (node.role === "plan-reviewer") {
+      const perspective =
+        node.perspective ??
+        assignReviewerPerspective(
+          node.slotIndex,
+          record.nodes.filter((n) => n.role === "plan-reviewer").length,
+        );
+      node.status = record.planReview === "required" ? "pending" : "skipped";
+      node.briefSummary =
+        record.planReview === "required"
+          ? zh
+            ? `首轮交叉审核 · ${reviewerPerspectiveLabel(perspective, "zh")}`
+            : `Cross review · ${reviewerPerspectiveLabel(perspective, "en")}`
+          : record.planReview === "waived"
+            ? zh
+              ? "用户已豁免方案审查"
+              : "Plan review waived by user"
+            : zh
+              ? "未触发方案审查"
+              : "Plan review not required";
+      node.updatedAt = now;
+    } else if (node.role === "code-reviewer") {
+      const perspective =
+        node.perspective ??
+        assignReviewerPerspective(
+          node.slotIndex,
+          record.nodes.filter((n) => n.role === "code-reviewer").length,
+        );
+      node.status = record.codeReview === "required" ? "pending" : "skipped";
+      node.briefSummary =
+        record.codeReview === "required"
+          ? zh
+            ? `候选代码审查 · ${reviewerPerspectiveLabel(perspective, "zh")}`
+            : `Cross review · ${reviewerPerspectiveLabel(perspective, "en")}`
+          : record.codeReview === "waived"
+            ? zh
+              ? "用户已豁免代码审查"
+              : "Code review waived by user"
+            : zh
+              ? "未触发代码审查"
+              : "Code review not required";
+      node.updatedAt = now;
+    }
+  }
+}
+
+export function setTaskRoute(
+  recordPath: string,
+  input: {
+    isComplex: boolean;
+    planReview: boolean;
+    codeReview: boolean;
+    useExpert?: boolean;
+    reason: string;
+  },
+): { record: TaskRecord; preserved: string[] } {
+  const record = loadTask(recordPath);
+  const now = new Date().toISOString();
+  const reason = input.reason.trim();
+  const preserved: string[] = [];
+
+  const hasPlanAgent = record.nodes.some(
+    (n) => n.role === "plan-reviewer" && Boolean(n.agentId),
+  );
+  const hasCodeAgent = record.nodes.some(
+    (n) => n.role === "code-reviewer" && Boolean(n.agentId),
+  );
+
+  // Never downgrade an already-required review (user-explicit or already dispatched).
+  if (record.planReview === "required" || hasPlanAgent) {
+    record.planReview = "required";
+    if (!input.planReview) {
+      preserved.push("planReview=required");
+    }
+  } else if (record.planReview === "waived" && !input.planReview) {
+    // Keep user waiver unless explicitly upgraded.
+  } else {
+    record.planReview = input.planReview ? "required" : "not-required";
+    record.planReviewReason = reason;
+  }
+
+  if (record.codeReview === "required" || hasCodeAgent) {
+    record.codeReview = "required";
+    if (!input.codeReview) {
+      preserved.push("codeReview=required");
+    }
+  } else if (record.codeReview === "waived" && !input.codeReview) {
+    // Keep user waiver unless explicitly upgraded.
+  } else {
+    record.codeReview = input.codeReview ? "required" : "not-required";
+    record.codeReviewReason = reason;
+  }
+
+  record.isComplex =
+    record.isComplex || input.isComplex || record.planReview === "required";
+
+  if (
+    input.useExpert === true &&
+    record.team.expert?.model &&
+    record.team.expert.model !== "auto"
+  ) {
+    record.complexMode = "expert";
+  }
+
+  record.routeDecided = true;
+  record.routeReason = reason;
+  syncUnassignedNodesForRoute(record, now);
+  return { record: saveTask(recordPath, record), preserved };
+}
+
 export function registerTaskAgent(
   recordPath: string,
   input: {
@@ -1140,9 +1318,21 @@ export function registerTaskAgent(
   if (stage === "plan-review" && record.planReview !== "required") {
     record.planReview = "required";
   }
+  if (stage === "expert") {
+    record.isComplex = true;
+  }
   if (stage === "code-review" && record.codeReview !== "required") {
     record.codeReview = "required";
     record.codeReviewReason = "triggered by coordinator dispatch";
+  }
+  // Fallback when a coordinator dispatches a role directly without calling paseo_team_set_route first.
+  if (record.routeDecided === false) {
+    record.routeDecided = true;
+    if (stage === "plan-review" || stage === "expert") {
+      record.isComplex = true;
+      record.planReview = "required";
+    }
+    syncUnassignedNodesForRoute(record, now);
   }
 
   const existingByAgent = record.nodes.find(
@@ -1464,6 +1654,12 @@ export function recordPlanSubmission(
   const n = (record.planSubmissions ?? 0) + 1;
   record.planSubmissions = n;
   record.planVersion = `v${n}`;
+  if (record.routeDecided === false) {
+    record.routeDecided = true;
+    record.isComplex = true;
+    record.planReview = "required";
+    syncUnassignedNodesForRoute(record, now);
+  }
   const node = input.agentId
     ? record.nodes.find((x) => x.agentId === input.agentId)
     : undefined;
@@ -1653,6 +1849,10 @@ export function recordCandidateDelivery(
     }
   }
 
+  if (record.routeDecided === false) {
+    record.routeDecided = true;
+    syncUnassignedNodesForRoute(record, now);
+  }
   if (record.codeReview === "not-required" || record.codeReview === "waived") {
     for (const n of record.nodes) {
       if (n.role === "code-reviewer" && !n.agentId) {
@@ -1694,6 +1894,11 @@ export function buildRecoveryBrief(record: TaskRecord): string {
     `# Task Recovery Brief [${record.taskId}] (${record.lifecycleStatus})`,
     `- Goal: ${record.goal}`,
     `- Preset/Mode: ${record.teamName} (${record.complexMode}) | Workspace: ${record.projectRoot}`,
+    `- Route: ${
+      record.routeDecided === false
+        ? "pending coordinator complexity assessment (call paseo_team_set_route)"
+        : `decided (isComplex=${record.isComplex}${record.routeReason ? `, reason: ${record.routeReason}` : ""})`
+    }`,
     `- Reviews: planReview=${record.planReview}(R${record.planReviewRound}/${2 + (record.extraRounds ?? 0)}) | codeReview=${record.codeReview}(R${record.codeReviewRound}/${2 + (record.extraRounds ?? 0)})`,
   ];
   if (record.circuitBroken) {

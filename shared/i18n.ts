@@ -320,6 +320,7 @@ export const UI_TEXT = {
 
     // Graph
     nativeTreeBadge: "Subagents of this chat",
+    routingPending: "Assessing complexity",
     presetBadge: (name: string, mode: string) =>
       `${name} · ${mode === "expert" ? "Expert plan" : "Chat plan"}`,
     ciLabel: "CI",
@@ -487,6 +488,7 @@ export const UI_TEXT = {
 
     // Graph
     nativeTreeBadge: "当前对话的子 Agent",
+    routingPending: "评估复杂度中",
     presetBadge: (name: string, mode: string) =>
       `${name} · ${mode === "expert" ? "专家起草方案" : "主控起草方案"}`,
     ciLabel: "CI",

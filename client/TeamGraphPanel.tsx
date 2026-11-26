@@ -1025,6 +1025,7 @@ function TaskFlowCanvas({
   }
 
   const isNativeTree = task.sourceKind === "native_subagents";
+  const isRoutingPending = !isNativeTree && task.routeDecided === false;
   const status = taskStatusInfo(lang, task);
   const metaParts = [
     isNativeTree
@@ -1032,15 +1033,17 @@ function TaskFlowCanvas({
       : t.presetBadge(task.teamName, task.complexMode),
     ...(isNativeTree
       ? []
-      : [
-          `${t.ciLabel} ${
-            task.ciStatus === "pass"
-              ? t.ciPass
-              : task.ciStatus === "waived"
-                ? t.ciWaived
-                : t.ciPending
-          }`,
-        ]),
+      : isRoutingPending
+        ? [t.routingPending]
+        : [
+            `${t.ciLabel} ${
+              task.ciStatus === "pass"
+                ? t.ciPass
+                : task.ciStatus === "waived"
+                  ? t.ciWaived
+                  : t.ciPending
+            }`,
+          ]),
     formatShortTime(task.updatedAt),
   ].filter(Boolean);
 
@@ -1218,7 +1221,9 @@ function TaskFlowCanvas({
               </Text>
             </View>
 
-            {task.skippedStageCount && task.skippedStageCount > 0 ? (
+            {!isRoutingPending &&
+            task.skippedStageCount &&
+            task.skippedStageCount > 0 ? (
               <Text
                 style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
               >
@@ -1226,6 +1231,19 @@ function TaskFlowCanvas({
               </Text>
             ) : null}
           </View>
+        ) : null}
+
+        {showGoal && !isRoutingPending && task.routeReason ? (
+          <Text
+            numberOfLines={2}
+            style={{
+              color: theme.colors.foregroundMuted,
+              fontSize: 12,
+              lineHeight: 17,
+            }}
+          >
+            {task.routeReason}
+          </Text>
         ) : null}
 
         {task.circuitBroken ? (

@@ -1268,4 +1268,72 @@ test("UI components: WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, and
   await new Promise((r) => setTimeout(r, 10));
   uiSandbox.renderer.rerender();
   assert.match(collectText(uiSandbox.renderer.root), /已完成历史任务/);
+
+  // 5. Route-first UI regression: before coordinator calls paseo_team_set_route, render only Coordinator
+  // with "评估复杂度中" (no premature CI or hidden-stages noise); after route is decided, render routeReason & expanded stages.
+  uiSandbox.renderer.render(panelVnode);
+  const pendingRouteTask = sampleTaskSnapshot({
+    taskId: "20261126-routing",
+    goal: "评估复杂架构改造",
+    routeDecided: false,
+    skippedStageCount: 0,
+    stages: [
+      {
+        stepId: "coordinator",
+        stageId: "coordinator",
+        stepNumber: 1,
+        title: "主控协调",
+        subtitle: "评估需求复杂度与执行路径",
+        stageStatus: "running",
+        nodes: [
+          {
+            nodeId: "coordinator",
+            stage: "coordinator",
+            role: "coordinator",
+            slotIndex: 0,
+            label: "主控 Coordinator",
+            profile: "claude/claude-opus-5-5",
+            agentId: "todo-coord-1",
+            briefSummary:
+              "正在结合上下文评估需求复杂度，决定是否启用方案评审与代码审查",
+            liveState: "running",
+            visualStatus: "running",
+            updatedAt: "2026-11-26T07:00:00.000Z",
+          },
+        ],
+      },
+    ],
+  });
+  uiSandbox.emitSubscription("paseo_team.conversation.watch", {
+    mode: "team_task",
+    viewerAgentId: "todo-coord-1",
+    rootAgentId: "todo-coord-1",
+    task: pendingRouteTask,
+  });
+  uiSandbox.renderer.rerender();
+  const routingText = collectText(uiSandbox.renderer.root);
+  assert.match(routingText, /评估复杂度中/);
+  assert.match(routingText, /主控 Coordinator/);
+  assert.doesNotMatch(routingText, /方案审查 #1/);
+  assert.doesNotMatch(routingText, /验收门禁/);
+  assert.doesNotMatch(routingText, /CI 待执行/);
+
+  // After coordinator calls paseo_team_set_route, the confirmed stages and routeReason render together.
+  uiSandbox.emitSubscription("paseo_team.conversation.watch", {
+    mode: "team_task",
+    viewerAgentId: "todo-coord-1",
+    rootAgentId: "todo-coord-1",
+    task: sampleTaskSnapshot({
+      taskId: "20261126-routing",
+      goal: "评估复杂架构改造",
+      routeDecided: true,
+      routeReason: "涉及跨模块存储迁移，启用方案评审与代码审查",
+    }),
+  });
+  uiSandbox.renderer.rerender();
+  const decidedText = collectText(uiSandbox.renderer.root);
+  assert.match(decidedText, /涉及跨模块存储迁移，启用方案评审与代码审查/);
+  assert.match(decidedText, /方案审查 #1/);
+  assert.match(decidedText, /验收门禁/);
+  assert.doesNotMatch(decidedText, /评估复杂度中/);
 });

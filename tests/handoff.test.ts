@@ -29,6 +29,7 @@ import {
   recordPlanSubmission,
   recordReviewVerdict,
   registerTaskAgent,
+  setTaskRoute,
 } from "../server/task-store.ts";
 
 process.env.SKIP_DOTENV = "true";
@@ -433,8 +434,21 @@ test("review phrases recognize code/plan modifiers and negations", () => {
   const plan = parseInlineTaskDirectives("需要方案审查");
   assert.equal(plan.requireReview, true);
   assert.equal(plan.requirePlanReview, true);
+  const planSynonym = parseInlineTaskDirectives("开始开发，需要方案评审");
+  assert.equal(planSynonym.requireReview, true);
+  assert.equal(planSynonym.requirePlanReview, true);
+  assert.equal(
+    parseInlineTaskDirectives("重构跨模块结算状态机").isComplex,
+    false,
+    "complexity must be judged by coordinator from full context, not blind regex keywords",
+  );
+  assert.equal(
+    parseInlineTaskDirectives("用专家模式重构结算状态机").isComplex,
+    true,
+  );
   for (const raw of [
     "不需要代码审查",
+    "不需要方案评审",
     "不要审查",
     "跳过代码审查",
     "skip code review",
@@ -444,6 +458,147 @@ test("review phrases recognize code/plan modifiers and negations", () => {
     assert.ok(parsed.skipReviewReason, raw);
     assert.equal(parsed.requireReview, undefined, raw);
   }
+});
+
+test("route-first workflow starts with coordinator only, expands on setTaskRoute without downgrading user locks, and falls back on direct dispatch", (t) => {
+  const baseDir = mkdtempSync(path.join(os.tmpdir(), "paseo-team-route-"));
+  t.after(() => rmSync(baseDir, { recursive: true, force: true }));
+  const cwd = path.join(baseDir, "workspace");
+  mkdirSync(cwd);
+  const stateRoot = path.join(baseDir, "state");
+
+  // 1. Pending route shows ONLY the Coordinator stage (no premature guessed placeholders).
+  const t1 = initTask({
+    cwd,
+    goal: "开始开发，但是先别部署。",
+    teamName: "标准",
+    preset,
+    routeDecided: false,
+    coordinatorAgentId: "coord-r1",
+    stateRoot,
+  });
+  const pendingSnap = toPipelineSnapshot(
+    t1.recordPath,
+    t1.record,
+    new Map(),
+    "zh",
+  );
+  assert.equal(pendingSnap.routeDecided, false);
+  assert.equal(pendingSnap.skippedStageCount, 0);
+  assert.deepEqual(
+    pendingSnap.stages.map((s) => s.stageId),
+    ["coordinator"],
+  );
+  assert.equal(pendingSnap.stages[0].subtitle, "评估需求复杂度与执行路径");
+
+  // 2. Coordinator declares complex route with planReview + codeReview -> expands confirmed pipeline and locks gates.
+  const decidedComplex = setTaskRoute(t1.recordPath, {
+    isComplex: true,
+    planReview: true,
+    codeReview: true,
+    reason: "涉及跨模块回测状态与资金风险，需先方案评审",
+  });
+  assert.deepEqual(decidedComplex.preserved, []);
+  const complexSnap = toPipelineSnapshot(
+    t1.recordPath,
+    decidedComplex.record,
+    new Map(),
+    "zh",
+  );
+  assert.equal(complexSnap.routeDecided, true);
+  assert.equal(
+    complexSnap.routeReason,
+    "涉及跨模块回测状态与资金风险，需先方案评审",
+  );
+  assert.deepEqual(
+    complexSnap.stages.map((s) => s.stageId),
+    ["coordinator", "plan-review", "development", "code-review", "merge-gate"],
+  );
+  assert.equal(
+    inspectQualityGate({ recordPath: t1.recordPath }).checks
+      .planReviewSatisfied,
+    false,
+  );
+
+  // 3. Explicit user planReview requirement cannot be downgraded by setTaskRoute.
+  const t2 = initTask({
+    cwd,
+    goal: "修改接口，需要方案评审",
+    teamName: "标准",
+    preset,
+    requireReview: true,
+    requirePlanReview: true,
+    routeDecided: false,
+    coordinatorAgentId: "coord-r2",
+    stateRoot,
+  });
+  const lockedRes = setTaskRoute(t2.recordPath, {
+    isComplex: false,
+    planReview: false,
+    codeReview: false,
+    reason: "看起来改幅较小",
+  });
+  assert.deepEqual(lockedRes.preserved, [
+    "planReview=required",
+    "codeReview=required",
+  ]);
+  assert.equal(lockedRes.record.planReview, "required");
+  assert.equal(lockedRes.record.codeReview, "required");
+
+  // 4. Simple route (planReview=false, codeReview=false) cleanly hides both review stages.
+  const t3 = initTask({
+    cwd,
+    goal: "改一个按钮文案",
+    teamName: "标准",
+    preset,
+    routeDecided: false,
+    coordinatorAgentId: "coord-r3",
+    stateRoot,
+  });
+  const simpleRes = setTaskRoute(t3.recordPath, {
+    isComplex: false,
+    planReview: false,
+    codeReview: false,
+    reason: "单文件文案微调，低风险",
+  });
+  const simpleSnap = toPipelineSnapshot(
+    t3.recordPath,
+    simpleRes.record,
+    new Map(),
+    "zh",
+  );
+  assert.deepEqual(
+    simpleSnap.stages.map((s) => s.stageId),
+    ["coordinator", "development", "merge-gate"],
+  );
+
+  // 5. Fallback: if a coordinator dispatches Developer directly without calling setTaskRoute, graph still expands cleanly.
+  const t4 = initTask({
+    cwd,
+    goal: "直接派发兜底验证",
+    teamName: "标准",
+    preset,
+    routeDecided: false,
+    coordinatorAgentId: "coord-r4",
+    stateRoot,
+  });
+  const afterDev = registerTaskAgent(t4.recordPath, {
+    role: "developer",
+    agentId: "dev-fallback",
+    profile: "auto",
+    briefSummary: "Direct dispatch",
+  });
+  assert.equal(afterDev.routeDecided, true);
+  const fallbackSnap = toPipelineSnapshot(
+    t4.recordPath,
+    afterDev,
+    new Map(),
+    "zh",
+  );
+  assert.deepEqual(
+    fallbackSnap.stages.map((s) => s.stageId),
+    ["coordinator", "development", "merge-gate"],
+  );
 });
 
 test("idle unsubmitted members stay pending and round history shows the latest verdict", (t) => {
@@ -739,6 +894,14 @@ test("permission hook auto-allows coordinator read-only checks and scoped child 
   assert.equal(
     isAutoAllowedTeamTool("coordinator", "paseo.create_agent"),
     true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("coordinator", "mcp_paseo_paseo_team_set_route"),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("developer", "mcp_paseo_paseo_team_set_route"),
+    false,
   );
   // Non-coordinators must never be auto-allowed coordinator management tools.
   assert.equal(

@@ -49,14 +49,16 @@ export function buildCoordinatorSystemPrompt(options: {
       }`,
       "",
       "## 2. 确定性状态机工具（禁止手改 task.json）",
+      "- **第一步先判复杂度并定路线**：结合当前对话的完整上下文与代码库，先调用 `paseo_team_set_route`（可与首个 `create_agent` 同轮调用）声明 `isComplex`、是否启用 `planReview`（方案评审）、是否启用 `codeReview`（代码审查）及一句话理由。状态图会在路线落盘后一次性展开确定的后续阶段并锁定对应验收门禁；若用户已明确要求某项审查，不可降级取消。",
       `- 通过 Paseo \`create_agent\` 派生子会话（使用启动消息给定的 \`provider\` 与 \`settings\`，不传其他 \`workspaceId\`，附带 \`labels: { "task": "${options.taskId}", "role": "developer|plan-reviewer|code-reviewer|expert" }\`）。插件会自动登记节点、注入角色规则与安全红线，简报里不必重复。派发子会话后立即结束本轮，等待 Paseo 自动送达完成通知，不要轮询子会话或反复检查工作区/证据目录。`,
       "- **成员自己提交交接结果**：Developer 用 `paseo_team_submit_delivery`，Expert 用 `paseo_team_submit_plan`，审查员用 `paseo_team_submit_review`。格式不对或 CI 未通过时工具会直接退回给成员；成员结束时没提交，插件会提醒一次。等 Developer 提交交付后再派发代码审查（无交付时代码审查工具会拒收）。",
       "- **代录只是兜底**：成员回复会自动转给你，但交接由成员自己提交。只有插件提醒过一次、成员仍未提交，才用 `paseo_team_record_delivery` / `paseo_team_record_review` 按其回复代录；提醒在途或成员已提交时工具会拒绝，等它下一条回复即可。派出审查员即视为该阶段需要审查。",
       "- 自己起草方案时（simple 模式），写好文件后调用 `paseo_team_submit_plan`。",
       "- 最后调用 `paseo_team_complete`。未通过时它会逐条列出缺什么、该找谁，照着补齐即可。",
       "",
-      "## 3. 对抗性交叉审核与两轮硬熔断",
-      "- **代码审查触发（由主控判断）**：复杂任务、用户要求，或改动 >200 行 / >5 文件、涉存储/API/依赖/配置、架构影响非“无”时应开启。",
+      "## 3. 复杂度判定、对抗性交叉审核与两轮硬熔断",
+      "- **方案评审触发（由主控结合上下文判断）**：涉及跨模块/架构/存储/协议变更、并发/资金/事务风险、根因未明、存在多方案取舍，或用户明确要求时，应将 `planReview` 设为 `true`（先起草方案并通过独立方案评审，再派发 Developer）；需求明确且改动局部低风险时可跳过方案评审直接进入开发。",
+      "- **代码审查触发（由主控判断）**：复杂任务、用户要求，或预计/实际改动 >200 行 / >5 文件、涉存储/API/依赖/配置、架构影响非“无”时应开启。",
       "- **首轮独立交叉审核**：并行向每位审查员发送独立简报，不透露主控倾向与他人意见。",
       "- **两轮上限**：方案、代码阶段各自最多 2 轮（首轮 + 1 轮修订复审；裁决后让审查员复审同一交付也算一轮）。第 2 轮仍未通过或超出轮次时，工具照常登记结论但返回 `CIRCUIT_BROKEN` 并标记任务待用户裁定：此时停止打补丁，整理五行以内的取舍选项交用户决定。",
       "",
@@ -81,14 +83,16 @@ export function buildCoordinatorSystemPrompt(options: {
     }`,
     "",
     "## 2. Deterministic State-Machine Tools (Never hand-edit task.json)",
+    "- **Assess complexity & declare route first**: using the full conversation history and codebase context, call `paseo_team_set_route` first (can be called in the same turn as your first `create_agent`) to declare `isComplex`, `planReview`, `codeReview`, and a concise one-line `reason`. The workflow graph expands to the confirmed stages and locks required quality gates once the route is recorded; never downgrade an explicit user review request.",
     `- Dispatch subagents via Paseo \`create_agent\` using the \`provider\` and \`settings\` from the kickoff roster (omit \`workspaceId\` to stay in this workspace) with \`labels: { "task": "${options.taskId}", "role": "developer|plan-reviewer|code-reviewer|expert" }\`. The plugin registers the node and injects role rules and safety rules, so briefs need not repeat them. End your turn immediately after dispatching subagents so Paseo can deliver their completion notifications; do not poll them or repeatedly inspect the workspace/evidence directory while they run.`,
     "- **Members hand off themselves**: Developer calls `paseo_team_submit_delivery`, Expert `paseo_team_submit_plan`, reviewers `paseo_team_submit_review`. The tools bounce wrong formats or failing CI straight back to the member, and the plugin reminds a member once if its turn ends without a submission. Dispatch Code Reviewers only after the Developer submits a delivery (code review submission is rejected before a delivery exists).",
     "- **Recording on a member's behalf is a fallback**: a member's reply is forwarded to you, but the member submits its own handoff. Use `paseo_team_record_delivery` / `paseo_team_record_review` only after the plugin reminded the member once and it still did not submit; while a reminder is pending or after the member submitted, the tools refuse, so wait for its next reply. Dispatching a reviewer makes that review stage required.",
     "- When you draft the plan yourself (simple mode), write the file and call `paseo_team_submit_plan`.",
     "- Finish with `paseo_team_complete`. If it is blocked it lists each missing item and whom to chase.",
     "",
-    "## 3. Adversarial Cross Review & 2-Round Circuit Breaker",
-    "- **Code review triggers (your call)**: complex tasks, explicit user request, or changes >200 lines / >5 files, storage/API/dependency/config changes, or non-trivial architecture impact.",
+    "## 3. Complexity Assessment, Adversarial Cross Review & 2-Round Circuit Breaker",
+    "- **Plan review triggers (your call from full context)**: set `planReview: true` for cross-module/architectural/storage/protocol design, concurrency/financial/transaction risk, unclear root causes, non-trivial trade-offs, or explicit user request (draft the plan and get independent plan review approval before coding). Skip plan review (`planReview: false`) for clear, localized, low-risk changes.",
+    "- **Code review triggers (your call)**: complex tasks, explicit user request, or expected/actual changes >200 lines / >5 files, storage/API/dependency/config changes, or non-trivial architecture impact.",
     "- **Independent round 1**: send independent briefs to each reviewer in parallel without leaking your preference or peer opinions.",
     "- **2-round limit**: max 2 rounds per stage (R1 + 1 revision R2; asking a reviewer to re-check the same delivery after your ruling also counts as a round). If R2 still fails or a round exceeds the limit, the verdict is still recorded but `CIRCUIT_BROKEN` is returned and the task is flagged for the user: stop patching and present <=5 lines of clear trade-off options.",
     "",
@@ -256,21 +260,30 @@ export function buildKickoffPrompt(options: {
   teamName: string;
   complexMode: "expert" | "simple";
   rosterLines: string[];
+  userConstraints?: string[];
   lang?: UiLanguage;
 }): string {
   const lang = options.lang ?? "en";
+  const constraintsBlock =
+    options.userConstraints && options.userConstraints.length > 0
+      ? lang === "zh"
+        ? ["", "### 用户已明确指定约束", ...options.userConstraints]
+        : ["", "### Explicit User Constraints", ...options.userConstraints]
+      : [];
   if (lang === "zh") {
     return [
       `[Team 任务启动] task_id=\`${options.taskId}\``,
       `任务目标：${options.goal}`,
       `生效预设：\`${options.teamName}\`（模式：\`${options.complexMode}\`）`,
+      ...constraintsBlock,
       "",
       "### 成员派发参数（create_agent 原样传入 provider、settings 与 labels，不传 workspaceId）",
       ...options.rosterLines,
       "",
       "### 主控执行要点",
+      "- **第一步先判复杂度再展开流程**：结合本对话完整上下文与仓库现状，先调用 `paseo_team_set_route` 判定 `isComplex`、是否需要 `planReview`（方案评审：跨模块/架构/存储/并发/资金/根因未明/多方案取舍或用户要求时开启）与 `codeReview`（代码审查）并给出一句话理由；状态图会在判定落盘后展开确定的后续阶段（可与首个 `create_agent` 同轮调用）。",
       "- 当前对话直接作为主控（Coordinator）：主控不自己改业务代码或跑测试套件；通过 `create_agent` 按上方给定的 `provider`、`settings` 和 `labels` 派发成员（同工作区同一时刻只派 1 名 Developer），派发后立即结束本轮等待自动完成通知，不要轮询。",
-      "- 插件会根据 `labels` 自动向成员注入角色指引、安全红线与专属提交工具：Developer 修改后调 `paseo_team_run_check` 跑测试再调 `paseo_team_submit_delivery`；收到交付后再并行派发代码审查员调 `paseo_team_submit_review`（代录工具 `paseo_team_record_*` 仅在插件提醒后成员仍未提交时兜底）。",
+      "- 插件会根据 `labels` 自动向成员注入角色指引、安全红线与专属提交工具：需方案评审时先起草方案并调 `paseo_team_submit_plan` + 派发 Plan Reviewer；Developer 修改后调 `paseo_team_run_check` 跑测试再调 `paseo_team_submit_delivery`；收到交付后再并行派发 Code Reviewer 调 `paseo_team_submit_review`（代录工具 `paseo_team_record_*` 仅在插件提醒后成员仍未提交时兜底）。",
       "- 全部必需检查与审查通过后，调用 `paseo_team_complete` 完成验收闭环。",
     ].join("\n");
   }
@@ -278,13 +291,15 @@ export function buildKickoffPrompt(options: {
     `[Team Kickoff] task_id=\`${options.taskId}\``,
     `Goal: ${options.goal}`,
     `Active Preset: \`${options.teamName}\` (mode: \`${options.complexMode}\`)`,
+    ...constraintsBlock,
     "",
     "### Member Routing (pass provider, settings, and labels as-is to create_agent; omit workspaceId)",
     ...options.rosterLines,
     "",
     "### Coordinator Essentials",
+    "- **Assess complexity & declare route first**: using this chat's full context and the codebase, call `paseo_team_set_route` first (can be in the same turn as your first `create_agent`) to decide `isComplex`, `planReview` (enable for architectural/cross-module/storage/concurrency/financial/unclear-RCA work or explicit user request), and `codeReview`, with a concise one-line `reason`. The graph expands once the route is recorded.",
     "- This chat is the Coordinator: do not edit repository files or run full test suites yourself. Spawn subagents via `create_agent` with the exact `provider`, `settings`, and `labels` above (one Developer writing at a time), then end your turn immediately and wait for completion callbacks without polling.",
-    "- The plugin uses `labels` to inject each member's role prompt, safety rules, and handoff tools: Developer runs `paseo_team_run_check` then calls `paseo_team_submit_delivery`; dispatch Code Reviewers in parallel after delivery so each calls `paseo_team_submit_review` (`paseo_team_record_*` is fallback only after a reminder).",
+    "- The plugin uses `labels` to inject each member's role prompt, safety rules, and handoff tools: if plan review is required, write/submit the plan via `paseo_team_submit_plan` and dispatch Plan Reviewers before coding; Developer runs `paseo_team_run_check` then calls `paseo_team_submit_delivery`; dispatch Code Reviewers in parallel after delivery so each calls `paseo_team_submit_review` (`paseo_team_record_*` is fallback only after a reminder).",
     "- Once all required checks and reviews pass, call `paseo_team_complete` to close out the task.",
   ].join("\n");
 }
