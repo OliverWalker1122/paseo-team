@@ -13,8 +13,6 @@ import {
   AUTO_MODEL,
   createEmptyConfig,
   defaultConfigPath,
-  defaultStateRoot,
-  formatRoleSpecShort,
   loadConfig,
   migrateConfig,
   normalizeRoleSpec,
@@ -26,24 +24,11 @@ import {
 process.env.SKIP_DOTENV = "true";
 process.env.DOTENV_CONFIG_PATH = "/dev/null";
 
-test("createEmptyConfig, formatRoleSpecShort, and normalizeRoleSpec handle valid and legacy inputs", () => {
+test("createEmptyConfig and normalizeRoleSpec handle valid and legacy inputs", () => {
   const empty = createEmptyConfig();
   assert.equal(empty.schemaVersion, 5);
   assert.equal(empty.default, "Standard");
   assert.equal(empty.teams.Standard.developer.model, AUTO_MODEL);
-
-  assert.equal(formatRoleSpecShort(undefined, "en"), "Not set");
-  assert.equal(formatRoleSpecShort(undefined, "zh"), "未设置");
-  assert.equal(formatRoleSpecShort("auto", "en"), "Not set");
-  assert.equal(formatRoleSpecShort("codex/gpt-6", "en"), "codex/gpt-6");
-  assert.equal(
-    formatRoleSpecShort({ model: "claude/opus", thinking: "high" }, "zh"),
-    "claude/opus · high",
-  );
-  assert.equal(
-    formatRoleSpecShort({ model: "claude/opus", thinking: "auto" }, "en"),
-    "claude/opus",
-  );
 
   assert.deepEqual(normalizeRoleSpec("bare-profile"), { model: AUTO_MODEL });
   assert.deepEqual(normalizeRoleSpec("codex/gpt-6"), { model: "codex/gpt-6" });
@@ -160,18 +145,13 @@ test("migrateConfig upgrades v3/v4 schemas to v5 and resolves effective teams", 
   assert.throws(() => saveConfig(migrated, symPath), /symlinked/);
 });
 
-test("defaultConfigPath and defaultStateRoot respect XDG overrides", (t) => {
+test("defaultConfigPath respects XDG_CONFIG_HOME overrides", (t) => {
   const prevCfg = process.env.XDG_CONFIG_HOME;
-  const prevState = process.env.XDG_STATE_HOME;
   t.after(() => {
     if (prevCfg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = prevCfg;
-    if (prevState === undefined) delete process.env.XDG_STATE_HOME;
-    else process.env.XDG_STATE_HOME = prevState;
   });
 
   process.env.XDG_CONFIG_HOME = "/tmp/xdg-cfg";
-  process.env.XDG_STATE_HOME = "/tmp/xdg-state";
   assert.equal(defaultConfigPath(), "/tmp/xdg-cfg/paseo-team/config.json");
-  assert.equal(defaultStateRoot(), "/tmp/xdg-state/paseo-team");
 });

@@ -10,7 +10,6 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { UiLanguage } from "../shared/i18n.ts";
 
 export type ComplexMode = "expert" | "simple";
 
@@ -40,31 +39,10 @@ export interface PaseoTeamConfig {
 /** Stored marker for a role with no model picked yet; tasks refuse to start until it is set. */
 export const AUTO_MODEL = "auto";
 
-export function formatRoleSpecShort(
-  spec: RoleModelSpec | string | undefined,
-  lang: UiLanguage = "en",
-): string {
-  const unset = lang === "en" ? "Not set" : "未设置";
-  if (!spec) return unset;
-  if (typeof spec === "string") return spec === AUTO_MODEL ? unset : spec;
-  if (!spec.model || spec.model === AUTO_MODEL) return unset;
-  return spec.thinking && spec.thinking !== "auto"
-    ? `${spec.model} · ${spec.thinking}`
-    : spec.model;
-}
-
 export function defaultConfigPath(): string {
   const xdg = process.env.XDG_CONFIG_HOME?.trim();
   const base = xdg ? path.resolve(xdg) : path.join(os.homedir(), ".config");
   return path.join(base, "paseo-team", "config.json");
-}
-
-export function defaultStateRoot(): string {
-  const xdg = process.env.XDG_STATE_HOME?.trim();
-  const base = xdg
-    ? path.resolve(xdg)
-    : path.join(os.homedir(), ".local", "state");
-  return path.join(base, "paseo-team");
 }
 
 // Resolves the main repository root so all git worktrees share one project key.
@@ -348,12 +326,6 @@ export function resolveEffectiveTeam(
   options?: {
     teamOverride?: string;
     complexModeOverride?: ComplexMode;
-    roleOverrides?: Partial<
-      Pick<
-        TeamPreset,
-        "developer" | "planReviewers" | "codeReviewers" | "expert"
-      >
-    >;
   },
 ): EffectiveTeamResolution {
   const projectKey = resolveProjectKey(cwd);
@@ -396,18 +368,6 @@ export function resolveEffectiveTeam(
     planReviewers: effectivePlanReviewers,
     ...(options?.complexModeOverride
       ? { complexMode: options.complexModeOverride }
-      : {}),
-    ...(options?.roleOverrides?.developer
-      ? { developer: options.roleOverrides.developer }
-      : {}),
-    ...(options?.roleOverrides?.planReviewers
-      ? { planReviewers: [...options.roleOverrides.planReviewers] }
-      : {}),
-    ...(options?.roleOverrides?.codeReviewers
-      ? { codeReviewers: [...options.roleOverrides.codeReviewers] }
-      : {}),
-    ...(options?.roleOverrides?.expert
-      ? { expert: options.roleOverrides.expert }
       : {}),
   };
 

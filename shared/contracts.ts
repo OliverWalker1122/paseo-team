@@ -117,7 +117,6 @@ export const GraphNodeSchema = z.object({
 export const GraphLayerSchema = z.object({
   layerId: z.string(),
   title: z.string(),
-  subtitle: z.string().optional(),
   status: z.enum(["running", "awaiting_permission", "error", "idle"]),
   nodes: z.array(GraphNodeSchema),
 });

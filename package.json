@@ -46,7 +46,6 @@
     "test:coverage": "node scripts/coverage.mjs --min-lines=80",
     "coverage:badge": "node scripts/coverage.mjs --write-badge --min-lines=80",
     "test:e2e": "PASEO_E2E_LIVE=1 node --test tests/e2e/live-paseo.test.mjs",
-    "test:e2e:all": "PASEO_E2E_LIVE=1 PASEO_E2E_SUITE=all node --test tests/e2e/live-paseo.test.mjs",
     "test": "npm run test:unit && npm run test:integration",
     "ci": "npm run check && npm test"
   },
