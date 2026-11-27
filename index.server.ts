@@ -72,16 +72,36 @@ function parsePerspective(raw: string | undefined): ReviewerPerspective {
 
 type LiveMapListener = (liveMap: Map<string, LiveAgentRecord>) => void;
 
+const ACTIVE_RECONCILE_INTERVAL_MS = 15_000;
+
 interface SharedAgentHub {
   listeners: Set<LiveMapListener>;
   liveMap: Map<string, LiveAgentRecord> | null;
   debounce: ReturnType<typeof setTimeout> | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  reconcileTimer: ReturnType<typeof setInterval> | null;
   unsubStream: (() => void) | null;
   unsubLocal: (() => void) | null;
   unsubConfig: (() => void) | null;
   releaseStream: (() => Promise<void>) | null;
   disposed: boolean;
+}
+
+function hasActiveAgents(
+  liveMap: Map<string, LiveAgentRecord> | null,
+): boolean {
+  if (!liveMap) return false;
+  for (const agent of liveMap.values()) {
+    if (agent.background || agent.archivedAt) continue;
+    if (
+      agent.status === "running" ||
+      agent.status === "initializing" ||
+      agent.status === "awaiting_permission"
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -106,6 +126,10 @@ function createLiveAgentHubManager() {
       clearTimeout(hub.retryTimer);
       hub.retryTimer = null;
     }
+    if (hub.reconcileTimer) {
+      clearInterval(hub.reconcileTimer);
+      hub.reconcileTimer = null;
+    }
     hub.unsubStream?.();
     hub.unsubStream = null;
     hub.unsubLocal?.();
@@ -120,8 +144,30 @@ function createLiveAgentHubManager() {
     hub.listeners.clear();
   };
 
-  const broadcastNow = (hub: SharedAgentHub) => {
+  const syncReconcileTimer = (paseo: PaseoApi, hub: SharedAgentHub) => {
+    if (hub.disposed) return;
+    const needsReconcile =
+      hub.listeners.size > 0 && hasActiveAgents(hub.liveMap);
+    if (needsReconcile && !hub.reconcileTimer) {
+      const timer = setInterval(() => {
+        if (hub.disposed || hub.listeners.size === 0) return;
+        void fetchLiveAgentMap(paseo).then((fresh) => {
+          if (hub.disposed) return;
+          hub.liveMap = fresh;
+          broadcastNow(paseo, hub);
+        });
+      }, ACTIVE_RECONCILE_INTERVAL_MS);
+      if (typeof timer.unref === "function") timer.unref();
+      hub.reconcileTimer = timer;
+    } else if (!needsReconcile && hub.reconcileTimer) {
+      clearInterval(hub.reconcileTimer);
+      hub.reconcileTimer = null;
+    }
+  };
+
+  const broadcastNow = (paseo: PaseoApi, hub: SharedAgentHub) => {
     if (hub.disposed || !hub.liveMap) return;
+    syncReconcileTimer(paseo, hub);
     const snapshot = hub.liveMap;
     for (const listener of hub.listeners) {
       try {
@@ -132,11 +178,11 @@ function createLiveAgentHubManager() {
     }
   };
 
-  const scheduleBroadcast = (hub: SharedAgentHub) => {
+  const scheduleBroadcast = (paseo: PaseoApi, hub: SharedAgentHub) => {
     if (hub.disposed || hub.debounce) return;
     hub.debounce = setTimeout(() => {
       hub.debounce = null;
-      broadcastNow(hub);
+      broadcastNow(paseo, hub);
     }, 80);
   };
 
@@ -152,13 +198,13 @@ function createLiveAgentHubManager() {
         const rec = toLiveAgentRecord(payload.agent);
         if (rec) {
           hub.liveMap.set(rec.id, rec);
-          scheduleBroadcast(hub);
+          scheduleBroadcast(paseo, hub);
         }
         return;
       }
       if (payload.kind === "remove" && typeof payload.agentId === "string") {
         if (hub.liveMap.delete(payload.agentId)) {
-          scheduleBroadcast(hub);
+          scheduleBroadcast(paseo, hub);
         }
       }
     };
@@ -167,7 +213,7 @@ function createLiveAgentHubManager() {
       void fetchLiveAgentMap(paseo).then((fresh) => {
         if (hub.disposed) return;
         hub.liveMap = fresh;
-        broadcastNow(hub);
+        broadcastNow(paseo, hub);
       });
     };
 
@@ -208,7 +254,7 @@ function createLiveAgentHubManager() {
           }
 
           hub.liveMap = parseAgentEntriesToMap(res.entries);
-          broadcastNow(hub);
+          broadcastNow(paseo, hub);
 
           if (maybeSub && typeof maybeSub.subscribe === "function") {
             hub.releaseStream = maybeSub.release
@@ -218,7 +264,7 @@ function createLiveAgentHubManager() {
               snapshot: (snap) => {
                 if (hub.disposed) return;
                 hub.liveMap = parseAgentEntriesToMap(snap?.entries);
-                broadcastNow(hub);
+                broadcastNow(paseo, hub);
               },
               update: (msg) => {
                 if (msg?.type === "agent_update" && msg.payload) {
@@ -260,7 +306,7 @@ function createLiveAgentHubManager() {
     };
 
     hub.unsubConfig = subscribeConfigChanges(() => {
-      if (hub.liveMap) broadcastNow(hub);
+      if (hub.liveMap) broadcastNow(paseo, hub);
       else refreshViaFetch();
     });
 
@@ -281,6 +327,7 @@ function createLiveAgentHubManager() {
           liveMap: null,
           debounce: null,
           retryTimer: null,
+          reconcileTimer: null,
           unsubStream: null,
           unsubLocal: null,
           unsubConfig: null,

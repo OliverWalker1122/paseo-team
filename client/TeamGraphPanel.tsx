@@ -98,6 +98,7 @@ function statusMeta(
   theme: PluginTheme,
   lang: UiLanguage,
   status: LiveAgentStatusDto,
+  role?: AgentRoleDto,
 ) {
   const t = UI_TEXT[lang];
   switch (status) {
@@ -154,7 +155,7 @@ function statusMeta(
         labelColor: theme.colors.foreground,
         pillBg: theme.colors.surface0,
         pillBorder: theme.colors.border,
-        label: t.statusIdle,
+        label: role && role !== "coordinator" ? t.statusDone : t.statusIdle,
       };
   }
 }
@@ -268,7 +269,7 @@ function NodeCard({
   compact: boolean;
   onSelect: () => void;
 }) {
-  const pal = statusMeta(theme, lang, node.status);
+  const pal = statusMeta(theme, lang, node.status, node.role);
   const isActive =
     node.status === "running" ||
     node.status === "initializing" ||
@@ -421,7 +422,7 @@ function NodeInspectorCard({
   onOpenAgent?: OpenAgentFn;
 }) {
   const t = UI_TEXT[lang];
-  const pal = statusMeta(theme, lang, node.status);
+  const pal = statusMeta(theme, lang, node.status, node.role);
   const metaLine = [
     node.modelBadge,
     pal.label,
@@ -603,8 +604,13 @@ function AgentTreeCanvas({
               <StatusChip
                 theme={theme}
                 dotColor={theme.colors.statusSuccess}
+                borderColor={
+                  tree.totalAgents > 1
+                    ? theme.colors.statusSuccess
+                    : theme.colors.border
+                }
                 textColor={theme.colors.foreground}
-                label={t.statusIdle}
+                label={tree.totalAgents > 1 ? t.statusDone : t.statusIdle}
               />
             ) : null}
             <StatusChip
@@ -707,6 +713,133 @@ function AgentTreeCanvas({
             </View>
           );
         })}
+
+        {tree.totalAgents > 1 && tree.runningCount === 0 ? (
+          <View style={{ width: "100%", alignItems: "center" }}>
+            <View style={{ alignItems: "center", paddingVertical: 4 }}>
+              <View
+                style={{
+                  width: 2,
+                  height: 16,
+                  backgroundColor: theme.colors.border,
+                }}
+              />
+              <Text
+                style={{
+                  color: theme.colors.foregroundMuted,
+                  fontSize: 11,
+                  fontWeight: "600",
+                  paddingVertical: 3,
+                }}
+              >
+                {tree.attentionCount > 0
+                  ? t.terminalErrorStage
+                  : t.terminalStage}
+              </Text>
+              <View
+                style={{
+                  width: 2,
+                  height: 12,
+                  backgroundColor: theme.colors.border,
+                }}
+              />
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              disabled={!onOpenAgent}
+              onPress={() => onOpenAgent?.({ agentId: tree.rootAgentId })}
+              style={({ hovered }: HoverState) => ({
+                width: compact ? "100%" : 320,
+                maxWidth: 380,
+                paddingHorizontal: 16,
+                paddingVertical: 12,
+                borderRadius: 14,
+                borderWidth: 1.5,
+                borderColor:
+                  tree.attentionCount > 0
+                    ? theme.colors.statusWarning
+                    : theme.colors.statusSuccess,
+                backgroundColor:
+                  hovered && onOpenAgent
+                    ? theme.colors.surface2
+                    : theme.colors.surface1,
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 12,
+              })}
+            >
+              <View
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 16,
+                  backgroundColor: theme.colors.surface0,
+                  borderWidth: 1,
+                  borderColor:
+                    tree.attentionCount > 0
+                      ? theme.colors.statusWarning
+                      : theme.colors.statusSuccess,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <Icon
+                  name={
+                    tree.attentionCount > 0 ? "AlertTriangle" : "CheckCircle2"
+                  }
+                  size={16}
+                  color={
+                    tree.attentionCount > 0
+                      ? theme.colors.statusWarning
+                      : theme.colors.statusSuccess
+                  }
+                />
+              </View>
+              <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                  }}
+                >
+                  <Text
+                    numberOfLines={1}
+                    style={{
+                      color: theme.colors.foreground,
+                      fontSize: 14,
+                      fontWeight: "700",
+                    }}
+                  >
+                    {tree.attentionCount > 0
+                      ? t.terminalErrorTitle
+                      : t.terminalTitle}
+                  </Text>
+                  <Text
+                    style={{
+                      color: theme.colors.foregroundMuted,
+                      fontSize: 11.5,
+                    }}
+                  >
+                    {formatShortTime(tree.updatedAt)}
+                  </Text>
+                </View>
+                <Text
+                  numberOfLines={2}
+                  style={{
+                    color: theme.colors.foregroundMuted,
+                    fontSize: 12,
+                  }}
+                >
+                  {tree.attentionCount > 0
+                    ? t.terminalErrorSubtitle
+                    : t.terminalSubtitle}
+                </Text>
+              </View>
+            </Pressable>
+          </View>
+        ) : null}
 
         {!selectedNode ? (
           <Text

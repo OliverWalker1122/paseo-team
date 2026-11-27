@@ -980,6 +980,44 @@ test("WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, TeamConfigView, an
   assert.doesNotMatch(graphText, /主控 Coordinator/);
   assert.match(graphText, /开发者/);
   assert.match(graphText, /运行中/);
+  // Running tree must NOT render the terminal completion node yet
+  assert.doesNotMatch(graphText, /协作完成/);
+
+  // Finished subagent cards show "已完成", and once all nodes finish the terminal "协作完成" node renders and jumps to Coordinator
+  assert.match(graphText, /已完成/);
+  uiSandbox.emitSubscription("paseo_team.conversation.watch", {
+    viewerAgentId: "coord-1",
+    rootAgentId: "coord-1",
+    tree: sampleTree({
+      runningCount: 0,
+      attentionCount: 0,
+      layers: sampleTree().layers.map((l) => ({
+        ...l,
+        status: "idle" as const,
+        nodes: l.nodes.map((n) => ({ ...n, status: "idle" as const })),
+      })),
+    }),
+  });
+  uiSandbox.renderer.rerender();
+  const doneGraphText = collectText(uiSandbox.renderer.root);
+  assert.match(doneGraphText, /结果汇总/);
+  assert.match(doneGraphText, /协作完成/);
+  const doneTerminalCard = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Pressable" && collectText(n).includes("协作完成"),
+  )[0];
+  assert.ok(doneTerminalCard);
+  (doneTerminalCard.props.onPress as () => void)();
+  assert.equal(openedAgents.at(-1)?.agentId, "coord-1");
+  openedAgents.length = 0;
+
+  // Restore running sampleTree for the node-click checks below
+  uiSandbox.emitSubscription("paseo_team.conversation.watch", {
+    viewerAgentId: "coord-1",
+    rootAgentId: "coord-1",
+    tree: sampleTree(),
+  });
+  uiSandbox.renderer.rerender();
 
   // Click Developer node to inspect and open chat
   const devCard = findNodes(
