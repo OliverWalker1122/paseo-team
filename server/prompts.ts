@@ -12,6 +12,14 @@ export type ReviewerPerspective =
 export const COORDINATOR_ACTIVATION_HINT =
   'Paseo Team: if a user message starts with `/paseo-team` (without a `[Team 任务启动]` / `[Team Kickoff]` block), IMMEDIATELY load and call the `paseo_team` tool with `action: "start"` and `rawArgs` set to everything after `/paseo-team` as your FIRST action, then follow its returned protocol and dispatch members via `create_agent` — never edit repository files directly or claim `/paseo-team` is uninstalled.';
 
+/**
+ * One-shot auto-start directive attached in `agent.open.before` only when the
+ * user explicitly enabled the composer Team toggle (`paseo-team.enabled: true`)
+ * on a new workspace or draft chat that has no active task yet.
+ */
+export const COORDINATOR_AUTO_START_HINT =
+  'Paseo Team mode is ENABLED for this new chat. On the FIRST user message (while no Paseo Team task is active yet), IMMEDIATELY load and call the `paseo_team` tool with `action: "start"` and `rawArgs` set to the user\'s full request as your VERY FIRST action BEFORE reading/editing files, inspecting the repo, or running commands — then follow its returned protocol and dispatch members via `create_agent`. Never implement the request yourself as Coordinator. (Applies only to the first message that kicks off the task; follow-up replies during or after the task must not call `action: "start"` again unless the user explicitly invokes `/paseo-team`.)';
+
 export const SAFETY_RULES_EN = `### Security & Credential Redlines (Mandatory)
 Never read, search, copy, print, or upload \`.env\` (including \`.env.*\`, \`.envrc\`, etc.) or any secret files; never run \`env\`, \`printenv\`, \`set\`, \`export -p\`, or dump all environment variables; only check whether specific required variable names are \`configured\`/\`missing\`. Isolate formatting, linting, and unit tests from real credentials (\`SKIP_DOTENV=true\`, \`DOTENV_CONFIG_PATH=/dev/null\`). Real API checks may only load credentials internally via audited project code that never logs secrets. Existing credentials never authorize trading, deployment, messaging, or mutating remote data. When spawning any subagent outside this plugin, pass these security redlines along.`;
 

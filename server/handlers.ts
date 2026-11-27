@@ -6,14 +6,16 @@ import {
   type AgentToolDefinition,
 } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import type {
-  ConfigBundleDto,
-  ConversationGraphPayloadDto,
-  PipelineNodeViewDto,
-  PipelineStageColumnDto,
-  PipelineTaskSnapshotDto,
-  ProviderCatalogItemDto,
-  ProviderModelOptionDto,
+import {
+  type ConfigBundleDto,
+  type ConversationGraphPayloadDto,
+  type PipelineNodeViewDto,
+  type PipelineStageColumnDto,
+  type PipelineTaskSnapshotDto,
+  type ProviderCatalogItemDto,
+  type ProviderModelOptionDto,
+  TEAM_ENABLED_METADATA_KEY,
+  TEAM_TASK_METADATA_KEY,
 } from "../shared/contracts.ts";
 import {
   detectPromptLanguage,
@@ -2009,11 +2011,12 @@ async function prepareTeamTaskKickoff(
   if (typeof coordHandle.setMetadata === "function") {
     await coordHandle
       .setMetadata({
-        "paseo-team.task": {
+        [TEAM_TASK_METADATA_KEY]: {
           taskId: created.record.taskId,
           recordPath: created.recordPath,
           role: "coordinator",
         },
+        [TEAM_ENABLED_METADATA_KEY]: null,
       })
       .catch(() => {});
   }
@@ -2129,7 +2132,7 @@ function resolveCoordinatorRecordPath(
     { agent?: { id?: string; metadata?: Record<string, unknown> } } | undefined,
 ): string | null {
   if (fixedRecordPath) return fixedRecordPath;
-  const meta = context?.agent?.metadata?.["paseo-team.task"];
+  const meta = context?.agent?.metadata?.[TEAM_TASK_METADATA_KEY];
   const metaObj =
     meta && typeof meta === "object" && !Array.isArray(meta)
       ? (meta as Record<string, unknown>)
@@ -2170,7 +2173,7 @@ export function createCoordinatorTool(
     name: "paseo_team",
     title: "Paseo Team Coordinator",
     description:
-      'Paseo Team coordinator tool. If a user message invokes `/paseo-team <goal>` directly without a `[Team 任务启动]` / `[Team Kickoff]` kickoff block, IMMEDIATELY call action="start" with rawArgs="<everything after /paseo-team>" BEFORE reading/editing files or running commands (never claim /paseo-team is uninstalled). Otherwise use only during an active Paseo Team task: set_route, update, complete, summary.',
+      'Paseo Team coordinator tool. If Paseo Team mode is enabled for this chat or a user message invokes `/paseo-team <goal>` directly without a `[Team 任务启动]` / `[Team Kickoff]` kickoff block, IMMEDIATELY call action="start" with rawArgs="<the goal and flags>" BEFORE reading/editing files or running commands (never claim /paseo-team is uninstalled). Otherwise use only during an active Paseo Team task: set_route, update, complete, summary.',
     input: coordinatorToolInputSchema,
     async execute(args, context) {
       if (args.action === "start") {
@@ -2242,6 +2245,12 @@ export function createCoordinatorTool(
             text: `${nextStepBanner}\n\n${prepared.kickoffPrompt}`,
           };
         } catch (err) {
+          const handle = paseo.agents.ref(agentId);
+          if (typeof handle.setMetadata === "function") {
+            await handle
+              .setMetadata({ [TEAM_ENABLED_METADATA_KEY]: null })
+              .catch(() => {});
+          }
           return {
             text: err instanceof Error ? err.message : String(err),
             isError: true,

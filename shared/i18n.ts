@@ -377,6 +377,7 @@ export const UI_TEXT = {
     badgeRunning: (n: number) => `Team · ${n} running`,
     kickoffDetails: "Details",
     kickoffHide: "Hide",
+    composerTeamToggle: "Team mode",
   },
   zh: {
     // Navigation
@@ -545,5 +546,6 @@ export const UI_TEXT = {
     badgeRunning: (n: number) => `团队 · ${n} 运行中`,
     kickoffDetails: "展开参数",
     kickoffHide: "收起",
+    composerTeamToggle: "团队模式",
   },
 } as const;

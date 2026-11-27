@@ -7,6 +7,8 @@ import {
   listTasksRpc,
   saveConfigRpc,
   startTeamTaskRpc,
+  TEAM_ENABLED_METADATA_KEY,
+  TEAM_TASK_METADATA_KEY,
   watchConversationGraphSubscription,
   watchTasksSubscription,
 } from "./shared/contracts.ts";
@@ -27,6 +29,7 @@ import {
   buildExpertPrompt,
   buildReviewerPrompt,
   COORDINATOR_ACTIVATION_HINT,
+  COORDINATOR_AUTO_START_HINT,
 } from "./server/prompts.ts";
 import { inspectQualityGate } from "./server/quality-gate.ts";
 import {
@@ -438,7 +441,7 @@ export default function contribute(server: PluginServerContext) {
   });
 
   cleanups.push(
-    server.addHook("agent.create.after", async ({ agent }) => {
+    server.addHook("agent.create.after", async ({ agent }, { paseo }) => {
       try {
         if (!agent.parentAgentId || findTaskByAgentId(agent.id)) return;
         const parentMatch = findTaskByAgentId(agent.parentAgentId);
@@ -450,7 +453,7 @@ export default function contribute(server: PluginServerContext) {
           return;
         }
 
-        const meta = agent.metadata?.["paseo-team.task"];
+        const meta = agent.metadata?.[TEAM_TASK_METADATA_KEY];
         const metaRole =
           meta && typeof meta === "object" && !Array.isArray(meta)
             ? String((meta as Record<string, unknown>).role ?? "")
@@ -472,6 +475,20 @@ export default function contribute(server: PluginServerContext) {
           provider: agent.provider,
           briefSummary: stripRolePrefix(agent.title) || `Running ${childRole}`,
         });
+        if (metaRole !== childRole) {
+          const childHandle = paseo.agents.ref(agent.id);
+          if (typeof childHandle.setMetadata === "function") {
+            await childHandle
+              .setMetadata({
+                [TEAM_TASK_METADATA_KEY]: {
+                  taskId: parentMatch.record.taskId,
+                  recordPath: parentMatch.recordPath,
+                  role: childRole,
+                },
+              })
+              .catch(() => {});
+          }
+        }
         notifyTaskChanges();
       } catch (err) {
         console.error("[paseo-team] agent.create.after error:", err);
@@ -486,7 +503,7 @@ export default function contribute(server: PluginServerContext) {
           return undefined;
         }
 
-        const meta = request.metadata?.["paseo-team.task"];
+        const meta = request.metadata?.[TEAM_TASK_METADATA_KEY];
         const metaObj =
           meta && typeof meta === "object" && !Array.isArray(meta)
             ? (meta as Record<string, unknown>)
@@ -685,28 +702,35 @@ export default function contribute(server: PluginServerContext) {
         }
 
         // Attach the single compact `paseo_team` coordinator tool and tiny static
-        // activation hint persistently on interactive top-level chats. Because both
-        // are fixed from initial open, starting `/paseo-team` needs zero reload and
-        // preserves 100% of the prompt cache (including on providers that defer MCP schemas).
+        // activation hint persistently on interactive top-level chats. When the user
+        // explicitly enabled the composer Team toggle on a new workspace / draft chat,
+        // also attach the one-shot auto-start directive so the first prompt kicks off
+        // Team mode without requiring `/paseo-team`.
+        const autoStartEnabled =
+          !recordPath && request.metadata?.[TEAM_ENABLED_METADATA_KEY] === true;
         const existingTools = request.tools ?? [];
         const hasTeamTool = existingTools.some((t) => t.name === "paseo_team");
         const existingPrompts = request.appendSystemPrompt ?? [];
-        const hasActivationHint = existingPrompts.includes(
-          COORDINATOR_ACTIVATION_HINT,
-        );
-        if (hasTeamTool && hasActivationHint) {
+        const promptsToAppend: string[] = [];
+        if (!existingPrompts.includes(COORDINATOR_ACTIVATION_HINT)) {
+          promptsToAppend.push(COORDINATOR_ACTIVATION_HINT);
+        }
+        if (
+          autoStartEnabled &&
+          !existingPrompts.includes(COORDINATOR_AUTO_START_HINT)
+        ) {
+          promptsToAppend.push(COORDINATOR_AUTO_START_HINT);
+        }
+        if (hasTeamTool && promptsToAppend.length === 0) {
           return undefined;
         }
         return {
           ...request,
-          ...(hasActivationHint
-            ? {}
-            : {
-                appendSystemPrompt: [
-                  ...existingPrompts,
-                  COORDINATOR_ACTIVATION_HINT,
-                ],
-              }),
+          ...(promptsToAppend.length > 0
+            ? {
+                appendSystemPrompt: [...existingPrompts, ...promptsToAppend],
+              }
+            : {}),
           ...(hasTeamTool
             ? {}
             : { tools: [...existingTools, createCoordinatorTool()] }),

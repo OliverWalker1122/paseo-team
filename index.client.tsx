@@ -6,6 +6,7 @@ import {
 } from "@getpaseo/plugin/client";
 import { SidebarRow, WorkspaceRowBadge } from "@getpaseo/plugin/client/ui";
 import { useMemo, useState } from "react";
+import { TeamComposerToggle } from "./client/composer-item.tsx";
 import { registerTeamComposerPills } from "./client/composer-pill.tsx";
 import {
   KICKOFF_TIMELINE_KIND,
@@ -130,6 +131,15 @@ export default function contribute(client: PluginClientContext) {
   );
 
   cleanups.push(registerTeamComposerPills(client));
+
+  if (typeof client.addComposerItem === "function") {
+    cleanups.push(
+      client.addComposerItem({
+        id: "team-mode",
+        Component: TeamComposerToggle,
+      }),
+    );
+  }
 
   if (
     typeof client.addTimelineTransformer === "function" &&

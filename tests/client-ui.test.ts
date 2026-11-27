@@ -239,6 +239,7 @@ const uiSandbox = {
     Set<{ input: unknown; onEvent: (ev: unknown) => void }>
   >(),
   toasts: [] as Array<{ message: string; variant?: string }>,
+  composer: null as Record<string, unknown> | null,
   emitSubscription(name: string, event: unknown) {
     for (const sub of this.subListeners.get(name) ?? []) {
       sub.onEvent(event);
@@ -252,6 +253,7 @@ const uiSandbox = {
     this.rpcHandlers.clear();
     this.subListeners.clear();
     this.toasts.length = 0;
+    this.composer = null;
   },
 };
 
@@ -333,6 +335,10 @@ registerHooks({
           export function useTranslation() {
             return { locale: sb().locale };
           }
+          export function useComposer() {
+            if (!sb().composer) throw new Error("Missing mock composer in UI test");
+            return sb().composer;
+          }
           export function useWorkspace(workspaceId, selector) {
             const ws = sb().workspaces.get(workspaceId) || { id: workspaceId, directory: "", name: workspaceId };
             return selector(ws);
@@ -376,6 +382,7 @@ registerHooks({
           export const SettingsSelect = "SettingsSelect";
           export const SettingsSwitch = "SettingsSwitch";
           export const TextInput = "TextInput";
+          export const Toggle = "Toggle";
           export const Modal = Object.assign(
             function Modal(props) {
               if (!props.open) return null;
@@ -566,6 +573,7 @@ function createClientMock() {
   const rowBadges: Array<Record<string, unknown>> = [];
   const commandItems: Array<Record<string, unknown>> = [];
   const slashCommands: Array<Record<string, unknown>> = [];
+  const composerItems: Array<Record<string, unknown>> = [];
   const timelineTransformers: Array<Record<string, unknown>> = [];
   const timelineRenderers: Array<Record<string, unknown>> = [];
   const openedPanels: Array<{
@@ -702,6 +710,13 @@ function createClientMock() {
         if (i >= 0) slashCommands.splice(i, 1);
       };
     },
+    addComposerItem(c: Record<string, unknown>) {
+      composerItems.push(c);
+      return () => {
+        const i = composerItems.indexOf(c);
+        if (i >= 0) composerItems.splice(i, 1);
+      };
+    },
     addTimelineTransformer(c: Record<string, unknown>) {
       timelineTransformers.push(c);
       return () => {
@@ -753,6 +768,7 @@ function createClientMock() {
     rowBadges,
     commandItems,
     slashCommands,
+    composerItems,
     timelineTransformers,
     timelineRenderers,
     openedPanels,
@@ -1581,4 +1597,230 @@ test("UI timeline renderer: collapses /paseo-team kickoff prompts into compact g
   cleanup();
   assert.equal(mock.timelineTransformers.length, 0);
   assert.equal(mock.timelineRenderers.length, 0);
+});
+
+test("UI regression: composer Team toggle handles new-workspace/draft metadata, existing-agent slash prefix, and hides on subagents", async () => {
+  uiSandbox.reset();
+  const {
+    addTeamSlashPrefix,
+    hasTeamSlashPrefix,
+    stripTeamSlashPrefix,
+    TEAM_ENABLED_METADATA_KEY,
+    TEAM_TASK_METADATA_KEY,
+  } = await import("../shared/contracts.ts");
+
+  assert.equal(hasTeamSlashPrefix(""), false);
+  assert.equal(hasTeamSlashPrefix("/paseo-team"), true);
+  assert.equal(hasTeamSlashPrefix("  /PASEO-TEAM fix bug"), true);
+  assert.equal(hasTeamSlashPrefix("/paseo-team-other"), false);
+  assert.equal(addTeamSlashPrefix(""), "/paseo-team ");
+  assert.equal(addTeamSlashPrefix("  fix bug"), "/paseo-team fix bug");
+  assert.equal(
+    addTeamSlashPrefix("/paseo-team fix bug"),
+    "/paseo-team fix bug",
+  );
+  assert.equal(stripTeamSlashPrefix("/paseo-team "), "");
+  assert.equal(stripTeamSlashPrefix("/paseo-team fix bug"), "fix bug");
+  assert.equal(stripTeamSlashPrefix("  /PASEO-TEAM\nfix bug"), "fix bug");
+  assert.equal(stripTeamSlashPrefix("fix bug"), "fix bug");
+
+  const clientEntry = await import("../index.client.tsx");
+  const mock = createClientMock();
+  const cleanup = clientEntry.default(mock.client as never);
+
+  assert.equal(mock.composerItems.length, 1);
+  assert.equal(mock.composerItems[0].id, "team-mode");
+  const TeamToggle = mock.composerItems[0].Component as () => unknown;
+
+  const makeMockComposer = (opts: {
+    context: "new-workspace" | "draft" | "agent";
+    prompt?: string;
+    metadata?: Record<string, unknown>;
+    rejectFocus?: boolean;
+  }) => {
+    const state = {
+      context: opts.context,
+      prompt: opts.prompt ?? "",
+      metadata: { ...(opts.metadata ?? {}) },
+      focusCalls: [] as unknown[],
+      metadataPatches: [] as Array<Record<string, unknown>>,
+    };
+    const composer = {
+      get context() {
+        return state.context;
+      },
+      get prompt() {
+        return state.prompt;
+      },
+      attachments: [],
+      agent: {
+        provider: "claude",
+        model: "claude-opus-5-5",
+        mode: "auto",
+        thinking: "high",
+        options: {},
+        get metadata() {
+          return state.metadata;
+        },
+      },
+      setPrompt(text: string) {
+        state.prompt = text;
+      },
+      insertText(text: string) {
+        state.prompt += text;
+      },
+      async focus(options?: unknown) {
+        state.focusCalls.push(options);
+        if (opts.rejectFocus) throw new Error("focus unavailable");
+      },
+      async setMetadata(patch: Record<string, unknown>) {
+        state.metadataPatches.push(patch);
+        for (const [k, v] of Object.entries(patch)) {
+          if (v === null) delete state.metadata[k];
+          else state.metadata[k] = v;
+        }
+      },
+    };
+    return { state, composer };
+  };
+
+  // 1. New Workspace screen: toggles metadata without polluting prompt text.
+  const nw = makeMockComposer({
+    context: "new-workspace",
+    prompt: "实现设置按钮和半透明背景",
+  });
+  uiSandbox.locale = "zh-CN";
+  uiSandbox.composer = nw.composer;
+  uiSandbox.renderer.render({ __vnode: true, type: TeamToggle, props: {} });
+  let toggleNode = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Toggle",
+  )[0];
+  assert.ok(toggleNode, "expected Toggle rendered on new-workspace");
+  assert.equal(toggleNode.props.title, "团队模式");
+  assert.equal(toggleNode.props.icon, "Workflow");
+  assert.equal(toggleNode.props.value, false);
+
+  await (
+    toggleNode.props.onValueChange as (e: { value: boolean }) => Promise<void>
+  )({ value: true });
+  assert.equal(nw.state.metadata[TEAM_ENABLED_METADATA_KEY], true);
+  assert.equal(
+    nw.state.prompt,
+    "实现设置按钮和半透明背景",
+    "new-workspace toggle must keep composer prompt clean",
+  );
+  uiSandbox.renderer.rerender();
+  toggleNode = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Toggle",
+  )[0];
+  assert.equal(toggleNode.props.value, true);
+
+  // Turning OFF clears metadata (and strips manual /paseo-team prefix if typed).
+  nw.state.prompt = "/paseo-team 实现设置按钮";
+  uiSandbox.renderer.rerender();
+  toggleNode = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Toggle",
+  )[0];
+  await (
+    toggleNode.props.onValueChange as (e: { value: boolean }) => Promise<void>
+  )({ value: false });
+  assert.equal(nw.state.metadata[TEAM_ENABLED_METADATA_KEY], undefined);
+  assert.equal(nw.state.prompt, "实现设置按钮");
+
+  // 2. Draft chat in English locale behaves identically via metadata.
+  const draft = makeMockComposer({ context: "draft", prompt: "" });
+  uiSandbox.locale = "en-US";
+  uiSandbox.composer = draft.composer;
+  uiSandbox.renderer.render({ __vnode: true, type: TeamToggle, props: {} });
+  toggleNode = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Toggle",
+  )[0];
+  assert.equal(toggleNode.props.title, "Team mode");
+  assert.equal(toggleNode.props.value, false);
+  await (
+    toggleNode.props.onValueChange as (e: { value: boolean }) => Promise<void>
+  )({ value: true });
+  assert.equal(draft.state.metadata[TEAM_ENABLED_METADATA_KEY], true);
+  assert.equal(draft.state.prompt, "");
+
+  // 3. Existing agent chat: toggles `/paseo-team ` prefix so submit triggers client slash command.
+  const existing = makeMockComposer({
+    context: "agent",
+    prompt: "修复登录超时",
+    metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+    rejectFocus: true,
+  });
+  uiSandbox.composer = existing.composer;
+  uiSandbox.renderer.render({ __vnode: true, type: TeamToggle, props: {} });
+  toggleNode = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Toggle",
+  )[0];
+  assert.equal(toggleNode.props.value, false);
+
+  await (
+    toggleNode.props.onValueChange as (e: { value: boolean }) => Promise<void>
+  )({ value: true });
+  assert.equal(existing.state.prompt, "/paseo-team 修复登录超时");
+  assert.equal(existing.state.focusCalls.length, 1);
+
+  uiSandbox.renderer.rerender();
+  toggleNode = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Toggle",
+  )[0];
+  assert.equal(toggleNode.props.value, true);
+
+  await (
+    toggleNode.props.onValueChange as (e: { value: boolean }) => Promise<void>
+  )({ value: false });
+  assert.equal(existing.state.prompt, "修复登录超时");
+  assert.equal(existing.state.metadata[TEAM_ENABLED_METADATA_KEY], undefined);
+
+  // Empty prompt in existing chat inserts "/paseo-team " and moves cursor to end.
+  const emptyAgent = makeMockComposer({ context: "agent", prompt: "" });
+  uiSandbox.composer = emptyAgent.composer;
+  uiSandbox.renderer.render({ __vnode: true, type: TeamToggle, props: {} });
+  toggleNode = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Toggle",
+  )[0];
+  await (
+    toggleNode.props.onValueChange as (e: { value: boolean }) => Promise<void>
+  )({ value: true });
+  assert.equal(emptyAgent.state.prompt, "/paseo-team ");
+  assert.deepEqual(emptyAgent.state.focusCalls[0], {
+    selection: { start: 12, end: 12 },
+  });
+
+  // 4. Hidden on team subagents; visible on coordinator chats.
+  const devSub = makeMockComposer({
+    context: "agent",
+    metadata: {
+      [TEAM_TASK_METADATA_KEY]: { taskId: "t1", role: "developer" },
+    },
+  });
+  uiSandbox.composer = devSub.composer;
+  uiSandbox.renderer.render({ __vnode: true, type: TeamToggle, props: {} });
+  assert.equal(uiSandbox.renderer.root, null);
+
+  const coordAgent = makeMockComposer({
+    context: "agent",
+    metadata: {
+      [TEAM_TASK_METADATA_KEY]: { taskId: "t1", role: "coordinator" },
+    },
+  });
+  uiSandbox.composer = coordAgent.composer;
+  uiSandbox.renderer.render({ __vnode: true, type: TeamToggle, props: {} });
+  assert.equal(
+    findNodes(uiSandbox.renderer.root, (n) => n.type === "Toggle").length,
+    1,
+  );
+
+  cleanup();
+  assert.equal(mock.composerItems.length, 0);
 });

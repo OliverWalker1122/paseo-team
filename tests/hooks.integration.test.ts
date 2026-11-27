@@ -1953,3 +1953,217 @@ test("L2 integration: draft-chat /paseo-team fallback via paseo_team(action='sta
   assert.ok(third.taskId);
   assert.notEqual(third.taskId, recovered.taskId);
 });
+
+test("composer Team toggle metadata auto-starts on first open, clears flag on start/error, and tags subagent metadata", async (t) => {
+  const h = createPluginHarness(t);
+  const { TEAM_ENABLED_METADATA_KEY, TEAM_TASK_METADATA_KEY } =
+    await import("../shared/contracts.ts");
+  const { COORDINATOR_ACTIVATION_HINT, COORDINATOR_AUTO_START_HINT } =
+    await import("../server/prompts.ts");
+
+  saveConfig({
+    schemaVersion: 5,
+    default: "标准",
+    teams: { 标准: samplePreset },
+    projects: {},
+  });
+
+  // 1. Plain top-level chat without toggle receives activation hint only (no auto-start directive).
+  const normalOpen = (await h.invokeHook("agent.open.before", {
+    request: {
+      agentId: "normal-chat-1",
+      workspaceId: "wks_nw",
+      provider: "claude",
+      cwd: h.workspaceDir,
+      reason: "create",
+      purpose: "interactive",
+      title: "普通对话",
+      background: false,
+      labels: {},
+      metadata: {},
+      appendSystemPrompt: [],
+      tools: [],
+      env: {},
+      mcpServers: {},
+    },
+  })) as { appendSystemPrompt?: string[]; tools?: Array<{ name: string }> };
+  assert.ok(
+    normalOpen.appendSystemPrompt?.includes(COORDINATOR_ACTIVATION_HINT),
+  );
+  assert.equal(
+    normalOpen.appendSystemPrompt?.includes(COORDINATOR_AUTO_START_HINT),
+    false,
+  );
+
+  // 2. New Workspace / draft chat with Team toggle ON receives COORDINATOR_AUTO_START_HINT.
+  const nwAgentId = "new-workspace-team-1";
+  h.agentDirectory.set(nwAgentId, {
+    id: nwAgentId,
+    workspaceId: "wks_nw",
+    cwd: h.workspaceDir,
+    provider: "claude",
+    model: "claude-opus-5-5",
+    status: "running",
+    parentAgentId: null,
+    metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+  });
+  const toggleOpen = (await h.invokeHook("agent.open.before", {
+    request: {
+      agentId: nwAgentId,
+      workspaceId: "wks_nw",
+      provider: "claude",
+      cwd: h.workspaceDir,
+      reason: "create",
+      purpose: "interactive",
+      title: "实现暗色主题切换",
+      background: false,
+      labels: {},
+      metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+      appendSystemPrompt: [],
+      tools: [],
+      env: {},
+      mcpServers: {},
+    },
+  })) as {
+    appendSystemPrompt?: string[];
+    tools?: Array<{
+      name: string;
+      execute: (
+        args: Record<string, unknown>,
+        ctx: Record<string, unknown>,
+      ) => Promise<{ text: string; isError?: boolean }>;
+    }>;
+  };
+  assert.ok(
+    toggleOpen.appendSystemPrompt?.includes(COORDINATOR_ACTIVATION_HINT),
+  );
+  assert.ok(
+    toggleOpen.appendSystemPrompt?.includes(COORDINATOR_AUTO_START_HINT),
+  );
+
+  // 3. Model invokes `paseo_team(action="start")` with raw natural-language goal (no `/paseo-team` prefix).
+  const teamTool = toggleOpen.tools?.find((x) => x.name === "paseo_team");
+  assert.ok(teamTool);
+  const startRes = await teamTool.execute(
+    { action: "start", rawArgs: "实现暗色主题切换" },
+    {
+      agent: {
+        id: nwAgentId,
+        workspaceId: "wks_nw",
+        parentAgentId: null,
+        provider: "claude",
+        cwd: h.workspaceDir,
+        title: "实现暗色主题切换",
+        background: false,
+        metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+      },
+      paseo: h.paseo,
+    },
+  );
+  assert.notEqual(startRes.isError, true);
+  assert.match(startRes.text, /\[Team 任务启动\]/);
+  assert.match(startRes.text, /实现暗色主题切换/);
+
+  // Flag must be cleared on start while task metadata is written.
+  const nwMeta = h.agentDirectory.get(nwAgentId)?.metadata as Record<
+    string,
+    unknown
+  >;
+  assert.equal(nwMeta[TEAM_ENABLED_METADATA_KEY], null);
+  const taskMeta = nwMeta[TEAM_TASK_METADATA_KEY] as {
+    taskId: string;
+    recordPath: string;
+    role: string;
+  };
+  assert.equal(taskMeta.role, "coordinator");
+
+  // 4. Subsequent resume does NOT inject COORDINATOR_AUTO_START_HINT even if stale flag lingers.
+  const resumeOpen = (await h.invokeHook("agent.open.before", {
+    request: {
+      agentId: nwAgentId,
+      workspaceId: "wks_nw",
+      provider: "claude",
+      cwd: h.workspaceDir,
+      reason: "resume",
+      purpose: "interactive",
+      title: "实现暗色主题切换",
+      background: false,
+      labels: {},
+      metadata: {
+        [TEAM_TASK_METADATA_KEY]: taskMeta,
+        [TEAM_ENABLED_METADATA_KEY]: true,
+      },
+      appendSystemPrompt: [],
+      tools: [],
+      env: {},
+      mcpServers: {},
+    },
+  })) as { appendSystemPrompt?: string[] };
+  assert.equal(
+    resumeOpen.appendSystemPrompt?.includes(COORDINATOR_AUTO_START_HINT),
+    false,
+  );
+
+  // 5. Subagent created by coordinator gets TEAM_TASK_METADATA_KEY so composer hides Team toggle.
+  h.agentDirectory.set("nw-dev-1", {
+    id: "nw-dev-1",
+    workspaceId: "wks_nw",
+    cwd: h.workspaceDir,
+    provider: "antigravity",
+    parentAgentId: nwAgentId,
+    title: "Developer: 暗色主题切换",
+    metadata: {},
+  });
+  await h.invokeHook("agent.create.after", {
+    agent: {
+      id: "nw-dev-1",
+      workspaceId: "wks_nw",
+      parentAgentId: nwAgentId,
+      provider: "antigravity",
+      cwd: h.workspaceDir,
+      title: "Developer: 暗色主题切换",
+      background: false,
+      metadata: {},
+    },
+  });
+  const devMeta = (
+    h.agentDirectory.get("nw-dev-1")?.metadata as Record<string, unknown>
+  )[TEAM_TASK_METADATA_KEY] as { role?: string; taskId?: string };
+  assert.equal(devMeta?.role, "developer");
+  assert.equal(devMeta?.taskId, taskMeta.taskId);
+
+  // 6. If a second chat with Team toggle ON fails to start (active task conflict), its flag is cleared.
+  const conflictChatId = "new-workspace-team-conflict";
+  h.agentDirectory.set(conflictChatId, {
+    id: conflictChatId,
+    workspaceId: "wks_nw",
+    cwd: h.workspaceDir,
+    provider: "claude",
+    status: "running",
+    parentAgentId: null,
+    metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+  });
+  const failedStart = await teamTool.execute(
+    { action: "start", rawArgs: "并发第二个任务" },
+    {
+      agent: {
+        id: conflictChatId,
+        workspaceId: "wks_nw",
+        parentAgentId: null,
+        provider: "claude",
+        cwd: h.workspaceDir,
+        title: "并发第二个任务",
+        background: false,
+        metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+      },
+      paseo: h.paseo,
+    },
+  );
+  assert.equal(failedStart.isError, true);
+  assert.equal(
+    (h.agentDirectory.get(conflictChatId)?.metadata as Record<string, unknown>)[
+      TEAM_ENABLED_METADATA_KEY
+    ],
+    null,
+  );
+});

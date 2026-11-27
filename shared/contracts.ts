@@ -1,6 +1,23 @@
 import { defineRpc, defineSubscription } from "@getpaseo/plugin";
 import { z } from "zod";
 
+export const TEAM_ENABLED_METADATA_KEY = "paseo-team.enabled";
+export const TEAM_TASK_METADATA_KEY = "paseo-team.task";
+
+export function hasTeamSlashPrefix(prompt: string): boolean {
+  return /^\s*\/paseo-team(?:\s|$)/i.test(prompt);
+}
+
+export function addTeamSlashPrefix(prompt: string): string {
+  if (hasTeamSlashPrefix(prompt)) return prompt;
+  const trimmed = prompt.trimStart();
+  return trimmed ? `/paseo-team ${trimmed}` : "/paseo-team ";
+}
+
+export function stripTeamSlashPrefix(prompt: string): string {
+  return prompt.replace(/^\s*\/paseo-team(?:[ \t]+|\r?\n|$)/i, "");
+}
+
 export const UiLanguageSchema = z.enum(["en", "zh"]);
 export const ComplexModeSchema = z.enum(["expert", "simple"]);
 
