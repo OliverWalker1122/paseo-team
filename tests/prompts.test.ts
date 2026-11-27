@@ -11,6 +11,7 @@ import {
 } from "../server/handlers.ts";
 import {
   assignReviewerPerspective,
+  buildCoordinatorReminderNotice,
   buildCoordinatorSystemPrompt,
   buildDeveloperPrompt,
   buildExpertPrompt,
@@ -137,6 +138,7 @@ test("coordinator system prompt covers both languages, both complex modes, and o
       assert.match(prompt, /action:\s*"record_review"/);
       assert.match(prompt, /action:\s*"complete"/);
       assert.match(prompt, /action:\s*"summary"/);
+      assert.match(prompt, /action:\s*"resolve_breaker"/);
       assert.ok(
         mentioned.includes("paseo_team_submit_delivery"),
         "coordinator prompt must mention paseo_team_submit_delivery",
@@ -300,6 +302,8 @@ test("kickoff prompt, recovery brief, and turn handoff reminders stay structured
   assert.match(brief, /agentId=dev-99/);
   assert.match(brief, /agentId=rev-99/);
   assert.match(brief, /reuse existing agentIds/);
+  assert.match(brief, /Latest Code Review Findings/);
+  assert.match(brief, /blocking: a\.ts:1 still missing check/);
 
   const zhKickoff = buildKickoffPrompt({
     taskId: "t-kick-zh",
@@ -315,8 +319,10 @@ test("kickoff prompt, recovery brief, and turn handoff reminders stay structured
   assert.match(zhKickoff, /create_agent/);
   assert.match(zhKickoff, /`paseo_team`/);
   assert.match(zhKickoff, /action: "set_route"/);
+  assert.match(zhKickoff, /action: "resolve_breaker"/);
   assert.match(zhKickoff, /action: "complete"/);
   assert.match(zhKickoff, /CIRCUIT_BROKEN/);
+  assert.match(zhKickoff, /paseo_team_\*/);
   assert.match(zhKickoff, /\/tmp\/evidence\/t-kick-zh/);
   assert.ok(zhKickoff.includes(SAFETY_RULES_ZH));
   assert.match(zhKickoff, /用户已明确要求方案评审/);
@@ -336,12 +342,37 @@ test("kickoff prompt, recovery brief, and turn handoff reminders stay structured
   assert.match(enKickoff, /mode: `expert`/);
   assert.match(enKickoff, /`paseo_team`/);
   assert.match(enKickoff, /action: "set_route"/);
+  assert.match(enKickoff, /action: "resolve_breaker"/);
   assert.match(enKickoff, /action: "complete"/);
   assert.match(enKickoff, /CIRCUIT_BROKEN/);
+  assert.match(enKickoff, /paseo_team_\*/);
   assert.match(enKickoff, /\/tmp\/evidence\/t-kick-en/);
   assert.ok(enKickoff.includes(SAFETY_RULES_EN));
   assert.match(enKickoff, /User explicitly requested plan review/);
   assert.match(enKickoff, /claude\/claude-opus-5-5/);
+
+  for (const kind of ["submitted", "missing", "failed"] as const) {
+    const zhNote = buildCoordinatorReminderNotice({
+      memberLabel: "方案审查 #1",
+      agentId: "rev-1",
+      kind,
+      verdict: "REQUEST_CHANGES",
+      round: 1,
+      summary: "Need fix",
+      lang: "zh",
+    });
+    const enNote = buildCoordinatorReminderNotice({
+      memberLabel: "Plan Reviewer #1",
+      agentId: "rev-1",
+      kind,
+      verdict: "REQUEST_CHANGES",
+      round: 1,
+      summary: "Need fix",
+      lang: "en",
+    });
+    assert.match(zhNote, /\[Team 提醒回执\]/);
+    assert.match(enNote, /\[Team Reminder Update\]/);
+  }
 
   for (const toolName of [
     "paseo_team_submit_delivery",

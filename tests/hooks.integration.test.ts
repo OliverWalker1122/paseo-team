@@ -11,6 +11,7 @@ import {
   initTask,
   loadTask,
   recordCandidateDelivery,
+  recordReviewVerdict,
   registerTaskAgent,
 } from "../server/task-store.ts";
 
@@ -630,7 +631,7 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
       ...baseReq,
       agentId: "rev-colon-1",
       provider: "claude",
-      title: "Reviewer #1: spec & edge cases",
+      title: "Code Review #1: spec & edge cases",
       labels: { "paseo.parent-agent-id": "coord-open" },
     },
   })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
@@ -643,6 +644,21 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
     loadTask(recordPath).nodes.find((n) => n.agentId === "rev-colon-1")
       ?.briefSummary,
     "spec & edge cases",
+  );
+  const planReviewNoEr = (await h.invokeHook("agent.open.before", {
+    request: {
+      ...baseReq,
+      agentId: "plan-rev-no-er",
+      provider: "claude",
+      title: "Plan Review #1: 需求规格与边界",
+      labels: { "paseo.parent-agent-id": "coord-open" },
+    },
+  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
+  assert.match(planReviewNoEr.appendSystemPrompt[1], /独立方案审查指引/);
+  assert.equal(
+    loadTask(recordPath).nodes.find((n) => n.agentId === "plan-rev-no-er")
+      ?.briefSummary,
+    "需求规格与边界",
   );
 });
 
@@ -977,13 +993,16 @@ test("agent.turn.before notifies subscribers and agent.turn.after reminds once p
   assert.match(h.sentMessages[0].text, /\[Team 交接检查\]/);
   assert.match(h.sentMessages[0].text, /`paseo_team_submit_delivery`/);
 
-  // Second missed turn -> NO duplicate reminder.
+  // Second missed turn -> NO duplicate reminder to dev-turn, DOES send reminder update to coordinator.
   await h.invokeHook("agent.turn.after", {
     agent: { id: "dev-turn" },
     turnId: "t-d2",
     outcome: { kind: "completed" },
   });
-  assert.equal(h.sentMessages.length, 1);
+  assert.equal(h.sentMessages.length, 2);
+  assert.equal(h.sentMessages[1].agentId, "coord-turn");
+  assert.match(h.sentMessages[1].text, /\[Team 提醒回执\]/);
+  assert.match(h.sentMessages[1].text, /dev-turn/);
 
   // After delivery exists, reviewer missing submit_review gets reminded once.
   recordCandidateDelivery(recordPath, {
@@ -997,9 +1016,54 @@ test("agent.turn.before notifies subscribers and agent.turn.after reminds once p
     turnId: "t-r1",
     outcome: { kind: "completed" },
   });
-  assert.equal(h.sentMessages.length, 2);
-  assert.equal(h.sentMessages[1].agentId, "rev-turn");
-  assert.match(h.sentMessages[1].text, /`paseo_team_submit_review`/);
+  assert.equal(h.sentMessages.length, 3);
+  assert.equal(h.sentMessages[2].agentId, "rev-turn");
+  assert.match(h.sentMessages[2].text, /`paseo_team_submit_review`/);
+
+  // Regression (a37abfe6 deadlock): when reminded reviewer succeeds during its plugin-initiated retry
+  // and ends that turn, the plugin MUST notify the coordinator (Paseo does not send native parent callbacks
+  // for plugin-initiated turns!).
+  recordReviewVerdict(recordPath, {
+    stage: "code",
+    agentId: "rev-turn",
+    round: 1,
+    verdict: "REQUEST_CHANGES",
+    summary: "Need one fix",
+    findings: ["blocking: app.ts:10 fix race"],
+    source: "self",
+  });
+  await h.invokeHook("agent.turn.after", {
+    agent: { id: "rev-turn" },
+    turnId: "t-r1-retry",
+    outcome: { kind: "completed" },
+  });
+  assert.equal(h.sentMessages.length, 4);
+  assert.equal(h.sentMessages[3].agentId, "coord-turn");
+  assert.match(h.sentMessages[3].text, /\[Team 提醒回执\]/);
+  assert.match(h.sentMessages[3].text, /REQUEST_CHANGES/);
+
+  // If a reminded member's retry turn fails/cancels, clear reminded and notify coordinator so it never hangs.
+  registerTaskAgent(recordPath, {
+    role: "code-reviewer",
+    agentId: "rev-turn-fail",
+    profile: "codex/gpt-6.2-astra",
+    briefSummary: "Rev fail",
+  });
+  await h.invokeHook("agent.turn.after", {
+    agent: { id: "rev-turn-fail" },
+    turnId: "t-rf1",
+    outcome: { kind: "completed" },
+  });
+  assert.equal(h.sentMessages.length, 5);
+  assert.equal(h.sentMessages[4].agentId, "rev-turn-fail");
+  await h.invokeHook("agent.turn.after", {
+    agent: { id: "rev-turn-fail" },
+    turnId: "t-rf2",
+    outcome: { kind: "failed", error: { message: "quota exceeded" } },
+  });
+  assert.equal(h.sentMessages.length, 6);
+  assert.equal(h.sentMessages[5].agentId, "coord-turn");
+  assert.match(h.sentMessages[5].text, /异常中止/);
 
   // Abandoned task -> no reminders.
   await h.invokeRpc(controlTaskRpc.name, {
@@ -1018,7 +1082,7 @@ test("agent.turn.before notifies subscribers and agent.turn.after reminds once p
     turnId: "t-r2",
     outcome: { kind: "completed" },
   });
-  assert.equal(h.sentMessages.length, 2);
+  assert.equal(h.sentMessages.length, 6);
 });
 
 test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> R1 rework -> R2 dual approve -> complete", async (t) => {
@@ -1434,4 +1498,68 @@ test("regression: task started without plan review dynamically upgrades to planR
   );
   assert.equal(blockedGate.isError, true);
   assert.match(blockedGate.text, /plan-rev-1/);
+
+  // Regression (a37abfe6): when Plan Review hits R2 circuit breaker and the user chooses
+  // to waive remaining plan review in chat, coordinator calls `paseo_team(resolve_breaker)`
+  // to unlock the task and let the Quality Gate pass after development!
+  recordReviewVerdict(started.recordPath, {
+    stage: "plan",
+    agentId: "plan-rev-1",
+    round: 1,
+    verdict: "REQUEST_CHANGES",
+    summary: "Fix R1",
+    findings: ["blocking: plan.md:1 fix R1"],
+  });
+  const broken = recordReviewVerdict(started.recordPath, {
+    stage: "plan",
+    agentId: "plan-rev-1",
+    round: 2,
+    verdict: "REQUEST_CHANGES",
+    summary: "Fix R2",
+    findings: ["blocking: plan.md:2 fix R2"],
+  });
+  assert.equal(broken.status, "CIRCUIT_BROKEN");
+  assert.equal(loadTask(started.recordPath).lifecycleStatus, "blocked");
+
+  // Validation error if decision or reason is missing.
+  assert.equal(
+    (
+      await coordTools
+        .get("paseo_team")!
+        .execute({ action: "resolve_breaker" }, coordCtx)
+    ).isError,
+    true,
+  );
+
+  const waived = await coordTools.get("paseo_team")!.execute(
+    {
+      action: "resolve_breaker",
+      decision: "waive_stage",
+      stage: "plan",
+      reason: "用户选择写前拦截后跳过第3轮方案评审直接开发",
+    },
+    coordCtx,
+  );
+  assert.notEqual(waived.isError, true);
+  assert.equal(loadTask(started.recordPath).lifecycleStatus, "active");
+  assert.equal(loadTask(started.recordPath).planReview, "waived");
+  assert.equal(loadTask(started.recordPath).circuitBroken, null);
+
+  // Summary includes the latest review findings directly so coordinator doesn't shell out.
+  const sum = await coordTools
+    .get("paseo_team")!
+    .execute({ action: "summary" }, coordCtx);
+  assert.match(sum.text, /blocking: plan\.md:2 fix R2/);
+
+  // After Developer delivers with passing CI (and codeReview not-required), `complete` succeeds!
+  recordCandidateDelivery(started.recordPath, {
+    summary: "Implemented per user-approved v3",
+    architectureImpact: "无",
+    ciWaivedUserQuote: "CI waived for regression test",
+  });
+  const completed = await coordTools
+    .get("paseo_team")!
+    .execute({ action: "complete" }, coordCtx);
+  assert.equal(completed.isError, false);
+  assert.equal(loadTask(started.recordPath).lifecycleStatus, "completed");
 });

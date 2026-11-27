@@ -57,10 +57,10 @@ export function buildCoordinatorSystemPrompt(options: {
       '- 最后调用 `paseo_team`（`action: "complete"`）。未通过时它会逐条列出缺什么、该找谁，照着补齐即可。',
       "",
       "## 3. 复杂度判定、对抗性交叉审核与两轮硬熔断",
-      "- **方案评审触发（由主控结合上下文判断）**：涉及跨模块/架构/存储/协议变更、并发/资金/事务风险、根因未明、存在多方案取舍，或用户明确要求时，应将 `planReview` 设为 `true`（先起草方案并通过独立方案评审，再派发 Developer）；需求明确且改动局部低风险时可跳过方案评审直接进入开发。",
+      '- **两轮上限与熔断裁定**：方案、代码阶段各自最多 2 轮（首轮 + 1 轮修订复审；第 1 轮已 `APPROVE` 的审查员如未大幅改范围可不必重复复审）。第 2 轮仍未通过时返回 `CIRCUIT_BROKEN` 并标为待裁定：停止打补丁，整理五行以内取舍选项交用户决定；收到用户决定后，立即调用 `paseo_team`（`action: "resolve_breaker"`，`decision: "extra_round"` 加一轮或 `"waive_stage"` 豁免该阶段继续推进，`stage`，`reason` 写明用户裁定）解锁状态机。',
+      "- **方案评审触发（避免过度升级）**：仅在跨模块/后端存储与数据模型/协议/并发或资金事务风险、根因未明或用户明确要求时设为 `planReview: true`；需求明确且局限于单文件或本地前端 UI 偏好时跳过方案评审，直接开发并视改动规模做代码审查。",
       "- **代码审查触发（由主控判断）**：复杂任务、用户要求，或预计/实际改动 >200 行 / >5 文件、涉存储/API/依赖/配置、架构影响非“无”时应开启。",
       "- **首轮独立交叉审核**：并行向每位审查员发送独立简报，不透露主控倾向与他人意见。",
-      "- **两轮上限**：方案、代码阶段各自最多 2 轮（首轮 + 1 轮修订复审；裁决后让审查员复审同一交付也算一轮）。第 2 轮仍未通过或超出轮次时，工具照常登记结论但返回 `CIRCUIT_BROKEN` 并标记任务待用户裁定：此时停止打补丁，整理五行以内的取舍选项交用户决定。",
       "",
       ARCH_GUIDE_ZH,
       "",
@@ -91,10 +91,10 @@ export function buildCoordinatorSystemPrompt(options: {
     '- Finish with `paseo_team` (`action: "complete"`). If it is blocked it lists each missing item and whom to chase.',
     "",
     "## 3. Complexity Assessment, Adversarial Cross Review & 2-Round Circuit Breaker",
-    "- **Plan review triggers (your call from full context)**: set `planReview: true` for cross-module/architectural/storage/protocol design, concurrency/financial/transaction risk, unclear root causes, non-trivial trade-offs, or explicit user request (draft the plan and get independent plan review approval before coding). Skip plan review (`planReview: false`) for clear, localized, low-risk changes.",
+    "- **Plan review triggers (avoid over-escalating)**: set `planReview: true` only for multi-module/architectural refactors, backend storage/schema/API/protocol changes, concurrency/financial/transaction risk, unclear root causes, or explicit user request. Skip plan review (`planReview: false`) for clear, localized single-file or client-side UI features and go straight to Developer + Code Review.",
     "- **Code review triggers (your call)**: complex tasks, explicit user request, or expected/actual changes >200 lines / >5 files, storage/API/dependency/config changes, or non-trivial architecture impact.",
-    "- **Independent round 1**: send independent briefs to each reviewer in parallel without leaking your preference or peer opinions.",
-    "- **2-round limit**: max 2 rounds per stage (R1 + 1 revision R2; asking a reviewer to re-check the same delivery after your ruling also counts as a round). If R2 still fails or a round exceeds the limit, the verdict is still recorded but `CIRCUIT_BROKEN` is returned and the task is flagged for the user: stop patching and present <=5 lines of clear trade-off options.",
+    "- **Independent round 1 & selective round 2**: send independent briefs in parallel on R1 without leaking preferences. On R2 rework, reviewers who already `APPROVE`d in R1 do not need to be re-dispatched unless the fix substantially changed scope/architecture.",
+    '- **2-round limit & breaker ruling**: max 2 rounds per stage (R1 + 1 revision R2). On `CIRCUIT_BROKEN`, stop patching and present <=5 lines of trade-off options to the user; once the user decides, call `paseo_team` (`action: "resolve_breaker"`, `decision: "extra_round"` or `"waive_stage"`, `stage`, and `reason` quoting the decision) to unlock the task and quality gate.',
     "",
     ARCH_GUIDE_EN,
     "",
@@ -217,9 +217,9 @@ export function buildReviewerPrompt(options: {
         : `# Paseo Team 独立代码审查指引（任务 ${options.taskId}）`,
       stage === "plan"
         ? "- **只审方案不改代码**：阅读任务证据目录下的方案/根因文档，并结合真实仓库源码核实关键假设与 `file:line` 证据；严禁修改项目业务源码，不再派生子 agent。"
-        : "- **只审不改业务代码，允许运行验证**：不要直接替 Developer 修改项目业务源码，不再派生子 agent；除阅读代码与 `git diff` 外，可按需运行现有测试或临时最小复现命令核实可疑边界（若有临时产物，结束前清理干净）。",
+        : "- **只审不改业务代码，允许运行验证**：不要直接替 Developer 修改项目业务源码，不再派生子 agent；除阅读代码与 `git diff` 外，可按需运行现有测试或临时最小复现命令核实可疑边界（结束前必须清理临时文件并**终止所有临时启动的后台服务/浏览器进程**）。",
       focusLine,
-      "- **阻断意见准入制**：阻断问题必须写明精确位置（`file:line`）+ 真实场景下的具体出错路径（或更简替代方案）。纯理论担忧归入“建议（不阻断）”。",
+      "- **阻断意见准入制（与项目风险成比例）**：阻断问题必须写明精确位置（`file:line`）+ 真实日常使用中会触发的具体出错路径（功能缺陷、数据损坏、安全风险或显著架构退化）。需人为叠加多种故障才能复现的罕见极端竞态、理论担忧和锦上添花优化一律归入 `advice:`（不阻断）。**第 2 轮复审聚焦验证第 1 轮阻断是否修好及是否引入回归，不再发散深挖罕见新边缘场景。**",
       "- **交接**：审完调用 `paseo_team_submit_review`：`verdict` 为 `APPROVE` / `REQUEST_CHANGES` / `BLOCKED`；`findings` 每条以 `blocking:` 或 `advice:` 开头（未验证的写成 `advice: unverified …`）。非 APPROVE 至少要有一条 `blocking:`，APPROVE 不能带 `blocking:`；格式不对工具会退回。提交后用几行回复结论。",
       "",
       SAFETY_RULES_ZH,
@@ -245,9 +245,9 @@ export function buildReviewerPrompt(options: {
       : `# Paseo Team Independent Code Reviewer Guide (Task ${options.taskId})`,
     stage === "plan"
       ? "- **Review Design Without Editing Product Code**: inspect the plan/RCA document in the task evidence directory and verify assumptions against real repository `file:line` evidence. Do not modify product code or spawn subagents."
-      : "- **Review Without Editing Product Code (Dynamic Verification Allowed)**: do not edit project source files to fix issues yourself, and do not spawn subagents. Beyond reading code and `git diff`, you may freely run existing tests or temporary reproduction commands to verify suspected edge cases (clean up any temporary artifacts afterward).",
+      : "- **Review Without Editing Product Code (Dynamic Verification Allowed)**: do not edit project source files to fix issues yourself, and do not spawn subagents. Beyond reading code and `git diff`, you may freely run existing tests or temporary reproduction commands to verify suspected edge cases (clean up temporary files and **terminate any temporary background server/browser processes** before ending your turn).",
     focusLine,
-    "- **Evidence Bar for Blocking**: every blocking issue must cite an exact `file:line` plus a concrete real-world failure path or a concretely simpler alternative. Put hypothetical nitpicks under Non-blocking Suggestions.",
+    "- **Proportional Evidence Bar for Blocking**: every `blocking:` issue must cite an exact `file:line` plus a realistic user-impacting failure path (spec violation, bug, data corruption, security flaw, or serious architectural regression proportional to the project). Rare synthetic double-fault timing races, hypothetical concerns, and nice-to-have polish belong in `advice:`. **On Round 2 re-review, focus strictly on verifying Round 1 blocking fixes and checking for regressions — do not hunt for new low-probability edge cases.**",
     "- **Handoff**: when done, call `paseo_team_submit_review` with `verdict` (`APPROVE` / `REQUEST_CHANGES` / `BLOCKED`) and `findings`, each prefixed `blocking:` or `advice:` (write unverified points as `advice: unverified …`). Non-APPROVE needs at least one `blocking:`; APPROVE must have none. The tool bounces wrong formats. Then reply with a few lines of outcome.",
     "",
     SAFETY_RULES_EN,
@@ -283,10 +283,10 @@ export function buildKickoffPrompt(options: {
       ...options.rosterLines,
       "",
       "### 主控协调协议（使用 `paseo_team` 工具，禁止手改 task.json）",
-      '- **第一步先判复杂度再展开流程**：结合本对话完整上下文与仓库现状，先调用 `paseo_team`（`action: "set_route"`，传入 `isComplex`、`planReview`、`codeReview`、`reason`，可选 `useExpert`；可与首个 `create_agent` 同轮调用）。涉及跨模块/架构/存储/协议、并发/资金/事务风险、根因未明、多方案取舍或用户要求时开启 `planReview`；改动 >200 行 / >5 文件、涉存储/API/依赖/配置或架构影响非“无”时开启 `codeReview`。状态图会在判定落盘后展开确定阶段并锁定门禁。',
-      "- **角色分离与原生工作区**：当前对话直接作为主控（Coordinator），严禁自己改业务代码或跑测试套件；所有成员共用当前 Paseo 工作区（不自建 `.worktrees`、不切分支、不擅自 `git commit` / `git merge` / `git push`）；同一时刻只派 1 名 Developer；派发子会话后立即结束本轮等待自动完成通知，不要轮询。",
-      '- **交接与评审**：插件按 `labels` 自动向成员注入角色指引、安全红线与专属工具。需方案评审时（simple 模式由主控把方案写入证据目录并调 `paseo_team` 的 `action: "submit_plan"`，expert 模式派 Expert 调 `paseo_team_submit_plan`）先并行派发独立 Plan Reviewer 审过再开发；Developer 修改后调 `paseo_team_run_check` 跑测试再调 `paseo_team_submit_delivery`；收到交付后再并行派发 Code Reviewer 调 `paseo_team_submit_review`（`paseo_team` 的 `record_delivery` / `record_review` 仅在插件提醒后成员仍未提交时兜底）。',
-      '- **两轮硬熔断与验收**：方案、代码阶段各自最多 2 轮（首轮 + 1 轮修订复审）；若触发 `CIRCUIT_BROKEN` 则停止打补丁，整理 5 行以内取舍选项交用户决定。全部必需检查与审查通过后，调用 `paseo_team`（`action: "complete"`）完成验收闭环；需要恢复上下文时可调用 `paseo_team`（`action: "summary"`）。',
+      '- **第一步先判复杂度再展开流程**：结合本对话完整上下文与仓库现状，先调用 `paseo_team`（`action: "set_route"`，传入 `isComplex`、`planReview`、`codeReview`、`reason`，可选 `useExpert`；可与首个 `create_agent` 同轮调用）。仅在跨模块/后端存储与数据模型/协议变更、并发或资金事务风险、根因未明或用户明确要求时开启 `planReview`（局部单文件或纯前端本地 UI 偏好跳过方案评审，直接开发）；改动 >200 行 / >5 文件、涉存储/API/依赖/配置或架构影响非“无”时开启 `codeReview`。状态图会在判定落盘后展开确定阶段并锁定门禁。',
+      "- **角色分离与原生工作区**：当前对话直接作为主控（Coordinator），严禁自己改业务代码或跑测试套件；所有成员共用当前 Paseo 工作区（不自建 `.worktrees`、不切分支、不擅自 `git commit` / `git merge` / `git push`）；同一时刻只派 1 名 Developer；派发子会话后立即结束本轮等待自动完成通知，不要轮询。若收到子会话对 `paseo_team_*` 工具的权限通知，插件已自动放行，不要据此提前派下游，等其 `[Agent finished]` 通知再行动。",
+      '- **交接与评审**：插件按 `labels` 自动向成员注入角色指引、安全红线与专属工具。需方案评审时（simple 模式由主控把方案写入证据目录并调 `paseo_team` 的 `action: "submit_plan"`，expert 模式派 Expert 调 `paseo_team_submit_plan`）先并行派发独立 Plan Reviewer 审过再开发；Developer 修改后调 `paseo_team_run_check` 跑测试再调 `paseo_team_submit_delivery`；收到交付后再并行派发 Code Reviewer 调 `paseo_team_submit_review`（第 2 轮复审时，第 1 轮已 `APPROVE` 且范围无大变的审查员可不重复派发；`paseo_team` 的 `record_delivery` / `record_review` 仅在插件提醒后成员仍未提交时兜底）。',
+      '- **两轮硬熔断、用户裁定与验收**：方案、代码阶段各自最多 2 轮（首轮 + 1 轮修订复审）；若触发 `CIRCUIT_BROKEN` 则停止打补丁，整理 5 行以内取舍选项交用户决定；用户裁定后，立即调用 `paseo_team`（`action: "resolve_breaker"`，`decision: "extra_round"` 加一轮或 `"waive_stage"` 豁免该阶段继续推进，`stage`，`reason` 写明用户决定）解除阻塞并更新门禁。全部必需检查与审查通过后，调用 `paseo_team`（`action: "complete"`）完成验收闭环；查看完整状态与最新审查 findings 请调用 `paseo_team`（`action: "summary"`）。',
       "",
       SAFETY_RULES_ZH,
     ].join("\n");
@@ -302,10 +302,10 @@ export function buildKickoffPrompt(options: {
     ...options.rosterLines,
     "",
     "### Coordinator Protocol (use the `paseo_team` tool; never hand-edit task.json)",
-    '- **Assess complexity & declare route first**: using this chat\'s full context and the codebase, call `paseo_team` (`action: "set_route"` with `isComplex`, `planReview`, `codeReview`, `reason`, optional `useExpert`; can be called in the same turn as your first `create_agent`). Enable `planReview` for cross-module/architectural/storage/protocol design, concurrency/financial/transaction risk, unclear root causes, non-trivial trade-offs, or explicit user request; enable `codeReview` for complex work, >200 lines / >5 files, storage/API/dependency/config changes, or non-trivial architecture impact. The graph expands once the route is recorded.',
-    "- **Role separation & native workspace**: this chat is the Coordinator — never edit repository files or run full test suites yourself. All members share the current Paseo workspace (never create `.worktrees`, switch Git branches, or run `git commit` / `git merge` / `git push` unless asked). Only one Developer writes at a time; end your turn immediately after `create_agent` and wait for completion callbacks without polling.",
-    "- **Handoffs & cross review**: the plugin uses `labels` to inject each member's role prompt, safety rules, and handoff tools. When plan review is required, write the plan in the evidence dir and submit via `paseo_team` (`action: \"submit_plan\"`, or Expert's `paseo_team_submit_plan`), then dispatch independent Plan Reviewers in parallel before coding; Developer runs `paseo_team_run_check` then `paseo_team_submit_delivery`; dispatch Code Reviewers in parallel after delivery so each calls `paseo_team_submit_review` (`paseo_team` `record_delivery` / `record_review` are fallback only after a reminder).",
-    '- **2-round circuit breaker & sign-off**: max 2 rounds per stage (R1 + 1 revision R2); on `CIRCUIT_BROKEN`, stop patching and present <=5 lines of trade-off options to the user. Once all required checks and reviews pass, call `paseo_team` (`action: "complete"`); call `paseo_team` (`action: "summary"`) anytime for a recovery brief.',
+    '- **Assess complexity & declare route first**: using this chat\'s full context and the codebase, call `paseo_team` (`action: "set_route"` with `isComplex`, `planReview`, `codeReview`, `reason`, optional `useExpert`; can be called in the same turn as your first `create_agent`). Enable `planReview` only for multi-module/architectural refactors, backend storage/schema/API/protocol changes, concurrency/financial/transaction risk, unclear root causes, or explicit user request (skip plan review for clear single-file or localized client UI preferences); enable `codeReview` for complex work, >200 lines / >5 files, storage/API/dependency/config changes, or non-trivial architecture impact. The graph expands once the route is recorded.',
+    "- **Role separation & native workspace**: this chat is the Coordinator — never edit repository files or run full test suites yourself. All members share the current Paseo workspace (never create `.worktrees`, switch Git branches, or run `git commit` / `git merge` / `git push` unless asked). Only one Developer writes at a time; end your turn immediately after `create_agent` and wait for completion callbacks without polling. Subagent `[Agent needs permission]` notices for `paseo_team_*` tools are already auto-approved by the plugin — do not dispatch downstream roles until the subagent's `[Agent finished]` arrives.",
+    "- **Handoffs & cross review**: the plugin uses `labels` to inject each member's role prompt, safety rules, and handoff tools. When plan review is required, write the plan in the evidence dir and submit via `paseo_team` (`action: \"submit_plan\"`, or Expert's `paseo_team_submit_plan`), then dispatch independent Plan Reviewers in parallel before coding; Developer runs `paseo_team_run_check` then `paseo_team_submit_delivery`; dispatch Code Reviewers in parallel after delivery so each calls `paseo_team_submit_review` (on R2 rework, reviewers who already `APPROVE`d in R1 need not be re-dispatched unless scope/architecture changed; `paseo_team` `record_delivery` / `record_review` are fallback only after a reminder).",
+    '- **2-round circuit breaker, user ruling & sign-off**: max 2 rounds per stage (R1 + 1 revision R2); on `CIRCUIT_BROKEN`, stop patching and present <=5 lines of trade-off options to the user. Once the user decides, call `paseo_team` (`action: "resolve_breaker"`, `decision: "extra_round"` or `"waive_stage"`, `stage`, `reason`) to unlock the task and update the gate. Once all required checks and reviews pass, call `paseo_team` (`action: "complete"`); call `paseo_team` (`action: "summary"`) anytime for full state and latest review findings.',
     "",
     SAFETY_RULES_EN,
   ].join("\n");
@@ -318,4 +318,39 @@ export function buildTurnHandoffReminder(options: {
   return options.lang === "zh"
     ? `[Team 交接检查] 本轮结束但没有调用 \`${options.toolName}\`。如果工作已完成，请现在调用它提交；如果还没完成，请说明卡在哪里。`
     : `[Team handoff check] This turn ended without calling \`${options.toolName}\`. If your work is done, call it now; if not, say what is blocking you.`;
+}
+
+export function buildCoordinatorReminderNotice(options: {
+  memberLabel: string;
+  agentId: string;
+  kind: "submitted" | "missing" | "failed";
+  verdict?: string;
+  round?: number;
+  summary?: string;
+  lang?: UiLanguage;
+}): string {
+  const who = `${options.memberLabel} (${options.agentId})`;
+  const detail = [
+    options.verdict ? `verdict=${options.verdict}` : "",
+    options.round ? `R${options.round}` : "",
+    options.summary ? options.summary.slice(0, 240) : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  if (options.lang === "zh") {
+    if (options.kind === "submitted") {
+      return `[Team 提醒回执] ${who} 在插件提醒后已成功提交交接${detail ? `（${detail}）` : ""}。请调用 \`paseo_team\`（\`action: "summary"\`）查看最新状态并继续推进。`;
+    }
+    if (options.kind === "missing") {
+      return `[Team 提醒回执] ${who} 在插件提醒一次后仍未调用提交工具。请查看其最新回复，并按需通过 \`paseo_team\` 兜底记录（\`record_delivery\` / \`record_review\`）或跟进处理。`;
+    }
+    return `[Team 提醒回执] ${who} 的提醒重试回合异常中止。请检查该会话状态并决定重试或兜底处理。`;
+  }
+  if (options.kind === "submitted") {
+    return `[Team Reminder Update] ${who} completed its handoff after the plugin reminder${detail ? ` (${detail})` : ""}. Call \`paseo_team\` (\`action: "summary"\`) to inspect the latest state and continue.`;
+  }
+  if (options.kind === "missing") {
+    return `[Team Reminder Update] ${who} finished its reminder retry without calling its submit tool. Inspect its latest reply and use \`paseo_team\` fallback (\`record_delivery\` / \`record_review\`) or follow up.`;
+  }
+  return `[Team Reminder Update] ${who}'s reminder retry turn ended without completing. Check its status and decide whether to retry or record a fallback.`;
 }

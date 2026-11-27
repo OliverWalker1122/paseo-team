@@ -61,6 +61,7 @@ import {
   recordCandidateDelivery,
   recordPlanSubmission,
   recordReviewVerdict,
+  resolveCircuitBreaker,
   saveTask,
   setTaskRoute,
   type TaskRecord,
@@ -1984,6 +1985,7 @@ const coordinatorToolInputSchema = z.object({
     "submit_plan",
     "record_delivery",
     "record_review",
+    "resolve_breaker",
     "complete",
     "summary",
   ]),
@@ -1991,6 +1993,7 @@ const coordinatorToolInputSchema = z.object({
   planReview: z.boolean().optional(),
   codeReview: z.boolean().optional(),
   useExpert: z.boolean().optional(),
+  decision: z.enum(["extra_round", "waive_stage"]).optional(),
   reason: z.string().min(1).optional(),
   planFile: z.string().min(1).optional(),
   summary: z.string().min(1).optional(),
@@ -2057,7 +2060,7 @@ export function createCoordinatorTool(
     name: "paseo_team",
     title: "Paseo Team Coordinator",
     description:
-      "Paseo Team workflow tool (use only during an active /paseo-team task). Actions: set_route, submit_plan, record_delivery, record_review, complete, summary.",
+      "Paseo Team workflow tool (use only during an active /paseo-team task). Actions: set_route, submit_plan, record_delivery, record_review, resolve_breaker, complete, summary.",
     input: coordinatorToolInputSchema,
     async execute(args, context) {
       const recordPath = resolveCoordinatorRecordPath(fixedRecordPath, context);
@@ -2215,6 +2218,43 @@ export function createCoordinatorTool(
             : {}),
           source: "coordinator",
         });
+      }
+
+      if (args.action === "resolve_breaker") {
+        if (!args.decision || !args.reason?.trim()) {
+          return {
+            text: 'action="resolve_breaker" requires decision ("extra_round" or "waive_stage") and non-empty reason quoting the user ruling.',
+            isError: true,
+          };
+        }
+        try {
+          const res = resolveCircuitBreaker(recordPath, {
+            decision: args.decision,
+            ...(args.stage ? { stage: args.stage } : {}),
+            reason: args.reason,
+          });
+          notifyTaskChanges();
+          return {
+            text:
+              args.decision === "extra_round"
+                ? `Breaker lifted (${res.stage}): extra round granted (maxRounds=${res.maxRounds}).`
+                : `Stage "${res.stage}" waived per user decision; task resumed.`,
+            structuredContent: {
+              stage: res.stage,
+              decision: args.decision,
+              maxRounds: res.maxRounds,
+              lifecycleStatus: res.record.lifecycleStatus,
+              planReview: res.record.planReview,
+              codeReview: res.record.codeReview,
+              circuitBroken: res.record.circuitBroken,
+            },
+          };
+        } catch (err) {
+          return {
+            text: err instanceof Error ? err.message : String(err),
+            isError: true,
+          };
+        }
       }
 
       if (current.lifecycleStatus === "abandoned") {

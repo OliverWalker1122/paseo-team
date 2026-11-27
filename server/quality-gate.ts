@@ -240,24 +240,30 @@ export function inspectQualityGate(options: {
     ...asList(record?.deliveries).map(roundOf),
   );
   const planProblems =
-    record?.planReview === "required" || dispatched("plan-reviewer")
-      ? reviewProblems(
-          "plan",
-          asList(record?.planReviewers),
-          nodes,
-          requiredPlanRound,
-        )
-      : [];
+    record?.planReview === "waived"
+      ? filled(record?.planReviewReason)
+        ? []
+        : ["Plan review waived without a reason."]
+      : record?.planReview === "required" || dispatched("plan-reviewer")
+        ? reviewProblems(
+            "plan",
+            asList(record?.planReviewers),
+            nodes,
+            requiredPlanRound,
+          )
+        : [];
   const codeProblems =
-    record?.codeReview === "required" || dispatched("code-reviewer")
-      ? reviewProblems(
-          "code",
-          asList(record?.codeReviewers),
-          nodes,
-          requiredCodeRound,
-        )
-      : record?.codeReview === "waived" && !filled(record?.codeReviewReason)
-        ? ["Code review waived without a reason."]
+    record?.codeReview === "waived"
+      ? filled(record?.codeReviewReason)
+        ? []
+        : ["Code review waived without a reason."]
+      : record?.codeReview === "required" || dispatched("code-reviewer")
+        ? reviewProblems(
+            "code",
+            asList(record?.codeReviewers),
+            nodes,
+            requiredCodeRound,
+          )
         : [];
 
   const checks = {

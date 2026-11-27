@@ -26,6 +26,7 @@ import {
 } from "./server/handlers.ts";
 import {
   assignReviewerPerspective,
+  buildCoordinatorReminderNotice,
   buildDeveloperPrompt,
   buildExpertPrompt,
   buildReviewerPrompt,
@@ -35,11 +36,13 @@ import { inspectQualityGate } from "./server/quality-gate.ts";
 import {
   type AgentRole,
   checkTurnHandoff,
+  consumeReminderCallback,
   findTaskByAgentId,
   listTasksForProject,
   loadTask,
   markTaskCompleted,
   registerTaskAgent,
+  resolveCircuitBreaker,
   saveTask,
 } from "./server/task-store.ts";
 
@@ -148,7 +151,7 @@ export function inferChildRole(options: {
   }
   if (
     new RegExp(
-      `^(?:\\[(?:Plan\\s*Reviewer|方案(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}\\]|(?:Plan\\s*Reviewer|方案(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}${UNBRACKETED_ROLE_DELIM})`,
+      `^(?:\\[(?:Plan\\s*Review(?:er)?|方案(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}\\]|(?:Plan\\s*Review(?:er)?|方案(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}${UNBRACKETED_ROLE_DELIM})`,
       "i",
     ).test(title)
   ) {
@@ -156,7 +159,7 @@ export function inferChildRole(options: {
   }
   if (
     new RegExp(
-      `^(?:\\[(?:Code\\s*Reviewer|Reviewer|Advisor|(?:代码)?(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}\\]|(?:Code\\s*Reviewer|Reviewer|Advisor|(?:代码)?(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}${UNBRACKETED_ROLE_DELIM})`,
+      `^(?:\\[(?:Code\\s*Review(?:er)?|Reviewer|Advisor|(?:代码)?(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}\\]|(?:Code\\s*Review(?:er)?|Reviewer|Advisor|(?:代码)?(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}${UNBRACKETED_ROLE_DELIM})`,
       "i",
     ).test(title)
   ) {
@@ -173,7 +176,7 @@ function stripRolePrefix(title: string | null | undefined): string {
   const bracketed = /^\[[^\]]+\]\s*(.+)$/.exec(raw);
   if (bracketed?.[1]?.trim()) return bracketed[1].trim();
   const prefixed = new RegExp(
-    `^(?:Plan\\s*Reviewer|Code\\s*Reviewer|Developer|Handoff|Expert|Architect|Reviewer|Advisor|开发(?:者|成员)?|专家|(?:方案|代码)?(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}\\s*[:：\\-–—·/]\\s*(.+)$`,
+    `^(?:Plan\\s*Review(?:er)?|Code\\s*Review(?:er)?|Developer|Handoff|Expert|Architect|Reviewer|Advisor|开发(?:者|成员)?|专家|(?:方案|代码)?(?:审查|评审)(?:员)?)${ROLE_SLOT_SUFFIX}\\s*[:：\\-–—·/]\\s*(.+)$`,
     "i",
   ).exec(raw);
   return prefixed?.[1]?.trim() || raw;
@@ -317,21 +320,22 @@ export default function contribute(server: PluginServerContext) {
       }
 
       if (action === "authorize_extra_round") {
-        // Only grant a round when the breaker actually tripped, so repeated clicks don't stack.
+        const quote =
+          note?.trim() ||
+          (zh
+            ? "用户在可视化面板授权继续下一轮审查与修订"
+            : "User authorized an additional review round from the graph UI");
         if (record.circuitBroken) {
-          record.extraRounds = (record.extraRounds ?? 0) + 1;
-        }
-        record.circuitBroken = null;
-        if (record.lifecycleStatus === "blocked") {
+          resolveCircuitBreaker(recordPath, {
+            decision: "extra_round",
+            stage: record.circuitBroken.stage,
+            reason: quote,
+          });
+        } else if (record.lifecycleStatus === "blocked") {
           record.lifecycleStatus = "active";
+          saveTask(recordPath, record);
         }
-        saveTask(recordPath, record);
         if (record.coordinatorAgentId) {
-          const quote =
-            note?.trim() ||
-            (zh
-              ? "用户在可视化面板授权继续下一轮审查与修订"
-              : "User authorized an additional review round from the graph UI");
           await paseo.agents
             .ref(record.coordinatorAgentId)
             .send(
@@ -454,7 +458,12 @@ export default function contribute(server: PluginServerContext) {
         if (!agent.parentAgentId || findTaskByAgentId(agent.id)) return;
         const parentMatch = findTaskByAgentId(agent.parentAgentId);
         if (!parentMatch || parentMatch.matchedRole !== "coordinator") return;
-        if (parentMatch.record.lifecycleStatus !== "active") return;
+        if (
+          parentMatch.record.lifecycleStatus === "completed" ||
+          parentMatch.record.lifecycleStatus === "abandoned"
+        ) {
+          return;
+        }
 
         const meta = agent.metadata?.["paseo-team.task"];
         const metaRole =
@@ -515,7 +524,8 @@ export default function contribute(server: PluginServerContext) {
             const parentMatch = findTaskByAgentId(parentAgentId);
             if (
               parentMatch?.matchedRole === "coordinator" &&
-              parentMatch.record.lifecycleStatus === "active"
+              parentMatch.record.lifecycleStatus !== "completed" &&
+              parentMatch.record.lifecycleStatus !== "abandoned"
             ) {
               const inferred = inferChildRole({
                 labelRole,
@@ -736,7 +746,8 @@ export default function contribute(server: PluginServerContext) {
             const parentMatch = findTaskByAgentId(agent.parentAgentId);
             if (
               parentMatch?.matchedRole === "coordinator" &&
-              parentMatch.record.lifecycleStatus === "active"
+              parentMatch.record.lifecycleStatus !== "completed" &&
+              parentMatch.record.lifecycleStatus !== "abandoned"
             ) {
               const inferred = inferChildRole({
                 title: agent.title,
@@ -815,23 +826,65 @@ export default function contribute(server: PluginServerContext) {
           // Handoff check: a member's finished turn must end with its submit tool.
           if (
             match.matchedRole !== "coordinator" &&
-            outcome.kind === "completed" &&
             match.record.lifecycleStatus !== "completed" &&
-            match.record.lifecycleStatus !== "abandoned" &&
-            checkTurnHandoff(match.recordPath, agent.id) === "remind"
+            match.record.lifecycleStatus !== "abandoned"
           ) {
-            const tool = HANDOFF_TOOL[match.matchedRole];
             const promptLang = detectPromptLanguage(match.record.goal);
-            if (tool) {
-              await paseo.agents
-                .ref(agent.id)
-                .send(
-                  buildTurnHandoffReminder({
-                    toolName: tool,
-                    lang: promptLang,
-                  }),
-                )
-                .catch(() => {});
+            const callback = consumeReminderCallback(
+              match.recordPath,
+              agent.id,
+              outcome.kind !== "completed",
+            );
+            if (callback) {
+              if (callback.record.coordinatorAgentId) {
+                await paseo.agents
+                  .ref(callback.record.coordinatorAgentId)
+                  .send(
+                    buildCoordinatorReminderNotice({
+                      memberLabel: callback.node.label,
+                      agentId: agent.id,
+                      kind: callback.kind,
+                      verdict: callback.node.verdict,
+                      round: callback.node.round,
+                      summary: callback.node.summary,
+                      lang: promptLang,
+                    }),
+                  )
+                  .catch(() => {});
+              }
+            } else if (outcome.kind === "completed") {
+              const handoff = checkTurnHandoff(match.recordPath, agent.id);
+              if (handoff === "remind") {
+                const tool = HANDOFF_TOOL[match.matchedRole];
+                if (tool) {
+                  await paseo.agents
+                    .ref(agent.id)
+                    .send(
+                      buildTurnHandoffReminder({
+                        toolName: tool,
+                        lang: promptLang,
+                      }),
+                    )
+                    .catch(() => {});
+                }
+              } else if (
+                handoff === "missing" &&
+                match.record.coordinatorAgentId
+              ) {
+                const latest = loadTask(match.recordPath);
+                const node = latest.nodes.find((n) => n.agentId === agent.id);
+                await paseo.agents
+                  .ref(match.record.coordinatorAgentId)
+                  .send(
+                    buildCoordinatorReminderNotice({
+                      memberLabel: node?.label ?? match.matchedRole,
+                      agentId: agent.id,
+                      kind: "missing",
+                      lang: promptLang,
+                    }),
+                  )
+                  .catch(() => {});
+              }
             }
           }
           notifyTaskChanges();

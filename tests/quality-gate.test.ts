@@ -8,10 +8,13 @@ import { inspectQualityGate } from "../server/quality-gate.ts";
 import { runCheck } from "../server/run-check.ts";
 import {
   initTask,
+  loadTask,
   markTaskCompleted,
   recordCandidateDelivery,
+  recordPlanSubmission,
   recordReviewVerdict,
   registerTaskAgent,
+  resolveCircuitBreaker,
 } from "../server/task-store.ts";
 
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
@@ -237,4 +240,143 @@ test("registers parallel developers and auto-binds the latest CI log from a subd
     inspectQualityGate({ recordPath: created.recordPath }).status,
     "READY",
   );
+});
+
+test("resolveCircuitBreaker supports waiving a broken plan stage and granting an extra code round (plus selective R2 re-review)", (t) => {
+  const { repoDir, stateRoot } = setupWorkspace(t);
+  const created = initTask({
+    cwd: repoDir,
+    goal: "Background image theme with plan & code review",
+    teamName: "Standard",
+    preset,
+    isComplex: true,
+    requirePlanReview: true,
+    requireReview: true,
+    stateRoot,
+  });
+
+  // Plan R1 & R2 both REQUEST_CHANGES -> trips plan circuit breaker.
+  writeFileSync(path.join(created.taskDir, "plan.md"), "# Plan v1\n");
+  recordPlanSubmission(created.recordPath, {
+    planFile: "plan.md",
+    summary: "Plan v1",
+  });
+  registerTaskAgent(created.recordPath, {
+    role: "plan-reviewer",
+    agentId: "plan-r1",
+    profile: "claude/claude-opus-5-5",
+    briefSummary: "Spec",
+  });
+  recordReviewVerdict(created.recordPath, {
+    stage: "plan",
+    agentId: "plan-r1",
+    round: 1,
+    verdict: "REQUEST_CHANGES",
+    summary: "Fix test fixture",
+    findings: ["blocking: plan.md:10 fixture misses script"],
+  });
+  recordPlanSubmission(created.recordPath, {
+    planFile: "plan.md",
+    summary: "Plan v2",
+  });
+  const planBroken = recordReviewVerdict(created.recordPath, {
+    stage: "plan",
+    agentId: "plan-r1",
+    round: 2,
+    verdict: "REQUEST_CHANGES",
+    summary: "Check before write",
+    findings: ["blocking: plan.md:26 move check before write"],
+  });
+  assert.equal(planBroken.status, "CIRCUIT_BROKEN");
+  assert.equal(loadTask(created.recordPath).lifecycleStatus, "blocked");
+
+  // User chooses to waive remaining plan review and proceed directly to development.
+  const waived = resolveCircuitBreaker(created.recordPath, {
+    decision: "waive_stage",
+    stage: "plan",
+    reason: "User chose pre-write guard and proceed straight to Developer",
+  });
+  assert.equal(waived.record.lifecycleStatus, "active");
+  assert.equal(waived.record.circuitBroken, null);
+  assert.equal(waived.record.planReview, "waived");
+
+  // Developer delivers R1; Rev #1 approves, Rev #2 requests changes.
+  pass(created.taskDir, "ci-1.log", repoDir);
+  recordCandidateDelivery(created.recordPath, {
+    summary: "R1 implementation",
+    architectureImpact: "None",
+  });
+  for (const id of ["code-r1", "code-r2"]) {
+    registerTaskAgent(created.recordPath, {
+      role: "code-reviewer",
+      agentId: id,
+      profile: "auto",
+      briefSummary: "Code review",
+    });
+  }
+  recordReviewVerdict(created.recordPath, {
+    stage: "code",
+    agentId: "code-r1",
+    round: 1,
+    verdict: "APPROVE",
+    summary: "Looks good",
+  });
+  recordReviewVerdict(created.recordPath, {
+    stage: "code",
+    agentId: "code-r2",
+    round: 1,
+    verdict: "REQUEST_CHANGES",
+    summary: "Bad image race",
+    findings: ["blocking: index.html:1297 stale token"],
+  });
+
+  // R2 rework: only code-r2 re-reviews (selective R2) and still requests changes -> trips code breaker.
+  pass(created.taskDir, "ci-2.log", repoDir);
+  recordCandidateDelivery(created.recordPath, {
+    summary: "R2 fix",
+    architectureImpact: "None",
+  });
+  const codeBroken = recordReviewVerdict(created.recordPath, {
+    stage: "code",
+    agentId: "code-r2",
+    round: 2,
+    verdict: "REQUEST_CHANGES",
+    summary: "Abort race",
+    findings: ["blocking: index.html:1271 abort mismatch"],
+  });
+  assert.equal(codeBroken.status, "CIRCUIT_BROKEN");
+  assert.equal(loadTask(created.recordPath).lifecycleStatus, "blocked");
+
+  // User authorizes one extra round; R3 passes without re-dispatching code-r1 (already APPROVE).
+  const extra = resolveCircuitBreaker(created.recordPath, {
+    decision: "extra_round",
+    reason: "User authorized one final targeted fix round",
+  });
+  assert.equal(extra.maxRounds, 3);
+  assert.equal(extra.record.lifecycleStatus, "active");
+  assert.equal(extra.record.circuitBroken, null);
+
+  pass(created.taskDir, "ci-3.log", repoDir);
+  recordCandidateDelivery(created.recordPath, {
+    summary: "R3 targeted fix",
+    architectureImpact: "None",
+  });
+  const r3 = recordReviewVerdict(created.recordPath, {
+    stage: "code",
+    agentId: "code-r2",
+    round: 3,
+    verdict: "APPROVE",
+    summary: "Verified R3",
+  });
+  assert.equal(r3.status, "RECORDED");
+
+  // Quality gate MUST be READY (plan review waiver honored despite dispatched plan-r1!).
+  const gate = inspectQualityGate({ recordPath: created.recordPath });
+  assert.equal(gate.status, "READY");
+  assert.deepEqual(gate.checks, {
+    deliveryRecorded: true,
+    ciPassed: true,
+    planReviewSatisfied: true,
+    codeReviewSatisfied: true,
+  });
 });

@@ -75,6 +75,8 @@ export interface TaskAgentNode {
   /** Handoff bookkeeping written by the turn hooks and submit tools. */
   submittedAt?: string;
   reminded?: boolean;
+  /** True when a plugin-initiated reminder turn submitted and should notify the coordinator on turn end. */
+  reminderCallbackPending?: boolean;
   updatedAt: string;
 }
 
@@ -1531,11 +1533,15 @@ export function recordReviewVerdict(
 
   const node = record.nodes.find((n) => n.agentId === input.agentId);
   if (node) {
+    const wasReminded = Boolean(node.reminded);
     node.round = input.round;
     node.verdict = input.verdict;
     node.summary = input.summary;
     node.submittedAt = now;
     node.reminded = false;
+    if (wasReminded) {
+      node.reminderCallbackPending = true;
+    }
     node.status =
       input.verdict === "APPROVE"
         ? "approved"
@@ -1664,10 +1670,14 @@ export function recordPlanSubmission(
     ? record.nodes.find((x) => x.agentId === input.agentId)
     : undefined;
   if (node) {
+    const wasReminded = Boolean(node.reminded);
     node.status = "completed";
     node.summary = input.summary.trim();
     node.submittedAt = now;
     node.reminded = false;
+    if (wasReminded) {
+      node.reminderCallbackPending = true;
+    }
     node.updatedAt = now;
   }
   return saveTask(recordPath, record);
@@ -1742,11 +1752,111 @@ export function checkTurnHandoff(
   // A member may legitimately be waiting (e.g. told to hold for plan review), so
   // this is not an error: its reply explains why, and the coordinator decides.
   node.reminded = false;
+  node.reminderCallbackPending = false;
   node.summary =
     "Handoff pending: reminded once without a submission; see its reply.";
   node.updatedAt = now;
   saveTask(recordPath, record);
   return "missing";
+}
+
+/**
+ * Consumes a pending coordinator callback after a plugin-initiated reminder turn.
+ * Paseo only sends native parent callbacks for coordinator-initiated turns, so
+ * the plugin itself must notify the coordinator when a reminded turn ends.
+ */
+export function consumeReminderCallback(
+  recordPath: string,
+  agentId: string,
+  turnFailed = false,
+): {
+  kind: "submitted" | "failed";
+  node: TaskAgentNode;
+  record: TaskRecord;
+} | null {
+  const record = loadTask(recordPath);
+  const node = record.nodes.find((n) => n.agentId === agentId);
+  if (!node) return null;
+  if (node.reminderCallbackPending) {
+    node.reminderCallbackPending = false;
+    const saved = saveTask(recordPath, record);
+    return {
+      kind: "submitted",
+      node: saved.nodes.find((n) => n.agentId === agentId) ?? node,
+      record: saved,
+    };
+  }
+  if (turnFailed && node.reminded) {
+    node.reminded = false;
+    node.updatedAt = new Date().toISOString();
+    const saved = saveTask(recordPath, record);
+    return {
+      kind: "failed",
+      node: saved.nodes.find((n) => n.agentId === agentId) ?? node,
+      record: saved,
+    };
+  }
+  return null;
+}
+
+export function resolveCircuitBreaker(
+  recordPath: string,
+  input: {
+    decision: "extra_round" | "waive_stage";
+    stage?: "plan" | "code";
+    reason: string;
+  },
+): {
+  record: TaskRecord;
+  stage: "plan" | "code";
+  maxRounds: number;
+} {
+  const record = loadTask(recordPath);
+  const reason = input.reason.trim();
+  if (!reason) {
+    throw new Error("A non-empty user decision reason is required.");
+  }
+  const stage = input.stage ?? record.circuitBroken?.stage;
+  if (!stage) {
+    throw new Error(
+      'No active circuit breaker; pass stage ("plan" or "code") explicitly.',
+    );
+  }
+  const now = new Date().toISOString();
+  if (input.decision === "extra_round") {
+    const currentLimit = 2 + (record.extraRounds ?? 0);
+    const stageRound =
+      stage === "plan" ? record.planReviewRound : record.codeReviewRound;
+    // Avoid stacking duplicate grants if already lifted beyond the stage's current round.
+    if (record.circuitBroken || stageRound >= currentLimit) {
+      record.extraRounds = (record.extraRounds ?? 0) + 1;
+    }
+    record.circuitBroken = null;
+    if (record.lifecycleStatus === "blocked") {
+      record.lifecycleStatus = "active";
+    }
+  } else {
+    if (!record.circuitBroken || record.circuitBroken.stage === stage) {
+      record.circuitBroken = null;
+    }
+    if (record.lifecycleStatus === "blocked" && !record.circuitBroken) {
+      record.lifecycleStatus = "active";
+    }
+    if (stage === "plan") {
+      record.planReview = "waived";
+      record.planReviewReason = reason;
+    } else {
+      record.codeReview = "waived";
+      record.codeReviewReason = reason;
+    }
+  }
+  record.updatedAt = now;
+  const saved = saveTask(recordPath, record);
+  return {
+    record: saved,
+    stage,
+    maxRounds: 2 + (saved.extraRounds ?? 0),
+  };
 }
 
 export function recordCandidateDelivery(
@@ -1833,10 +1943,14 @@ export function recordCandidateDelivery(
       (n) => n.role === "developer" && n.agentId === input.agentId!.trim(),
     );
     if (devNode) {
+      const wasReminded = Boolean(devNode.reminded);
       devNode.status = "completed";
       devNode.summary = input.summary.trim();
       devNode.submittedAt = now;
       devNode.reminded = false;
+      if (wasReminded) {
+        devNode.reminderCallbackPending = true;
+      }
       devNode.updatedAt = now;
     }
   } else {
@@ -1915,5 +2029,21 @@ export function buildRecoveryBrief(record: TaskRecord): string {
       );
     }
   }
+  const formatStageFindings = (
+    title: string,
+    entries: ReviewerRecordEntry[],
+  ) => {
+    const withFindings = entries.filter((e) => e.findings?.length);
+    if (withFindings.length === 0) return;
+    lines.push(`- Latest ${title} Findings:`);
+    for (const e of withFindings) {
+      lines.push(`  - [${e.agentId} R${e.round} ${e.status}] ${e.summary}`);
+      for (const f of e.findings ?? []) {
+        lines.push(`    - ${f}`);
+      }
+    }
+  };
+  formatStageFindings("Plan Review", record.planReviewers);
+  formatStageFindings("Code Review", record.codeReviewers);
   return lines.join("\n");
 }
