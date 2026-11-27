@@ -286,17 +286,23 @@ export function parseInlineTaskDirectives(rawArgs: string): {
 const isUnsetSpec = (spec: RoleModelSpec | undefined) =>
   !spec?.model || spec.model === AUTO_MODEL;
 
-export function unsetRoles(preset: TeamPreset): string[] {
+export function unsetRoles(
+  preset: TeamPreset,
+  lang: UiLanguage = "en",
+): string[] {
+  const zh = lang === "zh";
   return [
-    isUnsetSpec(preset.developer) ? "Developer" : "",
+    isUnsetSpec(preset.developer) ? (zh ? "开发者" : "Developer") : "",
     preset.complexMode === "expert" && isUnsetSpec(preset.expert)
-      ? "Expert"
+      ? zh
+        ? "专家"
+        : "Expert"
       : "",
     ...preset.codeReviewers.map((spec, i) =>
-      isUnsetSpec(spec) ? `Code Reviewer #${i + 1}` : "",
+      isUnsetSpec(spec) ? `${zh ? "代码审查" : "Code Reviewer"} #${i + 1}` : "",
     ),
     ...preset.planReviewers.map((spec, i) =>
-      isUnsetSpec(spec) ? `Plan Reviewer #${i + 1}` : "",
+      isUnsetSpec(spec) ? `${zh ? "方案审查" : "Plan Reviewer"} #${i + 1}` : "",
     ),
   ].filter(Boolean);
 }
@@ -458,7 +464,7 @@ export async function resolveTeamGuideForCwd(
 
   const lang = options?.lang ?? "en";
   const zh = lang === "zh";
-  const unset = unsetRoles(eff.preset);
+  const unset = unsetRoles(eff.preset, lang);
   const userConstraints: string[] = [];
   if (options?.requirePlanReview) {
     userConstraints.push(
@@ -554,7 +560,7 @@ export async function startTeamTask(
   if (resolved.unset.length > 0) {
     throw new Error(
       zh
-        ? `预设「${resolved.teamName}」还有角色没选模型：${resolved.unset.join("、")}。请在团队配置里为它们选择模型（审查员也可以设为“不启用”）。`
+        ? `预设「${resolved.teamName}」还有角色没选模型：${resolved.unset.join("、")}。请在团队配置里为它们选择模型（第 2 位审查员也可以设为“关闭”）。`
         : `Preset "${resolved.teamName}" has roles without a model: ${resolved.unset.join(", ")}. Pick a model for each in Team settings.`,
     );
   }
@@ -850,17 +856,17 @@ function roleDisplayLabel(
   const suffix = groupSize > 1 ? ` #${slotIndex + 1}` : "";
   switch (role) {
     case "coordinator":
-      return zh ? "主控 Coordinator" : "Coordinator";
+      return zh ? "主控" : "Coordinator";
     case "expert":
-      return (zh ? "专家 Expert" : "Expert") + suffix;
+      return (zh ? "专家" : "Expert") + suffix;
     case "plan-reviewer":
       return `${zh ? "方案审查" : "Plan Reviewer"} #${slotIndex + 1}`;
     case "developer":
-      return `Developer${suffix}`;
+      return (zh ? "开发者" : "Developer") + suffix;
     case "code-reviewer":
       return `${zh ? "代码审查" : "Code Reviewer"} #${slotIndex + 1}`;
     case "subagent":
-      return `${zh ? "子 Agent" : "Subagent"}${suffix}`;
+      return `${zh ? "子会话" : "Subagent"}${suffix}`;
   }
 }
 

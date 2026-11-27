@@ -898,7 +898,7 @@ export function TeamConfigView({
                   theme={theme}
                   compact={compact}
                   lang={lang}
-                  title="Developer"
+                  title={t.devRoleTitle}
                   hint={t.devRoleHint}
                   spec={activePreset.developer}
                   providers={bundle.providers}

@@ -183,14 +183,30 @@ test("parseInlineTaskDirectives parses Chinese & English presets, modes, and rev
 test("unsetRoles detects unset developer, expert, and reviewers", () => {
   assert.deepEqual(unsetRoles(readyPreset), []);
   assert.deepEqual(
-    unsetRoles({
-      developer: { model: "auto" },
-      codeReviewers: [{ model: "auto" }],
-      planReviewers: [{ model: "auto" }],
-      expert: { model: "auto" },
-      complexMode: "expert",
-    }),
+    unsetRoles(
+      {
+        developer: { model: "auto" },
+        codeReviewers: [{ model: "auto" }],
+        planReviewers: [{ model: "auto" }],
+        expert: { model: "auto" },
+        complexMode: "expert",
+      },
+      "en",
+    ),
     ["Developer", "Expert", "Code Reviewer #1", "Plan Reviewer #1"],
+  );
+  assert.deepEqual(
+    unsetRoles(
+      {
+        developer: { model: "auto" },
+        codeReviewers: [{ model: "auto" }],
+        planReviewers: [{ model: "auto" }],
+        expert: { model: "auto" },
+        complexMode: "expert",
+      },
+      "zh",
+    ),
+    ["开发者", "专家", "代码审查 #1", "方案审查 #1"],
   );
 });
 
@@ -466,8 +482,11 @@ test("buildAgentTree, buildConversationGraph, and listActiveTrees build live Pas
   assert.equal(graph.tree.attentionCount, 1);
   assert.equal(graph.tree.layers.length, 3);
   assert.equal(graph.tree.layers[0].nodes[0].role, "coordinator");
+  assert.equal(graph.tree.layers[0].nodes[0].label, "主控");
   assert.equal(graph.tree.layers[1].nodes[0].role, "developer");
+  assert.equal(graph.tree.layers[1].nodes[0].label, "开发者");
   assert.equal(graph.tree.layers[2].nodes.length, 2);
+  assert.equal(graph.tree.layers[2].nodes[0].label, "代码审查 #1");
   assert.equal(graph.tree.layers[2].nodes[0].status, "running");
   assert.equal(graph.tree.layers[2].nodes[1].status, "awaiting_permission");
   assert.match(

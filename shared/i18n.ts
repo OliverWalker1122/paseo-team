@@ -83,6 +83,7 @@ export const UI_TEXT = {
     sectionReviewInfo:
       "Cross review: two reviewers examine each change independently from opposing angles and never see each other's verdict.",
     rev1RoleTitle: "Code Reviewer #1",
+    devRoleTitle: "Developer",
     devRoleHint: "Writes the code and runs the checks",
     rev1RoleHint: "Requirements and real edge cases",
     rev2RoleTitle: "Code Reviewer #2",
@@ -193,17 +194,18 @@ export const UI_TEXT = {
     modeLabel: "权限模式",
     modeDefault: "默认权限",
     modeDefaultOption: "默认（自动推荐）",
-    modeDefaultDesc: "按 Provider 自动选择推荐模式（如 auto-review / auto）。",
+    modeDefaultDesc: "自动选择该模型提供商推荐的权限模式。",
     sectionReview: "代码审查",
     sectionReviewInfo:
       "交叉审核：两位审查员从对立视角独立审查每次改动，彼此看不到对方结论。",
     rev1RoleTitle: "代码审查 #1",
+    devRoleTitle: "开发者",
     devRoleHint: "写代码并跑检查",
     rev1RoleHint: "需求符合度与真实边界场景",
     rev2RoleTitle: "代码审查 #2",
     rev2RoleHint: "架构一致性与更简单的方案",
     sameModelHint: (model: string) =>
-      `两位审查员都在用 Developer 的模型（${model}）。换成其他模型家族，更容易发现它的盲点。`,
+      `两位审查员都在用开发者的模型（${model}）。换成其他模型家族，更容易发现它的盲点。`,
     sectionComplex: "复杂任务",
     sectionComplexInfo: "仅在跨模块或架构级任务中使用。",
     planAuthorLabel: "由谁起草方案",
@@ -221,9 +223,9 @@ export const UI_TEXT = {
     noneReviewerLabel: "关闭（单人审查）",
     noneReviewerDesc: "只派 1 位代码审查，不开第 2 位",
     selectModelTitle: "选择模型",
-    searchModelPlaceholder: "按 Provider 或模型名筛选",
+    searchModelPlaceholder: "按提供商或模型名筛选",
     noMatchingModels: "没有匹配的模型。",
-    providerDefaultModel: "Provider 默认模型",
+    providerDefaultModel: "提供商默认模型",
 
     // Errors and toasts
     errEnterPresetName: "请输入预设名称。",
@@ -248,7 +250,7 @@ export const UI_TEXT = {
     focusPrefix: "侧重：",
     openSubagentBtn: "进入对话",
     responsibilityTitle: "会话标题",
-    emptyTitle: "当前对话还没有团队会话或子 Agent",
+    emptyTitle: "当前对话还没有团队会话或子会话",
     emptyDesc:
       "点亮输入框底部的双人团队图标或运行 /paseo-team 启动协作；主控派出的所有子会话都会实时展示在这里。",
     pillDefault: "团队",

@@ -444,7 +444,7 @@ function sampleTree(
             parentAgentId: null,
             workspaceId: "wks_todo",
             role: "coordinator",
-            label: "主控 Coordinator",
+            label: "主控",
             title: "自定义组件透明度滑块",
             modelBadge: "claude/claude-opus-5-5 · high",
             status: "idle",
@@ -463,7 +463,7 @@ function sampleTree(
             parentAgentId: "coord-1",
             workspaceId: "wks_todo",
             role: "developer",
-            label: "Developer",
+            label: "开发者",
             title: "Developer: 透明度滑块实现",
             modelBadge: "antigravity/gemini-4-neon · xhigh",
             status: "running",
@@ -976,13 +976,15 @@ test("WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, TeamConfigView, an
 
   const graphText = collectText(uiSandbox.renderer.root);
   assert.match(graphText, /返回主对话/);
-  assert.match(graphText, /Developer/);
+  assert.match(graphText, /主控/);
+  assert.doesNotMatch(graphText, /主控 Coordinator/);
+  assert.match(graphText, /开发者/);
   assert.match(graphText, /运行中/);
 
   // Click Developer node to inspect and open chat
   const devCard = findNodes(
     uiSandbox.renderer.root,
-    (n) => n.type === "Pressable" && collectText(n).includes("Developer"),
+    (n) => n.type === "Pressable" && collectText(n).includes("开发者"),
   )[0];
   assert.ok(devCard);
   (devCard.props.onPress as () => void)();
@@ -1017,6 +1019,8 @@ test("WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, TeamConfigView, an
   uiSandbox.renderer.rerender();
   const cfgText = collectText(uiSandbox.renderer.root);
   assert.match(cfgText, /返回团队/);
+  assert.match(cfgText, /开发者/);
+  assert.doesNotMatch(cfgText, /主控 Coordinator/);
   assert.match(cfgText, /由谁起草方案/);
   assert.match(cfgText, /单独设置方案审查/);
   assert.doesNotMatch(cfgText, /展开/);

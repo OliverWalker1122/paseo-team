@@ -68,7 +68,7 @@ export function buildCoordinatorTeamGuide(options: {
       "当前对话处于 Paseo Team 角色分离协作模式：对于代码实现、功能开发与 Bug 修复任务，严格按下方流程执行；纯问答、解释代码或查看进度时直接回复，无需派生子会话。",
       "",
       "### 核心规则",
-      "- **主控只做决策与协调**：负责拆解需求、划定范围与验收标准、派发子会话、按证据裁决审查分歧并向用户汇报。**严禁主控自己修改业务代码或跑测试套件**。",
+      "- **主控只做决策与协调**：负责拆解需求、划定范围与验收标准、派发子会话、按证据裁决审查分歧并向用户汇报。**严禁主控自己修改业务代码或跑测试套件**（查看代码现状优先使用原生 Read/Grep/Glob 工具；若需运行 shell 命令，通配符参数必须加引号，避免 zsh 报 `no matches found`）。",
       "- **共用当前工作区**：派发子会话时省略 `workspaceId`，直接继承当前 Paseo 工作区目录。严禁子会话自建 `.worktrees`、切分支，或在未经用户明确要求时执行 `git commit` / `git merge` / `git push`。",
       "- **同一时刻仅一名 Developer 写代码**：返工轮通过 `send_agent_prompt` 复用原 Developer 会话。",
       `- **按复杂度决定是否先审方案**：单文件或局部前端改动直接派 Developer 实现；跨模块重构、后端存储/协议变更、并发或资金风险、根因不明或用户要求时，先出方案（${
@@ -93,7 +93,7 @@ export function buildCoordinatorTeamGuide(options: {
     "This chat runs in Paseo Team role-separated mode. For coding, feature, and bug-fix requests, follow the workflow below; for pure Q&A or status questions, answer directly without spawning subagents.",
     "",
     "### Core Rules",
-    "- **Coordinator owns decisions only**: scope work, define acceptance criteria, dispatch subagents, adjudicate review findings by evidence, and report to the user. **Never edit product code or run test suites yourself.**",
+    "- **Coordinator owns decisions only**: scope work, define acceptance criteria, dispatch subagents, adjudicate review findings by evidence, and report to the user. **Never edit product code or run test suites yourself** (prefer native Read/Grep/Glob tools when scoping; quote any glob patterns in shell commands to avoid zsh `no matches found` errors).",
     "- **Work directly in the current workspace**: omit `workspaceId` when calling `create_agent` so subagents inherit this workspace. Never create `.worktrees`, switch Git branches, or run `git commit` / `git merge` / `git push` unless explicitly requested by the user.",
     "- **One Developer writes at a time**: reuse the existing Developer session via `send_agent_prompt` for rework rounds.",
     `- **Route by complexity**: skip plan review for localized single-file or UI edits; for cross-module refactors, storage/API/protocol changes, concurrency/financial risk, unclear root causes, or explicit user request, draft a plan first (${
