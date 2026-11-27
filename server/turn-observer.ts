@@ -1,3 +1,4 @@
+import { evaluateCodeReviewTrigger } from "./quality-gate.ts";
 import {
   loadTask,
   nextReviewRound,
@@ -317,13 +318,28 @@ export function observeMemberTurn(
     agentId: string;
     text: string;
     shellHint?: TurnShellHint;
+    changeStats?: { files: number; lines: number };
   },
-): { recorded: boolean; verdict?: ReviewVerdict } {
+): {
+  recorded: boolean;
+  verdict?: ReviewVerdict;
+  codeReviewUpgraded?: boolean;
+} {
   const text = input.text.trim();
   if (!text) return { recorded: false };
 
   if (input.role === "developer") {
     const parsed = parseDeveloperReply(text, input.shellHint);
+    const current = loadTask(recordPath);
+    const trigger =
+      current.codeReview === "not-required"
+        ? evaluateCodeReviewTrigger({
+            projectRoot: current.projectRoot,
+            architectureImpact: parsed.architectureImpact,
+            hasCodeReviewers: current.team.codeReviewers.length > 0,
+            ...(input.changeStats ? { changeStats: input.changeStats } : {}),
+          })
+        : null;
     recordCandidateDelivery(recordPath, {
       agentId: input.agentId,
       summary: parsed.summary,
@@ -333,8 +349,17 @@ export function observeMemberTurn(
       ...(parsed.ciWaivedUserQuote
         ? { ciWaivedUserQuote: parsed.ciWaivedUserQuote }
         : {}),
+      ...(trigger?.requireCodeReview
+        ? {
+            requireCodeReview: true,
+            codeReviewReason: trigger.reason,
+          }
+        : {}),
     });
-    return { recorded: true };
+    return {
+      recorded: true,
+      ...(trigger?.requireCodeReview ? { codeReviewUpgraded: true } : {}),
+    };
   }
 
   if (input.role === "expert") {

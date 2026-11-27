@@ -1834,7 +1834,11 @@ export function recordCandidateDelivery(
   }
   record.deliveries = deliveries;
 
-  // The coordinator decides on review; diff size is only reported back as advice.
+  // Upgrade codeReview when requested or auto-triggered by diff size / architecture impact.
+  const upgradedCodeReview =
+    Boolean(input.requireCodeReview) &&
+    record.codeReview !== "waived" &&
+    record.codeReview !== "required";
   if (input.requireCodeReview && record.codeReview !== "waived") {
     record.codeReview = "required";
     record.codeReviewReason = input.codeReviewReason?.trim() || "requested";
@@ -1867,6 +1871,8 @@ export function recordCandidateDelivery(
 
   if (record.routeDecided === false) {
     record.routeDecided = true;
+    syncUnassignedNodesForRoute(record, now);
+  } else if (upgradedCodeReview) {
     syncUnassignedNodesForRoute(record, now);
   }
   if (record.codeReview === "not-required" || record.codeReview === "waived") {

@@ -988,3 +988,110 @@ test("permission hook auto-allows coordinator read-only checks and scoped child 
     false,
   );
 });
+
+test("toPipelineSnapshot keeps active running Developer/Expert as running even if a delivery exists (regression for bcd00383)", (t) => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "paseo-team-live-status-"));
+  const stateRoot = path.join(tmp, "state");
+  const prevState = process.env.PASEO_TEAM_STATE_DIR;
+  process.env.PASEO_TEAM_STATE_DIR = stateRoot;
+  t.after(() => {
+    if (prevState === undefined) delete process.env.PASEO_TEAM_STATE_DIR;
+    else process.env.PASEO_TEAM_STATE_DIR = prevState;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const { recordPath } = initTask({
+    cwd: tmp,
+    goal: "添加设置按钮与背景透明",
+    teamName: "标准",
+    preset: {
+      developer: { model: "antigravity/gemini-4-neon", thinking: "xhigh" },
+      planReviewers: [{ model: "claude/claude-opus-5-5", thinking: "high" }],
+      codeReviewers: [{ model: "claude/claude-opus-5-5", thinking: "high" }],
+      complexMode: "simple",
+    },
+    coordinatorAgentId: "coord-live",
+  });
+  setTaskRoute(recordPath, {
+    isComplex: false,
+    planReview: false,
+    codeReview: false,
+    reason: "单文件前端改动",
+  });
+  registerTaskAgent(recordPath, {
+    role: "developer",
+    agentId: "dev-running-1",
+    profile: "antigravity/gemini-4-neon · xhigh",
+    provider: "antigravity",
+    briefSummary: "设置按钮 + 背景透明",
+  });
+  // Even if a delivery record already exists on round 1, a live-running Developer on the
+  // latest round must render visualStatus="running" (never contradicting liveState="running").
+  recordCandidateDelivery(recordPath, {
+    agentId: "dev-running-1",
+    summary: "Preliminary note",
+    architectureImpact: "无",
+  });
+
+  const liveMap = new Map<
+    string,
+    {
+      id: string;
+      status: "running" | "idle";
+      provider: string;
+      awaitingPermission: boolean;
+    }
+  >([
+    [
+      "coord-live",
+      {
+        id: "coord-live",
+        status: "running",
+        provider: "claude",
+        awaitingPermission: false,
+      },
+    ],
+    [
+      "dev-running-1",
+      {
+        id: "dev-running-1",
+        status: "running",
+        provider: "antigravity",
+        awaitingPermission: false,
+      },
+    ],
+  ]);
+  const runningSnap = toPipelineSnapshot(
+    recordPath,
+    loadTask(recordPath),
+    liveMap,
+    "zh",
+  );
+  const devStage = runningSnap.stages.find((s) => s.stageId === "development");
+  assert.ok(devStage);
+  const devView = devStage.nodes[0];
+  assert.equal(devView.liveState, "running");
+  assert.equal(
+    devView.visualStatus,
+    "running",
+    "running Developer must never render visualStatus='completed'",
+  );
+
+  // Once Developer finishes (idle), visualStatus cleanly transitions to completed.
+  liveMap.set("dev-running-1", {
+    id: "dev-running-1",
+    status: "idle",
+    provider: "antigravity",
+    awaitingPermission: false,
+  });
+  const idleSnap = toPipelineSnapshot(
+    recordPath,
+    loadTask(recordPath),
+    liveMap,
+    "zh",
+  );
+  const idleDev = idleSnap.stages.find((s) => s.stageId === "development")
+    ?.nodes[0];
+  assert.equal(idleDev?.liveState, "idle");
+  assert.equal(idleDev?.visualStatus, "completed");
+});

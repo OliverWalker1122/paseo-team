@@ -543,7 +543,72 @@ async function runLiveScenario({
       );
     }
 
-    // 3. Verify expected providers actually participated.
+    // 3. Process-level zero-error gate (regression for bcd00383):
+    //    Verify Coordinator timeline had ZERO failed `paseo_team` or `create_agent` calls,
+    //    and that `paseo_team(action="start")` delivered full protocol text (not stripped JSON).
+    const coordTimeline = await client
+      .fetchAgentTimeline(launcherInfo.agentId, {
+        direction: "tail",
+        limit: 80,
+      })
+      .catch(() => ({ entries: [] }));
+    const failedTeamCalls = [];
+    let sawStartProtocolText = !directPromptStart;
+    for (const entry of coordTimeline?.entries ?? []) {
+      const it = entry?.item;
+      if (it?.type !== "tool_call") continue;
+      const toolName = String(it.name ?? "");
+      if (!/(?:paseo_team|create_agent)$/i.test(toolName)) continue;
+      if (it.status === "failed" || it.status === "error") {
+        failedTeamCalls.push({
+          name: toolName,
+          input: it.detail?.input,
+          output: it.detail?.output,
+        });
+      }
+      if (
+        directPromptStart &&
+        /paseo_team$/i.test(toolName) &&
+        it.detail?.input?.action === "start"
+      ) {
+        const outStr = JSON.stringify(it.detail?.output ?? "");
+        if (
+          outStr.includes("create_agent") &&
+          outStr.includes("set_route") &&
+          outStr.includes("labels=")
+        ) {
+          sawStartProtocolText = true;
+        }
+      }
+    }
+    assert.deepEqual(
+      failedTeamCalls,
+      [],
+      `Coordinator timeline had failed paseo_team/create_agent tool calls:\n${JSON.stringify(failedTeamCalls, null, 2)}`,
+    );
+    assert.equal(
+      sawStartProtocolText,
+      true,
+      'paseo_team(action="start") output must deliver full kickoff protocol text (not stripped by structuredContent)',
+    );
+
+    // Verify spawned Developer carries standard labels `{ task, role }` from the kickoff protocol.
+    const devAgentSnap = await client
+      .fetchAgent(devNode.agentId)
+      .catch(() => null);
+    const devLabels = (devAgentSnap?.agent ?? devAgentSnap)?.labels ?? {};
+    assert.equal(
+      devLabels.task,
+      finalRecord.taskId,
+      `Developer labels.task should match taskId (${finalRecord.taskId}), got ${JSON.stringify(devLabels)}`,
+    );
+    assert.equal(
+      devLabels.role,
+      "developer",
+      `Developer labels.role should be "developer", got ${JSON.stringify(devLabels)}`,
+    );
+
+    // 4. Verify expected providers actually participated.
     const seenProviders = new Set(
       finalRecord.nodes.map((n) => n.provider).filter(Boolean),
     );
@@ -554,7 +619,7 @@ async function runLiveScenario({
       );
     }
 
-    // 4. Verify zero new plugin errors in daemon logs during this scenario.
+    // 5. Verify zero new plugin errors in daemon logs during this scenario.
     const newLogs = readPluginLogLines().slice(pluginLogBaseline);
     const errorLines = newLogs.filter((line) =>
       /\[paseo-team\].*error|UnhandledPromiseRejection|TypeError|ReferenceError/i.test(
@@ -631,12 +696,12 @@ const SCENARIOS = [
   {
     id: "draft-start",
     title:
-      "L3 Live E2E [draft-start]: Brand-new Claude draft receiving raw /paseo-team invokes paseo_team(action='start')",
+      "L3 Live E2E [draft-start]: Brand-new Claude draft receiving raw /paseo-team invokes paseo_team(action='start') with code review",
     launcherProvider: "claude",
     launcherModel: "claude-opus-5-5",
     launcherEnvVar: "PASEO_E2E_CLAUDE_LAUNCHER",
     presetName: process.env.PASEO_E2E_SMOKE_PRESET || "",
-    requireReview: false,
+    requireReview: true,
     expectedProviders: ["claude"],
     directPromptStart: true,
   },

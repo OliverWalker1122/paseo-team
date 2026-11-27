@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { inspectQualityGate } from "../server/quality-gate.ts";
-import { initTask, loadTask, registerTaskAgent } from "../server/task-store.ts";
+import {
+  initTask,
+  loadTask,
+  registerTaskAgent,
+  setTaskRoute,
+} from "../server/task-store.ts";
 import {
   extractTurnReply,
   observeMemberTurn,
@@ -256,4 +261,120 @@ test("observeMemberTurn passively drives full native pipeline from Expert -> Dev
     planReviewSatisfied: true,
     codeReviewSatisfied: true,
   });
+});
+
+test("observeMemberTurn auto-upgrades codeReview from not-required to required and unhides reviewers when diff exceeds thresholds (regression for bcd00383)", (t) => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "paseo-team-upgrade-"));
+  const stateRoot = path.join(tmp, "state");
+  const prevState = process.env.PASEO_TEAM_STATE_DIR;
+  process.env.PASEO_TEAM_STATE_DIR = stateRoot;
+  t.after(() => {
+    if (prevState === undefined) delete process.env.PASEO_TEAM_STATE_DIR;
+    else process.env.PASEO_TEAM_STATE_DIR = prevState;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // 1. Coordinator sets codeReview: false initially -> reviewers are skipped.
+  const { recordPath } = initTask({
+    cwd: tmp,
+    goal: "添加设置按钮与半透明背景",
+    teamName: "标准",
+    preset: samplePreset,
+    coordinatorAgentId: "coord-u1",
+  });
+  setTaskRoute(recordPath, {
+    isComplex: false,
+    planReview: false,
+    codeReview: false,
+    reason: "单文件前端改动",
+  });
+  registerTaskAgent(recordPath, {
+    role: "developer",
+    agentId: "dev-u1",
+    profile: "antigravity/gemini-4-neon · xhigh",
+    briefSummary: "设置面板 + 半透明",
+  });
+  assert.equal(loadTask(recordPath).codeReview, "not-required");
+  assert.equal(
+    loadTask(recordPath)
+      .nodes.filter((n) => n.role === "code-reviewer")
+      .every((n) => n.status === "skipped"),
+    true,
+  );
+
+  // 2. Developer delivers 3 files / 232 lines (>200 threshold) with trivial architectureImpact ("无（...）")
+  //    -> automatically upgrades codeReview to "required" and un-skips Code Reviewer nodes!
+  const obs = observeMemberTurn(recordPath, {
+    role: "developer",
+    agentId: "dev-u1",
+    text: "- 摘要：完成设置按钮与背景半透明。\n- 检查：通过（99/99）\n- 架构影响：无（保持单文件前端架构）",
+    changeStats: { files: 3, lines: 232 },
+  });
+  assert.equal(obs.recorded, true);
+  assert.equal(obs.codeReviewUpgraded, true);
+  const upgraded = loadTask(recordPath);
+  assert.equal(upgraded.codeReview, "required");
+  assert.match(upgraded.codeReviewReason ?? "", /232 lines/);
+  assert.equal(
+    upgraded.nodes
+      .filter((n) => n.role === "code-reviewer")
+      .every((n) => n.status === "pending"),
+    true,
+    "code reviewer nodes must be un-skipped so Team Graph reveals them immediately",
+  );
+  assert.equal(inspectQualityGate({ recordPath }).status, "BLOCKED");
+
+  // 3. Explicit user waiver ("waived") is NEVER overridden even when >200 lines.
+  const waivedTask = initTask({
+    cwd: tmp,
+    goal: "大型改动 免审",
+    teamName: "标准",
+    preset: samplePreset,
+    skipReviewReason: "user explicitly waived review",
+    coordinatorAgentId: "coord-u2",
+  });
+  registerTaskAgent(waivedTask.recordPath, {
+    role: "developer",
+    agentId: "dev-u2",
+    profile: "antigravity/gemini-4-neon · xhigh",
+    briefSummary: "免审改动",
+  });
+  const waivedObs = observeMemberTurn(waivedTask.recordPath, {
+    role: "developer",
+    agentId: "dev-u2",
+    text: "- 摘要：完成修改。\n- 检查：通过\n- 架构影响：新增 IndexedDB 存储层",
+    changeStats: { files: 8, lines: 450 },
+  });
+  assert.equal(waivedObs.recorded, true);
+  assert.equal(waivedObs.codeReviewUpgraded, undefined);
+  assert.equal(loadTask(waivedTask.recordPath).codeReview, "waived");
+
+  // 4. Non-trivial architectureImpact also triggers upgrade even when diff is small.
+  const archTask = initTask({
+    cwd: tmp,
+    goal: "改存储层",
+    teamName: "标准",
+    preset: samplePreset,
+    coordinatorAgentId: "coord-u3",
+  });
+  setTaskRoute(archTask.recordPath, {
+    isComplex: false,
+    planReview: false,
+    codeReview: false,
+    reason: "initial estimate",
+  });
+  registerTaskAgent(archTask.recordPath, {
+    role: "developer",
+    agentId: "dev-u3",
+    profile: "antigravity/gemini-4-neon · xhigh",
+    briefSummary: "存储层调整",
+  });
+  const archObs = observeMemberTurn(archTask.recordPath, {
+    role: "developer",
+    agentId: "dev-u3",
+    text: "- 摘要：切换存储后端。\n- 检查：通过\n- 架构影响：新增 IndexedDB 存储层",
+    changeStats: { files: 1, lines: 40 },
+  });
+  assert.equal(archObs.codeReviewUpgraded, true);
+  assert.equal(loadTask(archTask.recordPath).codeReview, "required");
 });

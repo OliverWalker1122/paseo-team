@@ -39,7 +39,7 @@ import {
   reviewerPerspectiveLabel,
 } from "./prompts.ts";
 import {
-  computeWorkspaceChangeStats,
+  evaluateCodeReviewTrigger,
   inspectQualityGate,
 } from "./quality-gate.ts";
 import {
@@ -746,11 +746,14 @@ export function toPipelineSnapshot(
                 multiPlan,
               ),
               round: r,
-              visualStatus: settledEarlier
-                ? "completed"
-                : item.view.visualStatus,
+              visualStatus:
+                r === maxPlanCycle && item.isLiveActive
+                  ? item.view.visualStatus
+                  : settledEarlier
+                    ? "completed"
+                    : item.view.visualStatus,
               liveState:
-                settledEarlier && item.isLiveActive
+                settledEarlier && r < maxPlanCycle && item.isLiveActive
                   ? "idle"
                   : item.view.liveState,
             };
@@ -949,9 +952,7 @@ export function toPipelineSnapshot(
                   : `Revises code for Round ${r - 1} review findings & reruns CI`
                 : item.view.briefSummary,
             visualStatus:
-              r === nextLiveDevRound &&
-              item.isLiveActive &&
-              roundDeliveries.length === 0
+              r === maxCodeCycle && item.isLiveActive
                 ? item.view.visualStatus
                 : settledDevRound
                   ? "completed"
@@ -2164,13 +2165,6 @@ export function createCoordinatorTool(
             ) {
               return {
                 text: `Task ${existing.taskId} is already initialized on this chat. Proceed directly with action="set_route" and member dispatch.\n\n${buildRecoveryBrief(existing)}`,
-                structuredContent: {
-                  taskId: existing.taskId,
-                  recordPath: existingPath,
-                  teamName: existing.teamName,
-                  complexMode: existing.complexMode,
-                  alreadyStarted: true,
-                },
               };
             }
           } catch {
@@ -2197,17 +2191,12 @@ export function createCoordinatorTool(
             allowRunningAgent: true,
           });
           const nextStepBanner = prepared.zh
-            ? `任务已初始化（task_id=${prepared.taskId}）。下一步必须先调用 paseo_team(action="set_route", ...)，再调用 Paseo 的 create_agent 按下方参数派发成员（严禁主控自己编辑仓库文件或跑测试；如工具被延迟加载请先检索加载 create_agent）。`
-            : `Task initialized (task_id=${prepared.taskId}). REQUIRED NEXT STEP: call paseo_team(action="set_route", ...) and dispatch Developer via Paseo's create_agent with the exact parameters below (NEVER edit repository files or run tests yourself; load create_agent first if MCP tools are deferred).`;
+            ? `任务已初始化（task_id=${prepared.taskId}）。下一步必须先调用 paseo_team(action="set_route", ...)，再调用 Paseo 的 create_agent 按下方参数派发成员（严禁主控自己编辑仓库文件或跑测试；派发后不要调用 update，直接结束本轮等待 [Agent finished]；如工具被延迟加载请先检索加载 create_agent）。`
+            : `Task initialized (task_id=${prepared.taskId}). REQUIRED NEXT STEP: call paseo_team(action="set_route", ...) and dispatch Developer via Paseo's create_agent with the exact parameters below (NEVER edit repository files or run tests yourself; do NOT call update after dispatch — end your turn and wait for [Agent finished]; load create_agent first if MCP tools are deferred).`;
+          // Return text-only (no structuredContent): Paseo's MCP bridge unwraps
+          // structuredContent in preference to text, which would drop the protocol.
           return {
             text: `${nextStepBanner}\n\n${prepared.kickoffPrompt}`,
-            structuredContent: {
-              taskId: prepared.taskId,
-              recordPath: prepared.recordPath,
-              teamName: prepared.teamName,
-              complexMode: prepared.complexMode,
-              coordinatorAgentId: prepared.coordinatorAgentId,
-            },
           };
         } catch (err) {
           return {
@@ -2229,14 +2218,6 @@ export function createCoordinatorTool(
         const record = loadTask(recordPath);
         return {
           text: buildRecoveryBrief(record),
-          structuredContent: {
-            taskId: record.taskId,
-            recordPath,
-            lifecycleStatus: record.lifecycleStatus,
-            planReviewRound: record.planReviewRound,
-            codeReviewRound: record.codeReviewRound,
-            circuitBroken: record.circuitBroken,
-          },
         };
       }
 
@@ -2280,15 +2261,6 @@ export function createCoordinatorTool(
             : "";
         return {
           text: `Route locked: isComplex=${record.isComplex}, planReview=${record.planReview}, codeReview=${record.codeReview}, complexMode=${record.complexMode}.${preservedNote}`,
-          structuredContent: {
-            isComplex: record.isComplex,
-            routeDecided: record.routeDecided,
-            routeReason: record.routeReason,
-            planReview: record.planReview,
-            codeReview: record.codeReview,
-            complexMode: record.complexMode,
-            preserved,
-          },
         };
       }
 
@@ -2313,15 +2285,6 @@ export function createCoordinatorTool(
                 args.decision === "extra_round"
                   ? `Breaker lifted (${res.stage}): extra round granted (maxRounds=${res.maxRounds}).`
                   : `Stage "${res.stage}" waived per user decision; task resumed.`,
-              structuredContent: {
-                stage: res.stage,
-                decision: args.decision,
-                maxRounds: res.maxRounds,
-                lifecycleStatus: res.record.lifecycleStatus,
-                planReview: res.record.planReview,
-                codeReview: res.record.codeReview,
-                circuitBroken: res.record.circuitBroken,
-              },
             };
           } catch (err) {
             return {
@@ -2376,12 +2339,7 @@ export function createCoordinatorTool(
           });
           notifyTaskChanges();
           return {
-            text: res.message,
-            structuredContent: {
-              status: res.status,
-              round: res.round,
-              maxRounds: res.maxRounds,
-            },
+            text: `${res.message} (status=${res.status}, round=${res.round}/${res.maxRounds})`,
           };
         }
 
@@ -2391,45 +2349,85 @@ export function createCoordinatorTool(
           args.ciStatus ||
           args.ciWaivedUserQuote?.trim()
         ) {
-          const hasDispatchedDev =
-            current.nodes.some(
-              (n) => n.role === "developer" && Boolean(n.agentId),
-            ) ||
-            Boolean(
-              args.agentId?.trim() &&
-              args.agentId.trim() !== current.coordinatorAgentId,
-            );
-          if (!hasDispatchedDev && !current.delivery) {
+          const dispatchedDevNode = current.nodes.find(
+            (n) => n.role === "developer" && Boolean(n.agentId),
+          );
+          const targetDevAgentId =
+            args.agentId?.trim() &&
+            args.agentId.trim() !== current.coordinatorAgentId
+              ? args.agentId.trim()
+              : dispatchedDevNode?.agentId;
+          if (!targetDevAgentId && !current.delivery) {
             return {
               text: "Cannot record a Developer delivery before dispatching a Developer agent via Paseo's create_agent. Role separation: Coordinator must dispatch Developer instead of editing files directly.",
               isError: true,
             };
           }
+          // Never mark Developer delivered while its session is still actively running.
+          if (targetDevAgentId && context?.paseo?.agents?.ref) {
+            const devSnap = await context.paseo.agents
+              .ref(targetDevAgentId)
+              .refresh()
+              .catch(() => null);
+            const devStatus = (
+              devSnap?.agent as { status?: string } | undefined
+            )?.status;
+            if (devStatus === "running" || devStatus === "initializing") {
+              return {
+                text: `Developer agent ${targetDevAgentId} is still ${devStatus}. Do NOT call action="update" right after dispatching — end your turn and wait for [Agent finished]; the plugin syncs Developer delivery automatically.`,
+                isError: true,
+              };
+            }
+          }
+          if (
+            args.summary?.trim() &&
+            !args.ciStatus &&
+            !args.ciWaivedUserQuote?.trim() &&
+            /^(?:Developer\s*)?(?:已派发|已派出|已启动|正在执行|派发给|(?:dispatched|started|in progress)\b)/i.test(
+              args.summary.trim(),
+            )
+          ) {
+            return {
+              text: 'Do NOT call action="update" to report that Developer was dispatched. End your turn and wait for [Agent finished]; the plugin updates the Team Graph passively.',
+              isError: true,
+            };
+          }
+          const architectureImpact =
+            args.architectureImpact?.trim() ||
+            current.delivery?.architectureImpact ||
+            "None";
+          const trigger = evaluateCodeReviewTrigger({
+            projectRoot: current.projectRoot,
+            architectureImpact,
+            hasCodeReviewers: current.team.codeReviewers.length > 0,
+          });
+          const shouldUpgradeReview =
+            current.codeReview === "not-required" && trigger.requireCodeReview;
           const updated = recordCandidateDelivery(recordPath, {
-            ...(args.agentId ? { agentId: args.agentId } : {}),
+            ...(targetDevAgentId ? { agentId: targetDevAgentId } : {}),
             summary:
               args.summary?.trim() ||
               current.delivery?.summary ||
               "Updated delivery state",
-            architectureImpact:
-              args.architectureImpact?.trim() ||
-              current.delivery?.architectureImpact ||
-              "None",
+            architectureImpact,
             ...(args.ciStatus ? { ciStatus: args.ciStatus } : {}),
             ...(args.ciSummary ? { ciSummary: args.ciSummary } : {}),
             ...(args.ciWaivedUserQuote
               ? { ciWaivedUserQuote: args.ciWaivedUserQuote }
               : {}),
+            ...(shouldUpgradeReview
+              ? {
+                  requireCodeReview: true,
+                  codeReviewReason: trigger.reason,
+                }
+              : {}),
           });
-          const change = computeWorkspaceChangeStats(updated.projectRoot);
           notifyTaskChanges();
+          const upgradeNote = shouldUpgradeReview
+            ? ` — ${trigger.reason}; dispatch Code Reviewers before calling complete.`
+            : "";
           return {
-            text: `Updated delivery (codeReview=${updated.codeReview}).`,
-            structuredContent: {
-              delivery: updated.candidate,
-              change,
-              codeReview: updated.codeReview,
-            },
+            text: `Updated delivery ${updated.candidate} (${trigger.change.files} files, ${trigger.change.lines} lines, codeReview=${updated.codeReview})${upgradeNote}`,
           };
         }
 
@@ -2457,7 +2455,6 @@ export function createCoordinatorTool(
         notifyTaskChanges();
         return {
           text: `Task completed per user ruling (${args.reason.trim()}).`,
-          structuredContent: { ...rep, forced: true },
         };
       }
       if (rep.status === "READY" && !args.inspectOnly) {
@@ -2471,7 +2468,6 @@ export function createCoordinatorTool(
               ? "Quality gate READY."
               : "Quality gate READY; task completed."
             : `Quality gate BLOCKED:\n${rep.missing.map((m) => `- ${m}`).join("\n")}`,
-        structuredContent: rep,
         isError: rep.status !== "READY",
       };
     },

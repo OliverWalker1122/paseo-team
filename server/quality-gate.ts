@@ -87,6 +87,63 @@ export function computeWorkspaceChangeStats(directory: string): {
   };
 }
 
+export const CODE_REVIEW_LINE_THRESHOLD = 200;
+export const CODE_REVIEW_FILE_THRESHOLD = 5;
+
+export function isNonTrivialArchitectureImpact(
+  architectureImpact: string | undefined,
+): boolean {
+  const trimmed = (architectureImpact ?? "").trim();
+  if (!trimmed) return false;
+  return !/^(?:none|no\b|n\/a|nil|无|没有|未变更|不涉及|不影响)/i.test(trimmed);
+}
+
+/**
+ * Evaluates whether a completed Developer delivery must auto-upgrade codeReview
+ * from "not-required" to "required" based on actual workspace diff size or
+ * non-trivial architecture impact.
+ */
+export function evaluateCodeReviewTrigger(options: {
+  projectRoot: string;
+  architectureImpact?: string;
+  hasCodeReviewers: boolean;
+  changeStats?: { files: number; lines: number };
+}): {
+  requireCodeReview: boolean;
+  reason?: string;
+  change: { files: number; lines: number };
+} {
+  const change =
+    options.changeStats ?? computeWorkspaceChangeStats(options.projectRoot);
+  if (!options.hasCodeReviewers) {
+    return { requireCodeReview: false, change };
+  }
+  const reasons: string[] = [];
+  if (change.lines > CODE_REVIEW_LINE_THRESHOLD) {
+    reasons.push(
+      `changed ${change.lines} lines (>${CODE_REVIEW_LINE_THRESHOLD})`,
+    );
+  }
+  if (change.files > CODE_REVIEW_FILE_THRESHOLD) {
+    reasons.push(
+      `changed ${change.files} files (>${CODE_REVIEW_FILE_THRESHOLD})`,
+    );
+  }
+  if (isNonTrivialArchitectureImpact(options.architectureImpact)) {
+    reasons.push(
+      `architecture impact: ${(options.architectureImpact ?? "").trim().slice(0, 80)}`,
+    );
+  }
+  if (reasons.length === 0) {
+    return { requireCodeReview: false, change };
+  }
+  return {
+    requireCodeReview: true,
+    reason: `Auto-upgraded code review (${reasons.join("; ")})`,
+    change,
+  };
+}
+
 function readJson(file: string): Record<string, unknown> | null {
   try {
     if (lstatSync(file).isSymbolicLink()) return null;

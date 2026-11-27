@@ -62,6 +62,54 @@ function createPluginHarness(t: test.TestContext) {
   let createdSeq = 0;
   const paseoMock = {
     providers: {
+      async snapshot() {
+        return {
+          entries: [
+            {
+              provider: "codex",
+              label: "Codex",
+              status: "ready",
+              modes: [{ id: "auto-review" }, { id: "auto" }],
+              models: [
+                {
+                  id: "gpt-6.2-astra",
+                  label: "GPT-6.2-Astra",
+                  thinkingOptions: [{ id: "high", label: "High" }],
+                  defaultThinkingOptionId: "high",
+                },
+              ],
+            },
+            {
+              provider: "claude",
+              label: "Claude",
+              status: "ready",
+              modes: [{ id: "auto" }, { id: "default" }],
+              models: [
+                {
+                  id: "claude-sonnet-5-5",
+                  label: "Sonnet 5.5",
+                  thinkingOptions: [{ id: "medium", label: "Medium" }],
+                  defaultThinkingOptionId: "medium",
+                },
+              ],
+            },
+            {
+              provider: "antigravity",
+              label: "Antigravity",
+              status: "ready",
+              modes: [{ id: "default" }, { id: "auto" }, { id: "full-access" }],
+              models: [
+                {
+                  id: "gemini-4-neon",
+                  label: "Gemini 4 Neon",
+                  thinkingOptions: [{ id: "xhigh", label: "Extra" }],
+                  defaultThinkingOptionId: "high",
+                },
+              ],
+            },
+          ],
+        };
+      },
       async list() {
         return {
           providers: [
@@ -1678,8 +1726,17 @@ test("L2 integration: draft-chat /paseo-team fallback via paseo_team(action='sta
     toolCtx,
   );
   assert.notEqual(started.isError, true);
+  // MCP unwrap contract (regression for bcd00383): structuredContent must be omitted
+  // because Paseo's unwrapMcpResult drops `text` whenever structuredContent is present.
+  assert.equal(
+    started.structuredContent,
+    undefined,
+    "paseo_team tool results must omit structuredContent so Paseo never strips text",
+  );
   assert.match(started.text, /\[Team 任务启动\]/);
   assert.match(started.text, /继续完成背景自定义图片功能/);
+  assert.match(started.text, /"modeId":"auto"/);
+  assert.match(started.text, /"role":"developer"/);
   assert.equal(
     h.sentMessages.filter((m) => m.agentId === draftAgentId).length,
     0,
@@ -1700,16 +1757,14 @@ test("L2 integration: draft-chat /paseo-team fallback via paseo_team(action='sta
     "claude/claude-opus-5-5",
   );
 
-  // 4. Calling `action="start"` again immediately on the same unrouted task is idempotent.
+  // 4. Calling `action="start"` again immediately on the same unrouted task is idempotent and text-only.
   const dup = await teamTool.execute(
     { action: "start", rawArgs: "继续完成背景自定义图片功能" },
     toolCtx,
   );
   assert.notEqual(dup.isError, true);
-  assert.equal(
-    (dup.structuredContent as { alreadyStarted?: boolean })?.alreadyStarted,
-    true,
-  );
+  assert.equal(dup.structuredContent, undefined);
+  assert.match(dup.text, /already initialized/i);
 
   // 5. Subagent calls to `action="start"` are rejected.
   const subDenied = await teamTool.execute(
@@ -1725,7 +1780,7 @@ test("L2 integration: draft-chat /paseo-team fallback via paseo_team(action='sta
   );
   assert.equal(subDenied.isError, true);
 
-  // 6. Immediately calling `set_route` in the same turn works against the newly created task.
+  // 6. Immediately calling `set_route` and `summary` in the same turn works and omits structuredContent.
   const routed = await teamTool.execute(
     {
       action: "set_route",
@@ -1737,7 +1792,13 @@ test("L2 integration: draft-chat /paseo-team fallback via paseo_team(action='sta
     toolCtx,
   );
   assert.notEqual(routed.isError, true);
+  assert.equal(routed.structuredContent, undefined);
   assert.equal(loadTask(meta.recordPath).routeDecided, true);
+
+  const summaryOut = await teamTool.execute({ action: "summary" }, toolCtx);
+  assert.notEqual(summaryOut.isError, true);
+  assert.equal(summaryOut.structuredContent, undefined);
+  assert.match(summaryOut.text, /继续完成背景自定义图片功能/);
 
   // 7. Role-separation guard: Coordinator cannot fabricate a Developer delivery via `update`
   //    before actually dispatching a Developer agent via create_agent.
@@ -1751,4 +1812,70 @@ test("L2 integration: draft-chat /paseo-team fallback via paseo_team(action='sta
   );
   assert.equal(fakeDelivery.isError, true);
   assert.match(fakeDelivery.text, /create_agent/);
+
+  // 8. Dispatch-in-progress guard (regression for bcd00383): once Developer is dispatched and still
+  //    running, calling `update` with a "已派发" progress note must be rejected instead of marking
+  //    Developer completed prematurely.
+  const devId = "dev-live-a1f8de04";
+  h.agentDirectory.set(devId, {
+    id: devId,
+    workspaceId: "wks_todo",
+    cwd: h.workspaceDir,
+    provider: "antigravity",
+    model: "gemini-4-neon",
+    status: "running",
+    parentAgentId: draftAgentId,
+    title: "Developer: 设置按钮 + 背景透明",
+    metadata: {},
+  });
+  await h.invokeHook("agent.create.after", {
+    agent: {
+      id: devId,
+      workspaceId: "wks_todo",
+      parentAgentId: draftAgentId,
+      provider: "antigravity",
+      cwd: h.workspaceDir,
+      title: "Developer: 设置按钮 + 背景透明",
+      background: false,
+      metadata: {},
+    },
+  });
+  const prematureUpdate = await teamTool.execute(
+    {
+      action: "update",
+      stage: "code",
+      agentId: devId,
+      summary: "Developer 已派发：设置 dialog 收纳主题/背景控件",
+    },
+    toolCtx,
+  );
+  assert.equal(prematureUpdate.isError, true);
+  assert.match(prematureUpdate.text, /still running/i);
+  assert.equal(loadTask(meta.recordPath).delivery, null);
+  assert.equal(
+    loadTask(meta.recordPath).nodes.find((n) => n.role === "developer")?.status,
+    "running",
+  );
+
+  // Even if Developer becomes idle, a bare "已派发" note without ciStatus must not record a delivery.
+  h.agentDirectory.get(devId)!.status = "idle";
+  const dispatchNoteUpdate = await teamTool.execute(
+    {
+      action: "update",
+      agentId: devId,
+      summary: "Developer 已派发：准备开发",
+    },
+    toolCtx,
+  );
+  assert.equal(dispatchNoteUpdate.isError, true);
+  assert.equal(loadTask(meta.recordPath).delivery, null);
+
+  // `complete` (blocked) also omits structuredContent so missing-gate reasons reach the model.
+  const blockedComplete = await teamTool.execute(
+    { action: "complete", inspectOnly: true },
+    toolCtx,
+  );
+  assert.equal(blockedComplete.isError, true);
+  assert.equal(blockedComplete.structuredContent, undefined);
+  assert.match(blockedComplete.text, /Quality gate BLOCKED/);
 });
