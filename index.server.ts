@@ -26,6 +26,7 @@ import {
   buildDeveloperPrompt,
   buildExpertPrompt,
   buildReviewerPrompt,
+  COORDINATOR_ACTIVATION_HINT,
 } from "./server/prompts.ts";
 import { inspectQualityGate } from "./server/quality-gate.ts";
 import {
@@ -53,6 +54,17 @@ export function isAutoAllowedTeamTool(
     );
   }
   return false;
+}
+
+export function isAutoAllowedStartCall(
+  parentAgentId: string | null | undefined,
+  toolName: string | null,
+  requestInput: unknown,
+): boolean {
+  if (parentAgentId || !toolName) return false;
+  if (!/(?:^|__|_|\/|:|\.)paseo_team$/.test(toolName)) return false;
+  if (!requestInput || typeof requestInput !== "object") return false;
+  return (requestInput as Record<string, unknown>).action === "start";
 }
 
 export function isScopedCoordinatorPermissionResponse(options: {
@@ -672,16 +684,32 @@ export default function contribute(server: PluginServerContext) {
           return undefined;
         }
 
-        // Attach the single compact `paseo_team` coordinator tool persistently on
-        // interactive top-level chats without modifying `appendSystemPrompt`.
-        // Starting `/paseo-team` later then needs zero reload and keeps prompt cache intact.
+        // Attach the single compact `paseo_team` coordinator tool and tiny static
+        // activation hint persistently on interactive top-level chats. Because both
+        // are fixed from initial open, starting `/paseo-team` needs zero reload and
+        // preserves 100% of the prompt cache (including on providers that defer MCP schemas).
         const existingTools = request.tools ?? [];
-        if (existingTools.some((t) => t.name === "paseo_team")) {
+        const hasTeamTool = existingTools.some((t) => t.name === "paseo_team");
+        const existingPrompts = request.appendSystemPrompt ?? [];
+        const hasActivationHint = existingPrompts.includes(
+          COORDINATOR_ACTIVATION_HINT,
+        );
+        if (hasTeamTool && hasActivationHint) {
           return undefined;
         }
         return {
           ...request,
-          tools: [...existingTools, createCoordinatorTool()],
+          ...(hasActivationHint
+            ? {}
+            : {
+                appendSystemPrompt: [
+                  ...existingPrompts,
+                  COORDINATOR_ACTIVATION_HINT,
+                ],
+              }),
+          ...(hasTeamTool
+            ? {}
+            : { tools: [...existingTools, createCoordinatorTool()] }),
         };
       } catch (err) {
         console.error("[paseo-team] agent.open.before error:", err);
@@ -722,6 +750,11 @@ export default function contribute(server: PluginServerContext) {
           }
           if (
             isAutoAllowedTeamTool(role, toolName) ||
+            isAutoAllowedStartCall(
+              agent.parentAgentId,
+              toolName,
+              request.input,
+            ) ||
             isScopedCoordinatorPermissionResponse({
               role,
               toolName,
@@ -730,7 +763,7 @@ export default function contribute(server: PluginServerContext) {
               autoAllowedPermissionIds,
             })
           ) {
-            if (role !== "coordinator") {
+            if (role && role !== "coordinator") {
               rememberAutoAllowedPermission(request.id);
             }
             const allowAction = Array.isArray(request.actions)

@@ -236,6 +236,7 @@ function createPluginHarness(t: test.TestContext) {
     metadataUpdates,
     agentDirectory,
     timelines,
+    paseo: paseoMock,
     async invokeHook(name: string, payload: Record<string, unknown>) {
       const fn = hooks.get(name);
       assert.ok(fn, `expected hook ${name} to be registered`);
@@ -450,7 +451,7 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
   );
 
   // 0a. Normal non-team interactive top-level chat gets the single persistent `paseo_team`
-  // tool with ZERO appendSystemPrompt pollution (preserving prompt cache on future /paseo-team).
+  // tool + tiny static activation hint (fixed from initial open so future /paseo-team needs zero reload).
   const normalChatOut = (await h.invokeHook("agent.open.before", {
     request: {
       ...baseReq,
@@ -468,7 +469,9 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
       ) => Promise<{ text: string; isError?: boolean }>;
     }>;
   };
-  assert.deepEqual(normalChatOut.appendSystemPrompt, ["EXISTING_SYS_PROMPT"]);
+  assert.equal(normalChatOut.appendSystemPrompt.length, 2);
+  assert.equal(normalChatOut.appendSystemPrompt[0], "EXISTING_SYS_PROMPT");
+  assert.match(normalChatOut.appendSystemPrompt[1], /\/paseo-team/);
   assert.deepEqual(
     normalChatOut.tools.map((tool) => tool.name),
     ["existing_tool", "paseo_team"],
@@ -494,7 +497,7 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
     undefined,
   );
 
-  // 1. Coordinator via metadata (also updates coordinatorAgentId, without mutating appendSystemPrompt).
+  // 1. Coordinator via metadata (identical static appendSystemPrompt prefix as initial open).
   const coordOut = (await h.invokeHook("agent.open.before", {
     request: {
       ...baseReq,
@@ -510,7 +513,10 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
       },
     },
   })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.deepEqual(coordOut.appendSystemPrompt, ["EXISTING_SYS_PROMPT"]);
+  assert.deepEqual(
+    coordOut.appendSystemPrompt,
+    normalChatOut.appendSystemPrompt,
+  );
   assert.deepEqual(
     coordOut.tools.map((tool) => tool.name),
     ["existing_tool", "paseo_team"],
@@ -1516,4 +1522,233 @@ test("regression: task started without plan review dynamically upgrades to planR
     .execute({ action: "complete" }, coordCtx);
   assert.equal(completed.isError, false);
   assert.equal(loadTask(started.recordPath).lifecycleStatus, "completed");
+});
+
+test("L2 integration: draft-chat /paseo-team fallback via paseo_team(action='start') initializes task inline", async (t) => {
+  const h = createPluginHarness(t);
+  const { saveConfig } = await import("../server/config-store.ts");
+  saveConfig({
+    schemaVersion: 5,
+    default: "标准",
+    projects: {},
+    teams: {
+      标准: {
+        developer: { model: "antigravity/gemini-4-neon", thinking: "xhigh" },
+        planReviewers: [
+          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
+          { model: "codex/gpt-6.2-astra", thinking: "high" },
+        ],
+        separatePlanReviewers: false,
+        codeReviewers: [
+          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
+          { model: "codex/gpt-6.2-astra", thinking: "high" },
+        ],
+        expert: { model: "claude/claude-sonnet-5-5", thinking: "medium" },
+        complexMode: "simple",
+      },
+    },
+  });
+
+  const draftAgentId = "draft-chat-ee921d96";
+  h.agentDirectory.set(draftAgentId, {
+    id: draftAgentId,
+    workspaceId: "wks_todo",
+    cwd: h.workspaceDir,
+    provider: "claude",
+    model: "claude-opus-5-5",
+    thinkingOptionId: "high",
+    status: "running",
+    parentAgentId: null,
+    title: "继续完成背景自定义图片功能",
+    metadata: {},
+  });
+
+  // 1. Brand-new top-level chat opens with no task yet; agent.open.before attaches `paseo_team`.
+  const openOut = (await h.invokeHook("agent.open.before", {
+    request: {
+      workspaceId: "wks_todo",
+      cwd: h.workspaceDir,
+      reason: "create",
+      purpose: "interactive",
+      background: false,
+      agentId: draftAgentId,
+      provider: "claude",
+      title: "继续完成背景自定义图片功能",
+      labels: {},
+      metadata: {},
+      appendSystemPrompt: [],
+      tools: [],
+      env: {},
+      mcpServers: {},
+    },
+  })) as {
+    tools: Array<{
+      name: string;
+      description: string;
+      execute: (
+        args: Record<string, unknown>,
+        context?: Record<string, unknown>,
+      ) => Promise<{
+        text: string;
+        structuredContent?: unknown;
+        isError?: boolean;
+      }>;
+    }>;
+  };
+  const teamTool = (openOut?.tools ?? []).find(
+    (tool) => tool.name === "paseo_team",
+  );
+  assert.ok(
+    teamTool,
+    "top-level draft chat should receive persistent paseo_team tool",
+  );
+  assert.match(teamTool.description, /action="start"/);
+
+  // 2. Permission hook auto-allows `paseo_team(action="start")` on top-level chat even before task.json exists,
+  //    but does NOT auto-allow other actions or subagent start calls.
+  await h.invokeHook("agent.permission.before", {
+    agent: {
+      id: draftAgentId,
+      workspaceId: "wks_todo",
+      parentAgentId: null,
+      provider: "claude",
+      cwd: h.workspaceDir,
+      title: "继续完成背景自定义图片功能",
+      background: false,
+      metadata: {},
+    },
+    request: {
+      id: "perm-draft-start",
+      kind: "tool",
+      toolName: "mcp_paseo_paseo_team",
+      input: { action: "start", rawArgs: "继续完成背景自定义图片功能" },
+      actions: [{ id: "allow-once", behavior: "allow" }],
+    },
+  });
+  await h.invokeHook("agent.permission.before", {
+    agent: {
+      id: draftAgentId,
+      workspaceId: "wks_todo",
+      parentAgentId: null,
+      provider: "claude",
+      cwd: h.workspaceDir,
+      title: "继续完成背景自定义图片功能",
+      background: false,
+      metadata: {},
+    },
+    request: {
+      id: "perm-draft-set-route-no-task",
+      kind: "tool",
+      toolName: "mcp_paseo_paseo_team",
+      input: { action: "set_route" },
+      actions: [{ id: "allow-once", behavior: "allow" }],
+    },
+  });
+  assert.equal(
+    h.permissionResponses.some((r) => r.requestId === "perm-draft-start"),
+    true,
+  );
+  assert.equal(
+    h.permissionResponses.some(
+      (r) => r.requestId === "perm-draft-set-route-no-task",
+    ),
+    false,
+  );
+
+  // 3. Calling `action="start"` while chat is already running creates task.json, binds metadata,
+  //    strips accidental `/paseo-team` prefix, does NOT call send(), and returns the full kickoff brief.
+  const toolCtx = {
+    agent: {
+      id: draftAgentId,
+      workspaceId: "wks_todo",
+      parentAgentId: null,
+      provider: "claude",
+      cwd: h.workspaceDir,
+      title: "继续完成背景自定义图片功能",
+      background: false,
+      metadata: {},
+    },
+    paseo: h.paseo,
+  };
+  const started = await teamTool.execute(
+    {
+      action: "start",
+      rawArgs: "/paseo-team 继续完成背景自定义图片功能 with review",
+    },
+    toolCtx,
+  );
+  assert.notEqual(started.isError, true);
+  assert.match(started.text, /\[Team 任务启动\]/);
+  assert.match(started.text, /继续完成背景自定义图片功能/);
+  assert.equal(
+    h.sentMessages.filter((m) => m.agentId === draftAgentId).length,
+    0,
+    "tool start must return kickoff inline without sending a duplicate user message",
+  );
+  const meta = (
+    h.agentDirectory.get(draftAgentId)?.metadata as
+      Record<string, unknown> | undefined
+  )?.["paseo-team.task"] as
+    { taskId?: string; recordPath?: string; role?: string } | undefined;
+  assert.equal(meta?.role, "coordinator");
+  assert.ok(meta?.recordPath, "metadata should record task recordPath");
+  const record = loadTask(meta.recordPath);
+  assert.equal(record.coordinatorAgentId, draftAgentId);
+  assert.equal(record.codeReview, "required");
+  assert.equal(
+    record.nodes.find((n) => n.nodeId === "coordinator")?.profile,
+    "claude/claude-opus-5-5",
+  );
+
+  // 4. Calling `action="start"` again immediately on the same unrouted task is idempotent.
+  const dup = await teamTool.execute(
+    { action: "start", rawArgs: "继续完成背景自定义图片功能" },
+    toolCtx,
+  );
+  assert.notEqual(dup.isError, true);
+  assert.equal(
+    (dup.structuredContent as { alreadyStarted?: boolean })?.alreadyStarted,
+    true,
+  );
+
+  // 5. Subagent calls to `action="start"` are rejected.
+  const subDenied = await teamTool.execute(
+    { action: "start", rawArgs: "subagent attempt" },
+    {
+      ...toolCtx,
+      agent: {
+        ...toolCtx.agent,
+        id: "child-dev-1",
+        parentAgentId: draftAgentId,
+      },
+    },
+  );
+  assert.equal(subDenied.isError, true);
+
+  // 6. Immediately calling `set_route` in the same turn works against the newly created task.
+  const routed = await teamTool.execute(
+    {
+      action: "set_route",
+      isComplex: false,
+      planReview: false,
+      codeReview: true,
+      reason: "单文件前端背景功能，跳过方案评审但保留代码审查",
+    },
+    toolCtx,
+  );
+  assert.notEqual(routed.isError, true);
+  assert.equal(loadTask(meta.recordPath).routeDecided, true);
+
+  // 7. Role-separation guard: Coordinator cannot fabricate a Developer delivery via `update`
+  //    before actually dispatching a Developer agent via create_agent.
+  const fakeDelivery = await teamTool.execute(
+    {
+      action: "update",
+      summary: "Coordinator edited file directly",
+      ciStatus: "pass",
+    },
+    toolCtx,
+  );
+  assert.equal(fakeDelivery.isError, true);
+  assert.match(fakeDelivery.text, /create_agent/);
 });

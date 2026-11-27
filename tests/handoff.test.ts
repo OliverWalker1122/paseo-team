@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  isAutoAllowedStartCall,
   isAutoAllowedTeamTool,
   isScopedCoordinatorPermissionResponse,
 } from "../index.server.ts";
@@ -876,6 +877,42 @@ test("permission hook auto-allows coordinator read-only checks and scoped child 
   );
   assert.equal(
     isAutoAllowedTeamTool("coordinator", "mcp_paseo_respond_to_permission"),
+    false,
+  );
+
+  // Direct /paseo-team start fallback (e.g. brand-new draft chat or chat with attachments):
+  // auto-allow only `paseo_team(action="start")` on top-level non-subagent chats.
+  assert.equal(
+    isAutoAllowedStartCall(null, "mcp_paseo_paseo_team", {
+      action: "start",
+      rawArgs: "implement feature",
+    }),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedStartCall(undefined, "mcp__paseo__paseo_team", {
+      action: "start",
+      rawArgs: "implement feature",
+    }),
+    true,
+  );
+  assert.equal(
+    isAutoAllowedStartCall(null, "mcp_paseo_paseo_team", {
+      action: "set_route",
+    }),
+    false,
+  );
+  assert.equal(
+    isAutoAllowedStartCall("parent-coord-1", "mcp_paseo_paseo_team", {
+      action: "start",
+      rawArgs: "implement feature",
+    }),
+    false,
+  );
+  assert.equal(
+    isAutoAllowedStartCall(null, "mcp_paseo_create_agent", {
+      action: "start",
+    }),
     false,
   );
 

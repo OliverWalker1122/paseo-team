@@ -249,6 +249,7 @@ async function runLiveScenario({
   presetName,
   requireReview = true,
   expectedProviders = [],
+  directPromptStart = false,
 }) {
   assertPluginRunning();
   const cwd = resolveTargetCwd();
@@ -278,19 +279,6 @@ async function runLiveScenario({
       `Preset "${resolvedPreset ?? "(default)"}" must exist in paseo-team config for scenario "${name}"`,
     );
 
-    launcherInfo = await resolveLauncherAgentId({
-      client,
-      workspaceId,
-      cwd,
-      provider: launcherProvider,
-      defaultModel: launcherModel,
-      catalogProviders: configBundle?.providers,
-      envOverride: process.env[launcherEnvVar],
-    });
-    if (launcherInfo.ephemeral) {
-      ownedSessionIds.add(launcherInfo.agentId);
-    }
-
     const reviewPhrase = requireReview ? "with code review" : "no code review";
     const expectedLine = `after=${name}`;
     const rawArgs = [
@@ -301,25 +289,102 @@ async function runLiveScenario({
 
     const preAgents = await listWorkspaceAgents(client, cwd);
     const preAgentIds = new Set(preAgents.map((a) => a?.id).filter(Boolean));
+    let startedTaskId = null;
 
-    const started = await client.invokePluginRpc(
-      "paseo-team",
-      "paseo_team.tasks.start",
-      {
-        cwd,
+    if (directPromptStart) {
+      // Simulate a brand-new chat draft where Paseo sends raw "/paseo-team ..." directly
+      // without client slash-command interception (regression for ee921d96).
+      const cat = Array.isArray(configBundle?.providers)
+        ? configBundle.providers.find((p) => p?.provider === launcherProvider)
+        : null;
+      const models = Array.isArray(cat?.models) ? cat.models : [];
+      const modelEntry =
+        models.find((m) => m.id === launcherModel) ??
+        models.find((m) => m.isDefault) ??
+        models[0];
+      const resolvedModelId = modelEntry?.id ?? launcherModel;
+      const thinkingOptions = Array.isArray(modelEntry?.thinkingOptions)
+        ? modelEntry.thinkingOptions
+        : [];
+      const preferredThinking =
+        thinkingOptions.find((t) => t.id === "medium")?.id ??
+        modelEntry?.defaultThinkingId;
+      const created = await client.createAgent({
         workspaceId,
-        agentId: launcherInfo.agentId,
-        rawArgs,
-      },
-    );
-    assert.ok(started?.taskId, "tasks.start must return taskId");
-    assert.ok(started?.recordPath, "tasks.start must return recordPath");
-    assert.equal(
-      started?.coordinatorAgentId,
-      launcherInfo.agentId,
-      "tasks.start must reuse the open chat directly as coordinatorAgentId",
-    );
-    recordPath = started.recordPath;
+        config: {
+          provider: launcherProvider,
+          model: resolvedModelId,
+          cwd,
+          modeId: launcherProvider === "codex" ? "auto-review" : "auto",
+          ...(preferredThinking ? { thinkingOptionId: preferredThinking } : {}),
+        },
+        title: `[L3 E2E Draft] ${launcherProvider}/${resolvedModelId}`,
+        background: false,
+      });
+      const agentId = created?.id ?? created?.agent?.id;
+      assert.ok(agentId, `Failed to create draft chat for ${launcherProvider}`);
+      launcherInfo = { agentId, ephemeral: true };
+      ownedSessionIds.add(agentId);
+
+      await client.sendAgentMessage(agentId, `/paseo-team ${rawArgs}`);
+
+      const startDeadline = Date.now() + 90_000;
+      while (Date.now() < startDeadline) {
+        const graph = await client
+          .invokePluginRpc("paseo-team", "paseo_team.conversation.get", {
+            workspaceId,
+            agentId,
+            cwd,
+            language: "zh",
+          })
+          .catch(() => null);
+        const task =
+          graph?.mode === "team_task" ? graph.task : graph?.tasks?.[0];
+        if (task?.recordPath && task?.coordinatorAgentId === agentId) {
+          recordPath = task.recordPath;
+          startedTaskId = task.taskId;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 2_000));
+      }
+      assert.ok(
+        recordPath && startedTaskId,
+        `Draft chat ${agentId} did not call paseo_team(action="start") within 90s`,
+      );
+    } else {
+      launcherInfo = await resolveLauncherAgentId({
+        client,
+        workspaceId,
+        cwd,
+        provider: launcherProvider,
+        defaultModel: launcherModel,
+        catalogProviders: configBundle?.providers,
+        envOverride: process.env[launcherEnvVar],
+      });
+      if (launcherInfo.ephemeral) {
+        ownedSessionIds.add(launcherInfo.agentId);
+      }
+
+      const started = await client.invokePluginRpc(
+        "paseo-team",
+        "paseo_team.tasks.start",
+        {
+          cwd,
+          workspaceId,
+          agentId: launcherInfo.agentId,
+          rawArgs,
+        },
+      );
+      assert.ok(started?.taskId, "tasks.start must return taskId");
+      assert.ok(started?.recordPath, "tasks.start must return recordPath");
+      assert.equal(
+        started?.coordinatorAgentId,
+        launcherInfo.agentId,
+        "tasks.start must reuse the open chat directly as coordinatorAgentId",
+      );
+      recordPath = started.recordPath;
+      startedTaskId = started.taskId;
+    }
 
     // Verify no extra "[Team] ..." coordinator session was spawned alongside the open chat,
     // and workspace-scoped conversation.get (used by the single Team Graph tab) resolves cleanly without cross-project bleed.
@@ -336,7 +401,7 @@ async function runLiveScenario({
       "must not spawn a separate [Team] coordinator chat",
     );
 
-    if (launcherInfo.ephemeral) {
+    if (launcherInfo.ephemeral && !directPromptStart) {
       const promptHistory = await client.listAgentTimelinePrompts(
         launcherInfo.agentId,
       );
@@ -363,7 +428,7 @@ async function runLiveScenario({
     );
     const activeGraphTask =
       wsGraph.mode === "team_task" ? wsGraph.task : wsGraph.tasks?.[0];
-    assert.equal(activeGraphTask?.taskId, started.taskId);
+    assert.equal(activeGraphTask?.taskId, startedTaskId);
     assert.equal(activeGraphTask?.projectRoot, realpathSync(cwd));
     if (requireReview) {
       // Before coordinator decides route or dispatches members, graph starts with Coordinator only.
@@ -564,6 +629,18 @@ const SCENARIOS = [
     expectedProviders: ["claude"],
   },
   {
+    id: "draft-start",
+    title:
+      "L3 Live E2E [draft-start]: Brand-new Claude draft receiving raw /paseo-team invokes paseo_team(action='start')",
+    launcherProvider: "claude",
+    launcherModel: "claude-opus-5-5",
+    launcherEnvVar: "PASEO_E2E_CLAUDE_LAUNCHER",
+    presetName: process.env.PASEO_E2E_SMOKE_PRESET || "",
+    requireReview: false,
+    expectedProviders: ["claude"],
+    directPromptStart: true,
+  },
+  {
     id: "antigravity-coord",
     title:
       "L3 Live E2E [antigravity-coord]: Antigravity Gemini Coordinator + default/standard preset (parent+child permission hook regression)",
@@ -598,6 +675,7 @@ for (const scenario of SCENARIOS) {
         presetName: scenario.presetName,
         requireReview: scenario.requireReview,
         expectedProviders: scenario.expectedProviders,
+        directPromptStart: Boolean(scenario.directPromptStart),
       });
     },
   );

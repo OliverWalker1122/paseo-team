@@ -1710,30 +1710,49 @@ function resolveRoleLaunchSpec(options: {
   };
 }
 
-export async function startTeamTask(
+async function prepareTeamTaskKickoff(
   paseo: PaseoApi,
   input: {
     cwd: string;
-    workspaceId?: string;
-    agentId?: string;
+    coordinatorAgentId: string;
     rawArgs: string;
     teamOverride?: string;
     complexModeOverride?: ComplexMode;
     isComplex?: boolean;
     requireReview?: boolean;
     language?: UiLanguage;
+    allowRunningAgent?: boolean;
   },
 ): Promise<{
   taskId: string;
   recordPath: string;
-  coordinatorAgentId?: string;
+  coordinatorAgentId: string;
   teamName: string;
-  message: string;
+  complexMode: ComplexMode;
+  kickoffPrompt: string;
+  zh: boolean;
+  coordHandle: ReturnType<PaseoApi["agents"]["ref"]>;
 }> {
+  const cleanedRawArgs = input.rawArgs
+    .trim()
+    .replace(/^\/paseo-team(?:\s+|$)/i, "")
+    .trim();
+  const promptLangHint = detectPromptLanguage(
+    cleanedRawArgs || input.rawArgs,
+    input.language ?? "en",
+  );
+  if (!cleanedRawArgs) {
+    throw new Error(
+      promptLangHint === "zh"
+        ? "请提供任务目标，例如：/paseo-team 修复登录页超时问题。"
+        : 'Please provide a task goal after /paseo-team (for example: "/paseo-team fix login timeout").',
+    );
+  }
+
   const { providers } = await readProviderCatalog(paseo, input.cwd);
   const { config } = loadAndUpgradeConfig();
 
-  const parsed = parseInlineTaskDirectives(input.rawArgs);
+  const parsed = parseInlineTaskDirectives(cleanedRawArgs);
   const promptLang = detectPromptLanguage(parsed.goal, input.language ?? "en");
   const zh = promptLang === "zh";
 
@@ -1752,7 +1771,7 @@ export async function startTeamTask(
     );
   }
 
-  const coordinatorAgentId = input.agentId?.trim();
+  const coordinatorAgentId = input.coordinatorAgentId.trim();
   if (!coordinatorAgentId) {
     throw new Error(
       zh
@@ -1765,8 +1784,9 @@ export async function startTeamTask(
   const refreshed = await coordHandle.refresh().catch(() => null);
   const currentAgent = refreshed?.agent as Record<string, unknown> | undefined;
   if (
-    currentAgent?.status === "running" ||
-    currentAgent?.status === "initializing"
+    !input.allowRunningAgent &&
+    (currentAgent?.status === "running" ||
+      currentAgent?.status === "initializing")
   ) {
     throw new Error(
       zh
@@ -1931,9 +1951,6 @@ export async function startTeamTask(
     );
   }
 
-  // Use the current chat directly as coordinator with zero session reload:
-  // `paseo_team` is already persistently attached at initial open, so updating
-  // metadata and sending the kickoff message preserves the entire prompt cache.
   const kickoffPrompt = buildKickoffPrompt({
     taskId: created.record.taskId,
     goal: parsed.goal,
@@ -1945,21 +1962,16 @@ export async function startTeamTask(
     lang: promptLang,
   });
 
-  try {
-    if (typeof coordHandle.setMetadata === "function") {
-      await coordHandle.setMetadata({
+  if (typeof coordHandle.setMetadata === "function") {
+    await coordHandle
+      .setMetadata({
         "paseo-team.task": {
           taskId: created.record.taskId,
           recordPath: created.recordPath,
           role: "coordinator",
         },
-      });
-    }
-    await coordHandle.send(kickoffPrompt);
-  } catch (err) {
-    throw new Error(
-      `Failed to start team task in current chat: ${err instanceof Error ? err.message : String(err)}`,
-    );
+      })
+      .catch(() => {});
   }
 
   notifyTaskChanges();
@@ -1968,7 +1980,62 @@ export async function startTeamTask(
     recordPath: created.recordPath,
     coordinatorAgentId,
     teamName: eff.teamName,
-    message: zh
+    complexMode: eff.preset.complexMode,
+    kickoffPrompt,
+    zh,
+    coordHandle,
+  };
+}
+
+export async function startTeamTask(
+  paseo: PaseoApi,
+  input: {
+    cwd: string;
+    workspaceId?: string;
+    agentId?: string;
+    rawArgs: string;
+    teamOverride?: string;
+    complexModeOverride?: ComplexMode;
+    isComplex?: boolean;
+    requireReview?: boolean;
+    language?: UiLanguage;
+  },
+): Promise<{
+  taskId: string;
+  recordPath: string;
+  coordinatorAgentId?: string;
+  teamName: string;
+  message: string;
+}> {
+  const prepared = await prepareTeamTaskKickoff(paseo, {
+    cwd: input.cwd,
+    coordinatorAgentId: input.agentId ?? "",
+    rawArgs: input.rawArgs,
+    teamOverride: input.teamOverride,
+    complexModeOverride: input.complexModeOverride,
+    isComplex: input.isComplex,
+    requireReview: input.requireReview,
+    language: input.language,
+    allowRunningAgent: false,
+  });
+
+  // Use the current chat directly as coordinator with zero session reload:
+  // `paseo_team` is already persistently attached at initial open, so sending
+  // the kickoff message preserves the entire prompt cache.
+  try {
+    await prepared.coordHandle.send(prepared.kickoffPrompt);
+  } catch (err) {
+    throw new Error(
+      `Failed to start team task in current chat: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  return {
+    taskId: prepared.taskId,
+    recordPath: prepared.recordPath,
+    coordinatorAgentId: prepared.coordinatorAgentId,
+    teamName: prepared.teamName,
+    message: prepared.zh
       ? "已在当前对话启动团队协作。"
       : "Team pipeline started in this chat.",
   };
@@ -1982,7 +2049,15 @@ const findingsSchema = z
   .describe('One issue per item, prefixed "blocking:" or "advice:".');
 
 const coordinatorToolInputSchema = z.object({
-  action: z.enum(["set_route", "update", "complete", "summary"]),
+  action: z.enum(["start", "set_route", "update", "complete", "summary"]),
+  rawArgs: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'For action="start": the exact goal and flags after /paseo-team (e.g. "fix login timeout with review").',
+    ),
+  teamOverride: z.string().min(1).optional(),
   isComplex: z.boolean().optional(),
   planReview: z.boolean().optional(),
   codeReview: z.boolean().optional(),
@@ -2051,13 +2126,101 @@ export function createCoordinatorTool(
     name: "paseo_team",
     title: "Paseo Team Coordinator",
     description:
-      "Paseo Team workflow tool (use only during an active /paseo-team task). Actions: set_route, update, complete, summary.",
+      'Paseo Team coordinator tool. If a user message invokes `/paseo-team <goal>` directly without a `[Team 任务启动]` / `[Team Kickoff]` kickoff block, IMMEDIATELY call action="start" with rawArgs="<everything after /paseo-team>" BEFORE reading/editing files or running commands (never claim /paseo-team is uninstalled). Otherwise use only during an active Paseo Team task: set_route, update, complete, summary.',
     input: coordinatorToolInputSchema,
     async execute(args, context) {
+      if (args.action === "start") {
+        if (context?.agent?.parentAgentId) {
+          return {
+            text: 'action="start" can only be called from a top-level chat, not a subagent.',
+            isError: true,
+          };
+        }
+        const rawArgs = args.rawArgs?.trim() ?? "";
+        if (!rawArgs) {
+          return {
+            text: 'action="start" requires non-empty rawArgs (the goal and flags after /paseo-team).',
+            isError: true,
+          };
+        }
+
+        // Guard against accidental double-start when client slash command already kicked off this turn.
+        const existingPath = resolveCoordinatorRecordPath(
+          fixedRecordPath,
+          context,
+        );
+        if (existingPath) {
+          try {
+            const existing = loadTask(existingPath);
+            const ageMs = Date.now() - Date.parse(existing.createdAt);
+            if (
+              existing.lifecycleStatus === "active" &&
+              !existing.routeDecided &&
+              !existing.delivery &&
+              (existing.deliveries?.length ?? 0) === 0 &&
+              Number.isFinite(ageMs) &&
+              ageMs >= 0 &&
+              ageMs < 120_000
+            ) {
+              return {
+                text: `Task ${existing.taskId} is already initialized on this chat. Proceed directly with action="set_route" and member dispatch.\n\n${buildRecoveryBrief(existing)}`,
+                structuredContent: {
+                  taskId: existing.taskId,
+                  recordPath: existingPath,
+                  teamName: existing.teamName,
+                  complexMode: existing.complexMode,
+                  alreadyStarted: true,
+                },
+              };
+            }
+          } catch {
+            // Fall through to start a fresh task.
+          }
+        }
+
+        const agentId = context?.agent?.id?.trim();
+        const cwd = context?.agent?.cwd?.trim();
+        const paseo = context?.paseo;
+        if (!agentId || !cwd || !paseo) {
+          return {
+            text: 'action="start" requires active agent and Paseo context.',
+            isError: true,
+          };
+        }
+
+        try {
+          const prepared = await prepareTeamTaskKickoff(paseo, {
+            cwd,
+            coordinatorAgentId: agentId,
+            rawArgs,
+            ...(args.teamOverride ? { teamOverride: args.teamOverride } : {}),
+            allowRunningAgent: true,
+          });
+          const nextStepBanner = prepared.zh
+            ? `任务已初始化（task_id=${prepared.taskId}）。下一步必须先调用 paseo_team(action="set_route", ...)，再调用 Paseo 的 create_agent 按下方参数派发成员（严禁主控自己编辑仓库文件或跑测试；如工具被延迟加载请先检索加载 create_agent）。`
+            : `Task initialized (task_id=${prepared.taskId}). REQUIRED NEXT STEP: call paseo_team(action="set_route", ...) and dispatch Developer via Paseo's create_agent with the exact parameters below (NEVER edit repository files or run tests yourself; load create_agent first if MCP tools are deferred).`;
+          return {
+            text: `${nextStepBanner}\n\n${prepared.kickoffPrompt}`,
+            structuredContent: {
+              taskId: prepared.taskId,
+              recordPath: prepared.recordPath,
+              teamName: prepared.teamName,
+              complexMode: prepared.complexMode,
+              coordinatorAgentId: prepared.coordinatorAgentId,
+            },
+          };
+        } catch (err) {
+          return {
+            text: err instanceof Error ? err.message : String(err),
+            isError: true,
+          };
+        }
+      }
+
       const recordPath = resolveCoordinatorRecordPath(fixedRecordPath, context);
       if (!recordPath) {
         return {
-          text: "No active Paseo Team task on this chat. Only use paseo_team during an active /paseo-team task.",
+          text: 'No active Paseo Team task on this chat. If the user invoked /paseo-team directly, call action="start" with rawArgs first.',
           isError: true,
         };
       }
@@ -2228,6 +2391,20 @@ export function createCoordinatorTool(
           args.ciStatus ||
           args.ciWaivedUserQuote?.trim()
         ) {
+          const hasDispatchedDev =
+            current.nodes.some(
+              (n) => n.role === "developer" && Boolean(n.agentId),
+            ) ||
+            Boolean(
+              args.agentId?.trim() &&
+              args.agentId.trim() !== current.coordinatorAgentId,
+            );
+          if (!hasDispatchedDev && !current.delivery) {
+            return {
+              text: "Cannot record a Developer delivery before dispatching a Developer agent via Paseo's create_agent. Role separation: Coordinator must dispatch Developer instead of editing files directly.",
+              isError: true,
+            };
+          }
           const updated = recordCandidateDelivery(recordPath, {
             ...(args.agentId ? { agentId: args.agentId } : {}),
             summary:

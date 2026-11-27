@@ -3,6 +3,15 @@ import { PERSPECTIVE_LABELS, type UiLanguage } from "../shared/i18n.ts";
 export type ReviewerPerspective =
   "spec-boundary" | "arch-simplicity" | "comprehensive";
 
+/**
+ * Tiny static activation hint attached once at initial open on top-level chats.
+ * Ensures providers with deferred MCP tool schemas (e.g. Claude Code) still know
+ * to load and invoke `paseo_team(action="start")` when `/paseo-team ...` arrives
+ * directly (new-chat draft, New Workspace, attachments, or CLI) with zero reloads.
+ */
+export const COORDINATOR_ACTIVATION_HINT =
+  'Paseo Team: if a user message starts with `/paseo-team` (without a `[Team 任务启动]` / `[Team Kickoff]` block), IMMEDIATELY load and call the `paseo_team` tool with `action: "start"` and `rawArgs` set to everything after `/paseo-team` as your FIRST action, then follow its returned protocol and dispatch members via `create_agent` — never edit repository files directly or claim `/paseo-team` is uninstalled.';
+
 export const SAFETY_RULES_EN = `### Security & Credential Redlines (Mandatory)
 Never read, search, copy, print, or upload \`.env\` (including \`.env.*\`, \`.envrc\`, etc.) or any secret files; never run \`env\`, \`printenv\`, \`set\`, \`export -p\`, or dump all environment variables; only check whether specific required variable names are \`configured\`/\`missing\`. Isolate formatting, linting, and unit tests from real credentials (\`SKIP_DOTENV=true\`, \`DOTENV_CONFIG_PATH=/dev/null\`). Real API checks may only load credentials internally via audited project code that never logs secrets. Existing credentials never authorize trading, deployment, messaging, or mutating remote data. When spawning any subagent outside this plugin, pass these security redlines along.`;
 
