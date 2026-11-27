@@ -16,7 +16,7 @@ When one agent writes code and judges its own work, it often misses its own blin
 
 - **Single source of truth**: Paseo's live agent tree is the only state. There is no local `task.json` state machine, no stale workspace lock, and no regex parsing of model replies.
 - **Native Paseo orchestration**: Your open chat acts as Coordinator and dispatches Developer and Reviewers strictly through Paseo's native `create_agent` / `send_agent_prompt` callbacks.
-- **Direct model setup**: Configure provider, model, and reasoning effort per role once in **Team → Setup**.
+- **Direct model setup**: Configure provider, model, reasoning effort, and permission mode (`auto`, `full-access`, `bypassPermissions`, etc.) per role once in **Team → Setup**.
 
 ## Features
 
@@ -24,7 +24,7 @@ When one agent writes code and judges its own work, it often misses its own blin
 - **Separated roles**: Coordinator owns scope, acceptance criteria, dispatch, and adjudication. Only Developer edits product files; Reviewers run tests or reproduction checks without modifying code.
 - **Adversarial cross review**: Two reviewers check each change independently from opposing angles (spec & edge cases vs. architecture & simplicity), capped at 2 rounds before handing trade-offs back to you.
 - **Your workspace, your commits**: Subagents inherit your open Paseo workspace (local checkout or Paseo worktree) without hidden `.worktrees` or unsolicited commits.
-- **Live agent graph**: One shared **Team graph** tab per workspace shows every live subagent wave directly from Paseo, with one-click session jump and a **Back to main chat** button.
+- **Live agent graph**: One shared **Team** tab per workspace shows every live subagent wave directly from Paseo, with one-click session jump and a **Back to main chat** button.
 - **English and Chinese**: UI follows the Paseo app language; agent instructions follow the language of your prompt.
 
 ## Requirements

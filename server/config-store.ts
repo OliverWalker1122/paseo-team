@@ -17,6 +17,7 @@ export type ComplexMode = "expert" | "simple";
 export interface RoleModelSpec {
   model: string;
   thinking?: string;
+  mode?: string;
 }
 
 export interface TeamPreset {
@@ -123,7 +124,17 @@ export function normalizeRoleSpec(raw: unknown): RoleModelSpec {
       r.thinking.trim() !== "auto"
         ? r.thinking.trim()
         : undefined;
-    return { model, ...(thinking ? { thinking } : {}) };
+    const mode =
+      typeof r.mode === "string" &&
+      r.mode.trim() &&
+      r.mode.trim() !== "auto_default"
+        ? r.mode.trim()
+        : undefined;
+    return {
+      model,
+      ...(thinking ? { thinking } : {}),
+      ...(mode ? { mode } : {}),
+    };
   }
   return { model: AUTO_MODEL };
 }
@@ -145,7 +156,8 @@ function specsEqual(a: RoleModelSpec[], b: RoleModelSpec[]): boolean {
   return a.every(
     (item, idx) =>
       item.model === b[idx]?.model &&
-      (item.thinking ?? "") === (b[idx]?.thinking ?? ""),
+      (item.thinking ?? "") === (b[idx]?.thinking ?? "") &&
+      (item.mode ?? "") === (b[idx]?.mode ?? ""),
   );
 }
 

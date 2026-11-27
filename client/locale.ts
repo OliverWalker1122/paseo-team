@@ -6,16 +6,16 @@ export const hostTitles = defineTranslations({
   resources: {
     en: {
       team: "Team",
-      teamGraph: "Team graph",
+      teamGraph: "Team",
       teamStatus: "Team status",
-      openGraph: "Open team graph",
+      openGraph: "Open team",
       openSetup: "Team setup: models and presets",
     },
     zh: {
       team: "团队",
-      teamGraph: "团队状态图",
+      teamGraph: "团队",
       teamStatus: "团队状态",
-      openGraph: "打开团队状态图",
+      openGraph: "打开团队",
       openSetup: "团队配置：模型与预设",
     },
   },

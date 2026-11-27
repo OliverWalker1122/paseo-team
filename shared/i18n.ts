@@ -32,9 +32,10 @@ export const PERSPECTIVE_LABELS: Record<
 export const UI_TEXT = {
   en: {
     // Navigation
+    tabRunning: "Running",
+    tabHistory: "History",
     tabConfig: "Setup",
-    tabTrees: "Sessions",
-    backToGraph: "Back to graph",
+    backToGraph: "Back to team",
     backToMainChat: "Back to main chat",
     configureTeam: "Setup",
 
@@ -68,13 +69,16 @@ export const UI_TEXT = {
     newPresetHint: (from: string) => `Starts as a copy of "${from}".`,
     createBtn: "Create",
     cancelBtn: "Cancel",
-    expandBtn: "Show",
-    collapseBtn: "Hide",
     sectionDeveloper: "Developer",
     sectionDeveloperInfo:
       "The only role that edits files. Works directly in this workspace and runs the full test suite.",
     effortLabel: "Reasoning effort",
     effortDefault: "Model default",
+    modeLabel: "Permission mode",
+    modeDefault: "Default",
+    modeDefaultOption: "Default (auto)",
+    modeDefaultDesc:
+      "Automatically pick the provider's recommended non-interactive mode (e.g. auto-review / auto).",
     sectionReview: "Code review",
     sectionReviewInfo:
       "Cross review: two reviewers examine each change independently from opposing angles and never see each other's verdict.",
@@ -113,12 +117,12 @@ export const UI_TEXT = {
     errKeepOnePreset: "At least one preset must remain.",
 
     // Sessions & Graph
-    filterAll: "All",
-    filterRunning: "Running",
-    noTreesYet:
-      "No active team sessions yet. Turn on the Team toggle or run /paseo-team in a chat.",
-    noTreesForFilter: "No running team sessions right now.",
-    pickNodeHint: "Select an agent above to inspect or jump into its chat.",
+    noRunningYet: "No team sessions are running right now.",
+    viewHistoryBtn: "View history",
+    noHistoryYet:
+      "No historical team sessions yet. Turn on the Team toggle or run /paseo-team in a chat.",
+    pickNodeHint:
+      "Select an agent card to inspect details or jump into its chat.",
     statusRunningCount: (n: number) => `${n} running`,
     statusAttentionCount: (n: number) => `${n} need you`,
     statusIdle: "Idle",
@@ -134,7 +138,7 @@ export const UI_TEXT = {
     emptyTitle: "No team session or subagents in this chat yet",
     emptyDesc:
       "Turn on the Team icon in the composer or run /paseo-team to start. Every subagent dispatched by this chat appears live here.",
-    pillDefault: "Team graph",
+    pillDefault: "Team",
     pillSubagents: (n: number) => `Team · ${n} agents`,
     pillRunning: (n: number) => `Team · ${n} running`,
     pillAttention: (n: number) => `Team · ${n} need you`,
@@ -146,9 +150,10 @@ export const UI_TEXT = {
   },
   zh: {
     // Navigation
+    tabRunning: "运行中",
+    tabHistory: "历史",
     tabConfig: "配置",
-    tabTrees: "协作会话",
-    backToGraph: "返回状态图",
+    backToGraph: "返回团队",
     backToMainChat: "返回主对话",
     configureTeam: "配置",
 
@@ -180,13 +185,15 @@ export const UI_TEXT = {
     newPresetHint: (from: string) => `以「${from}」为副本创建。`,
     createBtn: "创建",
     cancelBtn: "取消",
-    expandBtn: "展开",
-    collapseBtn: "收起",
     sectionDeveloper: "开发",
     sectionDeveloperInfo:
       "唯一可以修改文件的角色，直接在当前工作区改代码并运行完整测试。",
     effortLabel: "推理强度",
     effortDefault: "模型默认",
+    modeLabel: "权限模式",
+    modeDefault: "默认权限",
+    modeDefaultOption: "默认（自动推荐）",
+    modeDefaultDesc: "按 Provider 自动选择推荐模式（如 auto-review / auto）。",
     sectionReview: "代码审查",
     sectionReviewInfo:
       "交叉审核：两位审查员从对立视角独立审查每次改动，彼此看不到对方结论。",
@@ -224,12 +231,11 @@ export const UI_TEXT = {
     errKeepOnePreset: "至少需要保留一个预设。",
 
     // Sessions & Graph
-    filterAll: "全部",
-    filterRunning: "运行中",
-    noTreesYet:
-      "还没有团队协作会话。在输入框点亮双人团队图标，或输入 /paseo-team 即可开始。",
-    noTreesForFilter: "当前没有运行中的协作会话。",
-    pickNodeHint: "点击上方节点查看详情或进入对应对话。",
+    noRunningYet: "当前没有运行中的团队协作。",
+    viewHistoryBtn: "查看历史记录",
+    noHistoryYet:
+      "还没有历史团队协作记录。在输入框点亮双人团队图标，或输入 /paseo-team 即可开始。",
+    pickNodeHint: "点击上方任意角色卡片查看详情或进入对应对话。",
     statusRunningCount: (n: number) => `${n} 运行中`,
     statusAttentionCount: (n: number) => `${n} 待你处理`,
     statusIdle: "已空闲",
@@ -245,7 +251,7 @@ export const UI_TEXT = {
     emptyTitle: "当前对话还没有团队会话或子 Agent",
     emptyDesc:
       "点亮输入框底部的双人团队图标或运行 /paseo-team 启动协作；主控派出的所有子会话都会实时展示在这里。",
-    pillDefault: "团队状态图",
+    pillDefault: "团队",
     pillSubagents: (n: number) => `团队 · ${n} 个会话`,
     pillRunning: (n: number) => `团队 · ${n} 运行中`,
     pillAttention: (n: number) => `团队 · ${n} 待处理`,

@@ -660,7 +660,7 @@ test("client registration, pure Paseo composer pills (labels + team toggle), and
 
   // Pills derive purely from live Paseo agent stream:
   // - standalone chats get NO pill
-  // - team-enabled root gets "团队状态图" immediately before any child spawns
+  // - team-enabled root gets "团队" immediately before any child spawns
   // - child linked via labels["paseo.parent-agent-id"] lights up both parent & child pills!
   mock.pushAgentSnapshot([
     {
@@ -677,7 +677,7 @@ test("client registration, pure Paseo composer pills (labels + team toggle), and
     },
   ]);
   assert.equal(mock.pills.has("standalone-1"), false);
-  assert.equal(mock.pills.get("team-root")?.label, "团队状态图");
+  assert.equal(mock.pills.get("team-root")?.label, "团队");
 
   mock.pushAgentUpsert({
     id: "team-dev",
@@ -692,7 +692,7 @@ test("client registration, pure Paseo composer pills (labels + team toggle), and
   assert.equal(mock.openedPanels[0].panelId, "team-graph");
 
   mock.pushAgentRemove("team-dev");
-  assert.equal(mock.pills.get("team-root")?.label, "团队状态图");
+  assert.equal(mock.pills.get("team-root")?.label, "团队");
 
   // Slash command routes: setup, status, and task start
   const slash = mock.slashCommands[0] as {
@@ -900,7 +900,15 @@ test("WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, TeamConfigView, an
         provider: "antigravity",
         label: "Antigravity",
         ready: true,
-        modes: ["auto"],
+        modes: ["auto", "full-access"],
+        modeOptions: [
+          { id: "auto", label: "Auto", description: "Recommended mode" },
+          {
+            id: "full-access",
+            label: "Full access",
+            description: "Unrestricted execution",
+          },
+        ],
         models: [
           {
             id: "gemini-4-neon",
@@ -911,10 +919,34 @@ test("WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, TeamConfigView, an
           },
         ],
       },
+      {
+        provider: "claude",
+        label: "Claude",
+        ready: true,
+        modes: ["auto", "bypassPermissions"],
+        modeOptions: [
+          { id: "auto", label: "Auto mode" },
+          { id: "bypassPermissions", label: "Bypass permissions" },
+        ],
+        models: [
+          {
+            id: "claude-opus-5-5",
+            fullId: "claude/claude-opus-5-5",
+            label: "Opus 5.5",
+            thinkingOptions: [{ id: "high", label: "High" }],
+            defaultThinkingId: "high",
+          },
+        ],
+      },
     ],
   };
+  const savedConfigs: ConfigBundleDto["config"][] = [];
   uiSandbox.rpcHandlers.set("paseo_team.config.get", async () => bundle);
-  uiSandbox.rpcHandlers.set("paseo_team.config.save", async () => bundle);
+  uiSandbox.rpcHandlers.set("paseo_team.config.save", async (input) => {
+    const payload = input as { config: ConfigBundleDto["config"] };
+    savedConfigs.push(payload.config);
+    return { ...bundle, config: payload.config };
+  });
   uiSandbox.workspaces.set("wks_todo", {
     id: "wks_todo",
     directory: "/home/lcq/ai/test/todo",
@@ -974,7 +1006,7 @@ test("WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, TeamConfigView, an
   (backMainBtn.props.onPress as () => void)();
   assert.equal(openedAgents[1].agentId, "coord-1");
 
-  // Switch to Config view & back
+  // Switch to Config view: verify renamed "返回团队", Complex tasks always expanded, and permission mode picker works
   const cfgBtn = findNodes(
     uiSandbox.renderer.root,
     (n) => n.type === "Pressable" && collectText(n).includes("配置"),
@@ -983,9 +1015,37 @@ test("WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, TeamConfigView, an
   uiSandbox.renderer.rerender();
   await new Promise((r) => setTimeout(r, 10));
   uiSandbox.renderer.rerender();
-  assert.match(collectText(uiSandbox.renderer.root), /返回状态图/);
+  const cfgText = collectText(uiSandbox.renderer.root);
+  assert.match(cfgText, /返回团队/);
+  assert.match(cfgText, /由谁起草方案/);
+  assert.match(cfgText, /单独设置方案审查/);
+  assert.doesNotMatch(cfgText, /展开/);
+  assert.match(cfgText, /默认权限/);
 
-  // 2. Global Team Screen: Sessions tab + filter + Setup tab
+  // Open Developer permission mode picker and select "Full access"
+  const modePickerBtn = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Pressable" && n.props.accessibilityLabel === "默认权限",
+  )[0];
+  assert.ok(modePickerBtn);
+  (modePickerBtn.props.onPress as () => void)();
+  uiSandbox.renderer.rerender();
+  assert.match(collectText(uiSandbox.renderer.root), /Full access/);
+
+  const fullAccessOption = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Pressable" && collectText(n).includes("Full access"),
+  )[0];
+  assert.ok(fullAccessOption);
+  (fullAccessOption.props.onPress as () => void)();
+  await new Promise((r) => setTimeout(r, 10));
+  uiSandbox.renderer.rerender();
+  assert.equal(
+    savedConfigs.at(-1)?.teams["标准"].developer.mode,
+    "full-access",
+  );
+
+  // 2. Global Team Screen: defaults to Running tab with header switcher; History tab is vertical list with click-to-expand DAG
   uiSandbox.renderer.unmount();
   uiSandbox.renderer.render({
     __vnode: true,
@@ -1001,17 +1061,111 @@ test("WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, TeamConfigView, an
   });
   uiSandbox.emitSubscription("paseo_team.trees.watch", {
     trees: [
-      sampleTree(),
       sampleTree({
-        rootAgentId: "coord-2",
-        title: "已完成任务",
+        rootAgentId: "coord-1",
+        title: "自定义组件透明度滑块",
+        runningCount: 1,
+      }),
+      sampleTree({
+        rootAgentId: "coord-run-2",
+        title: "第二个运行中任务",
+        runningCount: 2,
+      }),
+      sampleTree({
+        rootAgentId: "coord-hist-1",
+        title: "已完成历史任务",
         runningCount: 0,
+        attentionCount: 0,
       }),
     ],
   });
   uiSandbox.renderer.rerender();
-  assert.match(collectText(uiSandbox.renderer.root), /自定义组件透明度滑块/);
-  assert.match(collectText(uiSandbox.renderer.root), /已完成任务/);
+
+  // Running tab shows both running sessions in top switcher, NOT the history session's DAG
+  const runningViewText = collectText(uiSandbox.renderer.root);
+  assert.match(runningViewText, /运行中 \(2\)/);
+  assert.match(runningViewText, /历史 \(1\)/);
+  assert.match(runningViewText, /自定义组件透明度滑块/);
+  assert.match(runningViewText, /第二个运行中任务/);
+  assert.doesNotMatch(runningViewText, /已完成历史任务/);
+
+  // Click second running session in the top header switcher
+  const run2Btn = findNodes(
+    uiSandbox.renderer.root,
+    (n) =>
+      n.type === "Pressable" && collectText(n).includes("第二个运行中任务"),
+  )[0];
+  assert.ok(run2Btn);
+  (run2Btn.props.onPress as () => void)();
+  uiSandbox.renderer.rerender();
+
+  // Switch to History tab: row is collapsed by default (no DAG nodes rendered yet)
+  const historyTabBtn = findNodes(
+    uiSandbox.renderer.root,
+    (n) =>
+      n.type === "Pressable" &&
+      n.props.accessibilityRole === "tab" &&
+      collectText(n).includes("历史"),
+  )[0];
+  assert.ok(historyTabBtn);
+  (historyTabBtn.props.onPress as () => void)();
+  uiSandbox.renderer.rerender();
+
+  const collapsedHistoryText = collectText(uiSandbox.renderer.root);
+  assert.match(collapsedHistoryText, /已完成历史任务/);
+  assert.doesNotMatch(collapsedHistoryText, /点击上方任意角色卡片/);
+
+  // Click history row to expand its inline DAG
+  const historyRowBtn = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Pressable" && collectText(n).includes("已完成历史任务"),
+  )[0];
+  assert.ok(historyRowBtn);
+  (historyRowBtn.props.onPress as () => void)();
+  uiSandbox.renderer.rerender();
+  assert.match(collectText(uiSandbox.renderer.root), /Developer/);
+  assert.match(collectText(uiSandbox.renderer.root), /点击上方任意角色卡片/);
+
+  // Click again to collapse
+  (historyRowBtn.props.onPress as () => void)();
+  uiSandbox.renderer.rerender();
+  assert.doesNotMatch(
+    collectText(uiSandbox.renderer.root),
+    /点击上方任意角色卡片/,
+  );
+
+  // Empty running tab shows CTA button to jump straight to History
+  const runningTabBtn = findNodes(
+    uiSandbox.renderer.root,
+    (n) =>
+      n.type === "Pressable" &&
+      n.props.accessibilityRole === "tab" &&
+      collectText(n).includes("运行中"),
+  )[0];
+  (runningTabBtn.props.onPress as () => void)();
+  uiSandbox.emitSubscription("paseo_team.trees.watch", {
+    trees: [
+      sampleTree({
+        rootAgentId: "coord-hist-1",
+        title: "已完成历史任务",
+        runningCount: 0,
+        attentionCount: 0,
+      }),
+    ],
+  });
+  uiSandbox.renderer.rerender();
+  assert.match(
+    collectText(uiSandbox.renderer.root),
+    /当前没有运行中的团队协作/,
+  );
+  const viewHistBtn = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Pressable" && collectText(n).includes("查看历史记录"),
+  )[0];
+  assert.ok(viewHistBtn);
+  (viewHistBtn.props.onPress as () => void)();
+  uiSandbox.renderer.rerender();
+  assert.match(collectText(uiSandbox.renderer.root), /已完成历史任务/);
 
   // 3. Kickoff timeline bubble parses both v7 (no task_id) and legacy v6 (with task_id) messages
   const v7Prompt = buildKickoffPrompt({

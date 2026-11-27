@@ -48,10 +48,24 @@ test("createEmptyConfig, formatRoleSpecShort, and normalizeRoleSpec handle valid
   assert.deepEqual(normalizeRoleSpec("bare-profile"), { model: AUTO_MODEL });
   assert.deepEqual(normalizeRoleSpec("codex/gpt-6"), { model: "codex/gpt-6" });
   assert.deepEqual(
-    normalizeRoleSpec({ model: "claude/opus", thinking: "high" }),
+    normalizeRoleSpec({
+      model: "claude/opus",
+      thinking: "high",
+      mode: "bypassPermissions",
+    }),
     {
       model: "claude/opus",
       thinking: "high",
+      mode: "bypassPermissions",
+    },
+  );
+  assert.deepEqual(
+    normalizeRoleSpec({
+      model: "antigravity/gemini-4-neon",
+      mode: "auto_default",
+    }),
+    {
+      model: "antigravity/gemini-4-neon",
     },
   );
   assert.deepEqual(normalizeRoleSpec(null), { model: AUTO_MODEL });
@@ -71,7 +85,11 @@ test("migrateConfig upgrades v3/v4 schemas to v5 and resolves effective teams", 
     default: "标准",
     teams: {
       标准: {
-        developer: { model: "antigravity/gemini-4-neon", thinking: "xhigh" },
+        developer: {
+          model: "antigravity/gemini-4-neon",
+          thinking: "xhigh",
+          mode: "full-access",
+        },
         codeReviewers: [
           { model: "claude/claude-opus-5-5", thinking: "high" },
           { model: "codex/gpt-6.2-astra", thinking: "high" },
@@ -83,7 +101,10 @@ test("migrateConfig upgrades v3/v4 schemas to v5 and resolves effective teams", 
       },
       快速: {
         developer: "codex/gpt-6.2-astra",
-        codeReviewers: ["claude/claude-sonnet-5-5"],
+        codeReviewers: [{ model: "claude/claude-sonnet-5-5", mode: "auto" }],
+        planReviewers: [
+          { model: "claude/claude-sonnet-5-5", mode: "bypassPermissions" },
+        ],
         complexMode: "simple",
       },
     },
@@ -94,8 +115,13 @@ test("migrateConfig upgrades v3/v4 schemas to v5 and resolves effective teams", 
   });
 
   assert.equal(migrated.schemaVersion, 5);
+  assert.equal(migrated.teams["标准"].developer.mode, "full-access");
   assert.equal(migrated.teams["标准"].separatePlanReviewers, true);
-  assert.equal(migrated.teams["快速"].separatePlanReviewers, false);
+  assert.equal(migrated.teams["快速"].separatePlanReviewers, true);
+  assert.equal(
+    migrated.teams["快速"].planReviewers[0].mode,
+    "bypassPermissions",
+  );
   assert.equal(migrated.projects["/nonexistent/invalid"], undefined);
 
   const byProj = resolveEffectiveTeam(migrated, projDir);

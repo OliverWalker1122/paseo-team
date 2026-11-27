@@ -29,7 +29,6 @@ import { TeamConfigView } from "./TeamConfigScreen.tsx";
 type HoverState = PressableStateCallbackType & { hovered?: boolean };
 type OpenAgentFn = (input: { agentId: string; focusHost?: boolean }) => void;
 
-// Shared per-workspace focus store so one `team-graph` tab switches cleanly across agents.
 const focusedAgentByWorkspace = new Map<string, string>();
 const focusListeners = new Map<string, Set<() => void>>();
 
@@ -72,6 +71,12 @@ function formatShortTime(iso: string): string {
   }
 }
 
+function folderBasename(cwd: string): string {
+  const cleaned = cwd.replace(/[\\/]+$/, "");
+  const parts = cleaned.split(/[\\/]/);
+  return parts[parts.length - 1] || cwd;
+}
+
 function roleIconName(role: AgentRoleDto): string {
   switch (role) {
     case "coordinator":
@@ -89,7 +94,7 @@ function roleIconName(role: AgentRoleDto): string {
   }
 }
 
-function statusPalette(
+function statusMeta(
   theme: PluginTheme,
   lang: UiLanguage,
   status: LiveAgentStatusDto,
@@ -100,40 +105,45 @@ function statusPalette(
       return {
         dot: theme.colors.accent,
         border: theme.colors.accent,
-        bg: theme.colors.surface2,
-        text: theme.colors.accent,
+        labelColor: theme.colors.foreground,
+        pillBg: theme.colors.surface2,
+        pillBorder: theme.colors.accent,
         label: t.statusRunning,
       };
     case "initializing":
       return {
         dot: theme.colors.accent,
         border: theme.colors.accent,
-        bg: theme.colors.surface2,
-        text: theme.colors.accent,
+        labelColor: theme.colors.foreground,
+        pillBg: theme.colors.surface2,
+        pillBorder: theme.colors.accent,
         label: t.statusInit,
       };
     case "awaiting_permission":
       return {
         dot: theme.colors.statusWarning,
         border: theme.colors.statusWarning,
-        bg: theme.colors.surface2,
-        text: theme.colors.statusWarning,
+        labelColor: theme.colors.statusWarning,
+        pillBg: theme.colors.surface2,
+        pillBorder: theme.colors.statusWarning,
         label: t.statusPerm,
       };
     case "error":
       return {
         dot: theme.colors.statusDanger,
         border: theme.colors.statusDanger,
-        bg: theme.colors.surface2,
-        text: theme.colors.statusDanger,
+        labelColor: theme.colors.statusDanger,
+        pillBg: theme.colors.surface2,
+        pillBorder: theme.colors.statusDanger,
         label: t.statusError,
       };
     case "closed":
       return {
         dot: theme.colors.foregroundMuted,
         border: theme.colors.border,
-        bg: theme.colors.surface1,
-        text: theme.colors.foregroundMuted,
+        labelColor: theme.colors.foregroundMuted,
+        pillBg: theme.colors.surface0,
+        pillBorder: theme.colors.border,
         label: t.statusClosed,
       };
     case "idle":
@@ -141,11 +151,106 @@ function statusPalette(
       return {
         dot: theme.colors.statusSuccess,
         border: theme.colors.border,
-        bg: theme.colors.surface1,
-        text: theme.colors.statusSuccess,
+        labelColor: theme.colors.foreground,
+        pillBg: theme.colors.surface0,
+        pillBorder: theme.colors.border,
         label: t.statusIdle,
       };
   }
+}
+
+function ToolbarButton({
+  theme,
+  icon,
+  label,
+  primary,
+  onPress,
+}: {
+  theme: PluginTheme;
+  icon: string;
+  label: string;
+  primary?: boolean;
+  onPress: () => void;
+}) {
+  const fg = primary ? theme.colors.accentForeground : theme.colors.foreground;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ hovered }: HoverState) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 7,
+        paddingHorizontal: 14,
+        paddingVertical: 8,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: primary ? theme.colors.accent : theme.colors.border,
+        backgroundColor: primary
+          ? theme.colors.accent
+          : hovered
+            ? theme.colors.surface2
+            : theme.colors.surface0,
+        opacity: primary && hovered ? 0.9 : 1,
+      })}
+    >
+      <Icon name={icon} size={15} color={fg} />
+      <Text style={{ color: fg, fontSize: 13, fontWeight: "600" }}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function StatusChip({
+  theme,
+  dotColor,
+  borderColor,
+  textColor,
+  label,
+}: {
+  theme: PluginTheme;
+  dotColor?: string;
+  borderColor?: string;
+  textColor?: string;
+  label: string;
+}) {
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 6,
+        paddingHorizontal: 9,
+        paddingVertical: 4,
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: borderColor ?? theme.colors.border,
+        backgroundColor: theme.colors.surface0,
+      }}
+    >
+      {dotColor ? (
+        <View
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 4,
+            backgroundColor: dotColor,
+          }}
+        />
+      ) : null}
+      <Text
+        numberOfLines={1}
+        style={{
+          color: textColor ?? theme.colors.foregroundMuted,
+          fontSize: 12,
+          fontWeight: "600",
+        }}
+      >
+        {label}
+      </Text>
+    </View>
+  );
 }
 
 function NodeCard({
@@ -163,59 +268,143 @@ function NodeCard({
   compact: boolean;
   onSelect: () => void;
 }) {
-  const pal = statusPalette(theme, lang, node.status);
+  const pal = statusMeta(theme, lang, node.status);
+  const isActive =
+    node.status === "running" ||
+    node.status === "initializing" ||
+    node.status === "awaiting_permission";
+
   return (
     <Pressable
       accessibilityRole="button"
       onPress={onSelect}
       style={({ hovered }: HoverState) => ({
-        minWidth: compact ? 132 : 164,
-        maxWidth: compact ? 180 : 210,
-        paddingHorizontal: 14,
-        paddingVertical: 12,
-        borderRadius: 12,
-        borderWidth: selected ? 1.5 : 1,
+        width: compact ? "100%" : 272,
+        maxWidth: compact ? 360 : 300,
+        paddingHorizontal: 16,
+        paddingVertical: 14,
+        borderRadius: 14,
+        borderWidth: selected || isActive ? 1.5 : 1,
         borderColor: selected
           ? theme.colors.accent
+          : isActive
+            ? pal.border
+            : hovered
+              ? theme.colors.foregroundMuted
+              : theme.colors.border,
+        backgroundColor: selected
+          ? theme.colors.surface2
           : hovered
-            ? theme.colors.foregroundMuted
-            : pal.border,
-        backgroundColor: selected ? theme.colors.surface2 : pal.bg,
-        alignItems: "center",
-        gap: 6,
+            ? theme.colors.surface2
+            : theme.colors.surface1,
+        gap: 10,
       })}
     >
       <View
         style={{
-          width: 28,
-          height: 28,
-          borderRadius: 14,
-          backgroundColor: theme.colors.surface0,
-          borderWidth: 1,
-          borderColor: pal.border,
+          flexDirection: "row",
           alignItems: "center",
-          justifyContent: "center",
+          justifyContent: "space-between",
+          gap: 10,
         }}
       >
-        <Icon name={roleIconName(node.role)} size={14} color={pal.dot} />
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 10,
+            flex: 1,
+            minWidth: 0,
+          }}
+        >
+          <View
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 9,
+              backgroundColor: theme.colors.surface0,
+              borderWidth: 1,
+              borderColor: pal.border,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Icon name={roleIconName(node.role)} size={16} color={pal.dot} />
+          </View>
+          <Text
+            numberOfLines={1}
+            style={{
+              flex: 1,
+              color: theme.colors.foreground,
+              fontSize: 14,
+              fontWeight: "700",
+            }}
+          >
+            {node.label}
+          </Text>
+        </View>
+
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 5,
+            paddingHorizontal: 8,
+            paddingVertical: 3,
+            borderRadius: 999,
+            borderWidth: 1,
+            borderColor: pal.pillBorder,
+            backgroundColor: pal.pillBg,
+          }}
+        >
+          <View
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 3,
+              backgroundColor: pal.dot,
+            }}
+          />
+          <Text
+            numberOfLines={1}
+            style={{
+              color: pal.labelColor,
+              fontSize: 11.5,
+              fontWeight: "600",
+            }}
+          >
+            {pal.label}
+          </Text>
+        </View>
       </View>
-      <Text
-        numberOfLines={1}
-        style={{
-          color: theme.colors.foreground,
-          fontSize: 13,
-          fontWeight: "600",
-          textAlign: "center",
-        }}
-      >
-        {node.label}
-      </Text>
-      <Text
-        numberOfLines={1}
-        style={{ color: pal.text, fontSize: 11, fontWeight: "500" }}
-      >
-        {pal.label}
-      </Text>
+
+      <View style={{ gap: 3 }}>
+        <Text
+          numberOfLines={1}
+          style={{
+            color: theme.colors.foregroundMuted,
+            fontSize: 12,
+            fontWeight: "500",
+          }}
+        >
+          {node.modelBadge}
+        </Text>
+        {node.perspectiveLabel ? (
+          <Text
+            numberOfLines={1}
+            style={{ color: theme.colors.foregroundMuted, fontSize: 11.5 }}
+          >
+            {UI_TEXT[lang].focusPrefix} {node.perspectiveLabel}
+          </Text>
+        ) : node.title && node.title !== node.label ? (
+          <Text
+            numberOfLines={1}
+            style={{ color: theme.colors.foregroundMuted, fontSize: 11.5 }}
+          >
+            {node.title}
+          </Text>
+        ) : null}
+      </View>
     </Pressable>
   );
 }
@@ -232,7 +421,7 @@ function NodeInspectorCard({
   onOpenAgent?: OpenAgentFn;
 }) {
   const t = UI_TEXT[lang];
-  const pal = statusPalette(theme, lang, node.status);
+  const pal = statusMeta(theme, lang, node.status);
   const metaLine = [
     node.modelBadge,
     pal.label,
@@ -246,13 +435,13 @@ function NodeInspectorCard({
     <View
       style={{
         width: "100%",
-        maxWidth: 520,
-        padding: 14,
-        borderRadius: 12,
-        borderWidth: 1,
+        maxWidth: 580,
+        padding: 16,
+        borderRadius: 14,
+        borderWidth: 1.5,
         borderColor: theme.colors.accent,
         backgroundColor: theme.colors.surface1,
-        gap: 8,
+        gap: 12,
       }}
     >
       <View
@@ -260,71 +449,63 @@ function NodeInspectorCard({
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "space-between",
-          gap: 10,
+          gap: 12,
+          flexWrap: "wrap",
         }}
       >
-        <View style={{ flex: 1, gap: 2 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-            <Icon name={roleIconName(node.role)} size={14} color={pal.dot} />
+        <View style={{ flex: 1, minWidth: 180, gap: 4 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
+            <Icon name={roleIconName(node.role)} size={15} color={pal.dot} />
             <Text
               style={{
                 color: theme.colors.foreground,
-                fontSize: 14,
-                fontWeight: "600",
+                fontSize: 15,
+                fontWeight: "700",
               }}
             >
               {node.label}
             </Text>
           </View>
           <Text
-            style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
+            style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}
             numberOfLines={2}
           >
             {metaLine}
           </Text>
         </View>
         {onOpenAgent ? (
-          <Pressable
-            accessibilityRole="button"
+          <ToolbarButton
+            theme={theme}
+            primary
+            icon="ArrowUpRight"
+            label={t.openSubagentBtn}
             onPress={() => onOpenAgent({ agentId: node.agentId })}
-            style={({ hovered }: HoverState) => ({
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 5,
-              paddingHorizontal: 10,
-              paddingVertical: 6,
-              borderRadius: 8,
-              backgroundColor: theme.colors.accent,
-              opacity: hovered ? 0.9 : 1,
-            })}
-          >
-            <Text
-              style={{
-                color: theme.colors.accentForeground,
-                fontSize: 12,
-                fontWeight: "600",
-              }}
-            >
-              {t.openSubagentBtn}
-            </Text>
-            <Icon
-              name="ArrowUpRight"
-              size={13}
-              color={theme.colors.accentForeground}
-            />
-          </Pressable>
+          />
         ) : null}
       </View>
 
-      <View style={{ gap: 2 }}>
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+      <View
+        style={{
+          paddingTop: 10,
+          borderTopWidth: 1,
+          borderTopColor: theme.colors.border,
+          gap: 4,
+        }}
+      >
+        <Text
+          style={{
+            color: theme.colors.foregroundMuted,
+            fontSize: 11.5,
+            fontWeight: "600",
+          }}
+        >
           {t.responsibilityTitle}
         </Text>
         <Text
           style={{
             color: theme.colors.foreground,
-            fontSize: 12.5,
-            lineHeight: 18,
+            fontSize: 13.5,
+            lineHeight: 20,
           }}
         >
           {node.title}
@@ -339,12 +520,14 @@ function AgentTreeCanvas({
   theme,
   compact,
   lang,
+  hideHeader,
   onOpenAgent,
 }: {
   tree: AgentTreeSnapshotDto;
   theme: PluginTheme;
   compact: boolean;
   lang: UiLanguage;
+  hideHeader?: boolean;
   onOpenAgent?: OpenAgentFn;
 }) {
   const t = UI_TEXT[lang];
@@ -359,55 +542,86 @@ function AgentTreeCanvas({
     [allNodes, selectedId],
   );
 
-  const summaryParts = [
-    tree.runningCount > 0 ? t.statusRunningCount(tree.runningCount) : "",
-    tree.attentionCount > 0 ? t.statusAttentionCount(tree.attentionCount) : "",
-    t.agentCountLabel(tree.totalAgents),
-    formatShortTime(tree.updatedAt),
-  ].filter(Boolean);
-
   return (
-    <View style={{ gap: 16 }}>
-      <View style={{ gap: 4 }}>
-        <Text
-          style={{
-            color: theme.colors.foreground,
-            fontSize: compact ? 15 : 16,
-            fontWeight: "600",
-            lineHeight: 22,
-          }}
-          numberOfLines={3}
-        >
-          {tree.title}
-        </Text>
+    <View
+      style={{
+        width: "100%",
+        maxWidth: 820,
+        alignSelf: "center",
+        gap: 20,
+      }}
+    >
+      {!hideHeader ? (
         <View
           style={{
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 8,
-            flexWrap: "wrap",
+            padding: compact ? 14 : 18,
+            borderRadius: 14,
+            borderWidth: 1,
+            borderColor: theme.colors.border,
+            backgroundColor: theme.colors.surface1,
+            gap: 10,
           }}
         >
+          <Text
+            style={{
+              color: theme.colors.foreground,
+              fontSize: compact ? 16 : 18,
+              fontWeight: "700",
+              lineHeight: 25,
+            }}
+            numberOfLines={3}
+          >
+            {tree.title}
+          </Text>
           <View
             style={{
-              width: 8,
-              height: 8,
-              borderRadius: 4,
-              backgroundColor:
-                tree.attentionCount > 0
-                  ? theme.colors.statusWarning
-                  : tree.runningCount > 0
-                    ? theme.colors.accent
-                    : theme.colors.statusSuccess,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
             }}
-          />
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-            {summaryParts.join(" · ")}
-          </Text>
+          >
+            {tree.runningCount > 0 ? (
+              <StatusChip
+                theme={theme}
+                dotColor={theme.colors.accent}
+                borderColor={theme.colors.accent}
+                textColor={theme.colors.foreground}
+                label={t.statusRunningCount(tree.runningCount)}
+              />
+            ) : null}
+            {tree.attentionCount > 0 ? (
+              <StatusChip
+                theme={theme}
+                dotColor={theme.colors.statusWarning}
+                borderColor={theme.colors.statusWarning}
+                textColor={theme.colors.statusWarning}
+                label={t.statusAttentionCount(tree.attentionCount)}
+              />
+            ) : null}
+            {tree.runningCount === 0 && tree.attentionCount === 0 ? (
+              <StatusChip
+                theme={theme}
+                dotColor={theme.colors.statusSuccess}
+                textColor={theme.colors.foreground}
+                label={t.statusIdle}
+              />
+            ) : null}
+            <StatusChip
+              theme={theme}
+              label={`${t.agentCountLabel(tree.totalAgents)} · ${formatShortTime(tree.updatedAt)}`}
+            />
+          </View>
         </View>
-      </View>
+      ) : null}
 
-      <View style={{ alignItems: "center", gap: 0, paddingVertical: 6 }}>
+      <View
+        style={{
+          alignItems: "center",
+          paddingVertical: hideHeader ? 8 : 12,
+          paddingHorizontal: compact ? 4 : 12,
+        }}
+      >
         {tree.layers.map((layer, idx) => {
           const selectedInLayer =
             selectedNode &&
@@ -420,13 +634,32 @@ function AgentTreeCanvas({
               style={{ width: "100%", alignItems: "center" }}
             >
               {idx > 0 ? (
-                <View
-                  style={{
-                    width: 1.5,
-                    height: 22,
-                    backgroundColor: theme.colors.border,
-                  }}
-                />
+                <View style={{ alignItems: "center", paddingVertical: 4 }}>
+                  <View
+                    style={{
+                      width: 2,
+                      height: 16,
+                      backgroundColor: theme.colors.border,
+                    }}
+                  />
+                  <Text
+                    style={{
+                      color: theme.colors.foregroundMuted,
+                      fontSize: 11,
+                      fontWeight: "600",
+                      paddingVertical: 3,
+                    }}
+                  >
+                    {layer.title}
+                  </Text>
+                  <View
+                    style={{
+                      width: 2,
+                      height: 12,
+                      backgroundColor: theme.colors.border,
+                    }}
+                  />
+                </View>
               ) : null}
 
               <View
@@ -434,7 +667,7 @@ function AgentTreeCanvas({
                   flexDirection: "row",
                   justifyContent: "center",
                   flexWrap: "wrap",
-                  gap: 12,
+                  gap: 14,
                   width: "100%",
                 }}
               >
@@ -460,7 +693,7 @@ function AgentTreeCanvas({
                   style={{
                     width: "100%",
                     alignItems: "center",
-                    marginTop: 10,
+                    marginTop: 12,
                   }}
                 >
                   <NodeInspectorCard
@@ -479,8 +712,8 @@ function AgentTreeCanvas({
           <Text
             style={{
               color: theme.colors.foregroundMuted,
-              fontSize: 12,
-              marginTop: 14,
+              fontSize: 12.5,
+              marginTop: 18,
             }}
           >
             {t.pickNodeHint}
@@ -488,40 +721,6 @@ function AgentTreeCanvas({
         ) : null}
       </View>
     </View>
-  );
-}
-
-function HeaderActionButton({
-  theme,
-  icon,
-  label,
-  onPress,
-}: {
-  theme: PluginTheme;
-  icon: string;
-  label: string;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      onPress={onPress}
-      style={({ hovered }: HoverState) => ({
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 5,
-        paddingHorizontal: 10,
-        paddingVertical: 5,
-        borderRadius: 6,
-        backgroundColor: theme.colors.surface2,
-        opacity: hovered ? 0.85 : 1,
-      })}
-    >
-      <Icon name={icon} size={13} color={theme.colors.foreground} />
-      <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>
-        {label}
-      </Text>
-    </Pressable>
   );
 }
 
@@ -573,6 +772,8 @@ export function WorkspaceConversationGraphPanel({
   const mainChatId =
     payload?.tree?.rootAgentId ?? payload?.rootAgentId ?? focusedAgentId;
 
+  const topBarPadding = layout.compact ? 14 : 22;
+
   if (viewMode === "config") {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
@@ -581,21 +782,23 @@ export function WorkspaceConversationGraphPanel({
             flexDirection: "row",
             alignItems: "center",
             justifyContent: "space-between",
-            paddingHorizontal: layout.compact ? 14 : 20,
-            paddingTop: 12,
-            paddingBottom: 6,
-            gap: 8,
+            paddingHorizontal: topBarPadding,
+            paddingVertical: 12,
+            borderBottomWidth: 1,
+            borderBottomColor: theme.colors.border,
+            backgroundColor: theme.colors.surface1,
+            gap: 10,
           }}
         >
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <HeaderActionButton
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <ToolbarButton
               theme={theme}
               icon="Users"
               label={t.backToGraph}
               onPress={() => setViewMode("graph")}
             />
             {mainChatId && openAgent ? (
-              <HeaderActionButton
+              <ToolbarButton
                 theme={theme}
                 icon="ArrowLeft"
                 label={t.backToMainChat}
@@ -621,24 +824,24 @@ export function WorkspaceConversationGraphPanel({
     );
   }
 
-  const padding = layout.compact ? 14 : 22;
-
   return (
-    <ScrollView
-      style={{ flex: 1, backgroundColor: theme.colors.surface0 }}
-      contentContainerStyle={{ padding, gap: 16 }}
-    >
+    <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
       <View
         style={{
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "space-between",
-          gap: 8,
+          paddingHorizontal: topBarPadding,
+          paddingVertical: 12,
+          borderBottomWidth: 1,
+          borderBottomColor: theme.colors.border,
+          backgroundColor: theme.colors.surface1,
+          gap: 10,
         }}
       >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
           {mainChatId && openAgent ? (
-            <HeaderActionButton
+            <ToolbarButton
               theme={theme}
               icon="ArrowLeft"
               label={t.backToMainChat}
@@ -646,7 +849,7 @@ export function WorkspaceConversationGraphPanel({
             />
           ) : null}
         </View>
-        <HeaderActionButton
+        <ToolbarButton
           theme={theme}
           icon="Settings2"
           label={t.configureTeam}
@@ -654,48 +857,56 @@ export function WorkspaceConversationGraphPanel({
         />
       </View>
 
-      {payload.tree ? (
-        <AgentTreeCanvas
-          tree={payload.tree}
-          theme={theme}
-          compact={layout.compact}
-          lang={lang}
-          onOpenAgent={openAgent}
-        />
-      ) : (
-        <View
-          style={{
-            paddingVertical: 48,
-            paddingHorizontal: 16,
-            alignItems: "center",
-            gap: 10,
-          }}
-        >
-          <Icon name="Users" size={28} color={theme.colors.foregroundMuted} />
-          <Text
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{
+          paddingHorizontal: topBarPadding,
+          paddingVertical: layout.compact ? 16 : 24,
+        }}
+      >
+        {payload.tree ? (
+          <AgentTreeCanvas
+            tree={payload.tree}
+            theme={theme}
+            compact={layout.compact}
+            lang={lang}
+            onOpenAgent={openAgent}
+          />
+        ) : (
+          <View
             style={{
-              color: theme.colors.foreground,
-              fontSize: 15,
-              fontWeight: "600",
-              textAlign: "center",
+              paddingVertical: 56,
+              paddingHorizontal: 16,
+              alignItems: "center",
+              gap: 12,
             }}
           >
-            {t.emptyTitle}
-          </Text>
-          <Text
-            style={{
-              color: theme.colors.foregroundMuted,
-              fontSize: 13,
-              textAlign: "center",
-              maxWidth: 420,
-              lineHeight: 20,
-            }}
-          >
-            {t.emptyDesc}
-          </Text>
-        </View>
-      )}
-    </ScrollView>
+            <Icon name="Users" size={30} color={theme.colors.foregroundMuted} />
+            <Text
+              style={{
+                color: theme.colors.foreground,
+                fontSize: 16,
+                fontWeight: "700",
+                textAlign: "center",
+              }}
+            >
+              {t.emptyTitle}
+            </Text>
+            <Text
+              style={{
+                color: theme.colors.foregroundMuted,
+                fontSize: 13.5,
+                textAlign: "center",
+                maxWidth: 440,
+                lineHeight: 21,
+              }}
+            >
+              {t.emptyDesc}
+            </Text>
+          </View>
+        )}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -707,15 +918,24 @@ export function GlobalTeamGraphScreen({
 }: PluginScreenProps) {
   const lang = useUiLanguage();
   const t = UI_TEXT[lang];
-  const [tab, setTab] = useState<"trees" | "config">(
-    params?.tab === "config" ? "config" : "trees",
+  const [tab, setTab] = useState<"running" | "history" | "config">(
+    params?.tab === "config"
+      ? "config"
+      : params?.tab === "history"
+        ? "history"
+        : "running",
   );
-  const [filter, setFilter] = useState<"all" | "running">("all");
   const [trees, setTrees] = useState<AgentTreeSnapshotDto[] | null>(null);
-  const [selectedRootId, setSelectedRootId] = useState<string | null>(null);
+  const [selectedRunningId, setSelectedRunningId] = useState<string | null>(
+    null,
+  );
+  const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     if (params?.tab === "config") setTab("config");
+    else if (params?.tab === "history") setTab("history");
   }, [params?.tab]);
 
   const subInput = useMemo(() => ({ language: lang }), [lang]);
@@ -727,23 +947,25 @@ export function GlobalTeamGraphScreen({
     ? ({ agentId }) => navigation.openAgent({ agentId, focusHost: true })
     : undefined;
 
-  const filteredTrees = useMemo(() => {
-    const list = trees ?? [];
-    if (filter === "running") {
-      return list.filter((tr) => tr.runningCount + tr.attentionCount > 0);
-    }
-    return list;
-  }, [trees, filter]);
-
-  const selectedTree = useMemo(
+  const runningTrees = useMemo(
+    () => (trees ?? []).filter((tr) => tr.runningCount + tr.attentionCount > 0),
+    [trees],
+  );
+  const historyTrees = useMemo(
     () =>
-      filteredTrees.find((tr) => tr.rootAgentId === selectedRootId) ??
-      filteredTrees[0] ??
-      null,
-    [filteredTrees, selectedRootId],
+      (trees ?? []).filter((tr) => tr.runningCount + tr.attentionCount === 0),
+    [trees],
   );
 
-  const padding = layout.compact ? 14 : 22;
+  const selectedRunningTree = useMemo(
+    () =>
+      runningTrees.find((tr) => tr.rootAgentId === selectedRunningId) ??
+      runningTrees[0] ??
+      null,
+    [runningTrees, selectedRunningId],
+  );
+
+  const padding = layout.compact ? 14 : 24;
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
@@ -753,80 +975,67 @@ export function GlobalTeamGraphScreen({
           alignItems: "center",
           justifyContent: "space-between",
           paddingHorizontal: padding,
-          paddingTop: 12,
-          paddingBottom: 10,
+          paddingVertical: 12,
           borderBottomWidth: 1,
           borderBottomColor: theme.colors.border,
+          backgroundColor: theme.colors.surface1,
           gap: 10,
         }}
       >
-        <View style={{ flexDirection: "row", gap: 6 }}>
-          {(["trees", "config"] as const).map((key) => {
-            const active = tab === key;
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          {(
+            [
+              {
+                key: "running" as const,
+                label:
+                  runningTrees.length > 0
+                    ? `${t.tabRunning} (${runningTrees.length})`
+                    : t.tabRunning,
+              },
+              {
+                key: "history" as const,
+                label:
+                  historyTrees.length > 0
+                    ? `${t.tabHistory} (${historyTrees.length})`
+                    : t.tabHistory,
+              },
+              { key: "config" as const, label: t.tabConfig },
+            ] as const
+          ).map((item) => {
+            const active = tab === item.key;
             return (
               <Pressable
-                key={key}
+                key={item.key}
                 accessibilityRole="tab"
-                onPress={() => setTab(key)}
-                style={{
-                  paddingHorizontal: 12,
-                  paddingVertical: 6,
+                onPress={() => setTab(item.key)}
+                style={({ hovered }: HoverState) => ({
+                  paddingHorizontal: 14,
+                  paddingVertical: 7,
                   borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: active ? theme.colors.accent : "transparent",
                   backgroundColor: active
                     ? theme.colors.surface2
-                    : "transparent",
-                }}
+                    : hovered
+                      ? theme.colors.surface0
+                      : "transparent",
+                })}
               >
                 <Text
                   style={{
                     color: active
                       ? theme.colors.foreground
                       : theme.colors.foregroundMuted,
-                    fontSize: 13,
-                    fontWeight: active ? "600" : "500",
+                    fontSize: 13.5,
+                    fontWeight: active ? "700" : "500",
                   }}
                 >
-                  {key === "trees" ? t.tabTrees : t.tabConfig}
+                  {item.label}
                 </Text>
               </Pressable>
             );
           })}
         </View>
-
-        {tab === "trees" ? (
-          <View style={{ flexDirection: "row", gap: 6 }}>
-            {(["all", "running"] as const).map((f) => {
-              const active = filter === f;
-              return (
-                <Pressable
-                  key={f}
-                  accessibilityRole="button"
-                  onPress={() => setFilter(f)}
-                  style={{
-                    paddingHorizontal: 10,
-                    paddingVertical: 4,
-                    borderRadius: 6,
-                    backgroundColor: active
-                      ? theme.colors.accent
-                      : theme.colors.surface2,
-                  }}
-                >
-                  <Text
-                    style={{
-                      color: active
-                        ? theme.colors.accentForeground
-                        : theme.colors.foregroundMuted,
-                      fontSize: 12,
-                      fontWeight: "500",
-                    }}
-                  >
-                    {f === "all" ? t.filterAll : t.filterRunning}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-        ) : null}
       </View>
 
       {tab === "config" ? (
@@ -837,108 +1046,292 @@ export function GlobalTeamGraphScreen({
         />
       ) : trees === null ? (
         <Loading />
-      ) : filteredTrees.length === 0 ? (
+      ) : tab === "running" ? (
+        runningTrees.length === 0 ? (
+          <View
+            style={{
+              flex: 1,
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 36,
+              gap: 14,
+            }}
+          >
+            <Icon name="Users" size={30} color={theme.colors.foregroundMuted} />
+            <Text
+              style={{
+                color: theme.colors.foreground,
+                fontSize: 15,
+                fontWeight: "600",
+                textAlign: "center",
+              }}
+            >
+              {t.noRunningYet}
+            </Text>
+            {historyTrees.length > 0 ? (
+              <ToolbarButton
+                theme={theme}
+                icon="History"
+                label={`${t.viewHistoryBtn} (${historyTrees.length})`}
+                onPress={() => setTab("history")}
+              />
+            ) : null}
+          </View>
+        ) : (
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={{ padding, gap: 18 }}
+          >
+            {runningTrees.length > 1 ? (
+              <View
+                style={{
+                  width: "100%",
+                  maxWidth: 820,
+                  alignSelf: "center",
+                  flexDirection: "row",
+                  flexWrap: "wrap",
+                  gap: 10,
+                }}
+              >
+                {runningTrees.map((tr) => {
+                  const isSel =
+                    selectedRunningTree?.rootAgentId === tr.rootAgentId;
+                  return (
+                    <Pressable
+                      key={tr.rootAgentId}
+                      accessibilityRole="button"
+                      onPress={() => setSelectedRunningId(tr.rootAgentId)}
+                      style={({ hovered }: HoverState) => ({
+                        maxWidth: 300,
+                        paddingHorizontal: 14,
+                        paddingVertical: 10,
+                        borderRadius: 10,
+                        borderWidth: isSel ? 1.5 : 1,
+                        borderColor: isSel
+                          ? theme.colors.accent
+                          : hovered
+                            ? theme.colors.foregroundMuted
+                            : theme.colors.border,
+                        backgroundColor: isSel
+                          ? theme.colors.surface2
+                          : theme.colors.surface1,
+                        gap: 3,
+                      })}
+                    >
+                      <Text
+                        numberOfLines={1}
+                        style={{
+                          color: theme.colors.foreground,
+                          fontSize: 13,
+                          fontWeight: isSel ? "700" : "500",
+                        }}
+                      >
+                        {tr.title}
+                      </Text>
+                      <Text
+                        numberOfLines={1}
+                        style={{
+                          color: theme.colors.foregroundMuted,
+                          fontSize: 11.5,
+                        }}
+                      >
+                        {[
+                          tr.runningCount > 0
+                            ? t.statusRunningCount(tr.runningCount)
+                            : "",
+                          tr.attentionCount > 0
+                            ? t.statusAttentionCount(tr.attentionCount)
+                            : "",
+                          folderBasename(tr.cwd),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : null}
+
+            {selectedRunningTree ? (
+              <View
+                style={{
+                  width: "100%",
+                  maxWidth: 820,
+                  alignSelf: "center",
+                  gap: 14,
+                }}
+              >
+                {openAgent ? (
+                  <View style={{ flexDirection: "row" }}>
+                    <ToolbarButton
+                      theme={theme}
+                      icon="ArrowLeft"
+                      label={t.backToMainChat}
+                      onPress={() =>
+                        openAgent({ agentId: selectedRunningTree.rootAgentId })
+                      }
+                    />
+                  </View>
+                ) : null}
+                <AgentTreeCanvas
+                  tree={selectedRunningTree}
+                  theme={theme}
+                  compact={layout.compact}
+                  lang={lang}
+                  onOpenAgent={openAgent}
+                />
+              </View>
+            ) : null}
+          </ScrollView>
+        )
+      ) : historyTrees.length === 0 ? (
         <View
           style={{
             flex: 1,
             alignItems: "center",
             justifyContent: "center",
-            padding: 32,
-            gap: 10,
+            padding: 36,
+            gap: 12,
           }}
         >
-          <Icon name="Users" size={26} color={theme.colors.foregroundMuted} />
+          <Icon name="History" size={28} color={theme.colors.foregroundMuted} />
           <Text
             style={{
               color: theme.colors.foregroundMuted,
-              fontSize: 13,
+              fontSize: 13.5,
               textAlign: "center",
-              maxWidth: 380,
+              maxWidth: 420,
               lineHeight: 20,
             }}
           >
-            {filter === "running" ? t.noTreesForFilter : t.noTreesYet}
+            {t.noHistoryYet}
           </Text>
         </View>
       ) : (
         <ScrollView
           style={{ flex: 1 }}
-          contentContainerStyle={{ padding, gap: 16 }}
+          contentContainerStyle={{ padding, gap: 10 }}
         >
-          {filteredTrees.length > 1 ? (
-            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-              {filteredTrees.map((tr) => {
-                const isSel = selectedTree?.rootAgentId === tr.rootAgentId;
-                return (
-                  <Pressable
-                    key={tr.rootAgentId}
-                    accessibilityRole="button"
-                    onPress={() => setSelectedRootId(tr.rootAgentId)}
+          <View
+            style={{
+              width: "100%",
+              maxWidth: 860,
+              alignSelf: "center",
+              gap: 10,
+            }}
+          >
+            {historyTrees.map((tr) => {
+              const expanded = expandedHistoryId === tr.rootAgentId;
+              return (
+                <View
+                  key={tr.rootAgentId}
+                  style={{
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: expanded
+                      ? theme.colors.accent
+                      : theme.colors.border,
+                    backgroundColor: theme.colors.surface1,
+                    overflow: "hidden",
+                  }}
+                >
+                  <View
                     style={{
-                      maxWidth: 280,
-                      paddingHorizontal: 10,
-                      paddingVertical: 6,
-                      borderRadius: 8,
-                      borderWidth: 1,
-                      borderColor: isSel
-                        ? theme.colors.accent
-                        : theme.colors.border,
-                      backgroundColor: isSel
-                        ? theme.colors.surface2
-                        : theme.colors.surface1,
-                      gap: 2,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      paddingRight: openAgent ? 14 : 0,
+                      gap: 10,
                     }}
                   >
-                    <Text
-                      numberOfLines={1}
-                      style={{
-                        color: theme.colors.foreground,
-                        fontSize: 12,
-                        fontWeight: isSel ? "600" : "500",
-                      }}
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() =>
+                        setExpandedHistoryId((prev) =>
+                          prev === tr.rootAgentId ? null : tr.rootAgentId,
+                        )
+                      }
+                      style={({ hovered }: HoverState) => ({
+                        flex: 1,
+                        minWidth: 0,
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 12,
+                        paddingHorizontal: 16,
+                        paddingVertical: 14,
+                        backgroundColor: hovered
+                          ? theme.colors.surface2
+                          : "transparent",
+                      })}
                     >
-                      {tr.title}
-                    </Text>
-                    <Text
-                      numberOfLines={1}
-                      style={{
-                        color: theme.colors.foregroundMuted,
-                        fontSize: 11,
-                      }}
-                    >
-                      {tr.runningCount > 0
-                        ? t.statusRunningCount(tr.runningCount)
-                        : t.agentCountLabel(tr.totalAgents)}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          ) : null}
+                      <Icon
+                        name={expanded ? "ChevronDown" : "ChevronRight"}
+                        size={16}
+                        color={theme.colors.foregroundMuted}
+                      />
+                      <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+                        <Text
+                          numberOfLines={1}
+                          style={{
+                            color: theme.colors.foreground,
+                            fontSize: 14,
+                            fontWeight: "600",
+                          }}
+                        >
+                          {tr.title}
+                        </Text>
+                        <Text
+                          numberOfLines={1}
+                          style={{
+                            color: theme.colors.foregroundMuted,
+                            fontSize: 12,
+                          }}
+                        >
+                          {[
+                            folderBasename(tr.cwd),
+                            t.agentCountLabel(tr.totalAgents),
+                            formatShortTime(tr.updatedAt),
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </Text>
+                      </View>
+                    </Pressable>
 
-          {selectedTree ? (
-            <View style={{ gap: 12 }}>
-              {openAgent ? (
-                <View style={{ flexDirection: "row" }}>
-                  <HeaderActionButton
-                    theme={theme}
-                    icon="ArrowLeft"
-                    label={t.backToMainChat}
-                    onPress={() =>
-                      openAgent({ agentId: selectedTree.rootAgentId })
-                    }
-                  />
+                    {openAgent ? (
+                      <ToolbarButton
+                        theme={theme}
+                        icon="ArrowUpRight"
+                        label={t.openSubagentBtn}
+                        onPress={() => openAgent({ agentId: tr.rootAgentId })}
+                      />
+                    ) : null}
+                  </View>
+
+                  {expanded ? (
+                    <View
+                      style={{
+                        borderTopWidth: 1,
+                        borderTopColor: theme.colors.border,
+                        backgroundColor: theme.colors.surface0,
+                        padding: layout.compact ? 12 : 18,
+                      }}
+                    >
+                      <AgentTreeCanvas
+                        tree={tr}
+                        theme={theme}
+                        compact={layout.compact}
+                        lang={lang}
+                        hideHeader
+                        onOpenAgent={openAgent}
+                      />
+                    </View>
+                  ) : null}
                 </View>
-              ) : null}
-              <AgentTreeCanvas
-                tree={selectedTree}
-                theme={theme}
-                compact={layout.compact}
-                lang={lang}
-                onOpenAgent={openAgent}
-              />
-            </View>
-          ) : null}
+              );
+            })}
+          </View>
         </ScrollView>
       )}
     </View>

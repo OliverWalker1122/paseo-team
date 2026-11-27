@@ -25,6 +25,7 @@ import {
   getConfigBundleRpc,
   type PaseoTeamConfigDto,
   type ProviderCatalogItemDto,
+  type ProviderModeChoiceDto,
   type ProviderModelOptionDto,
   type RoleModelSpecDto,
   saveConfigRpc,
@@ -38,8 +39,10 @@ type HoverState = PressableStateCallbackType & { hovered?: boolean };
 
 const NONE_MODEL = "__none__";
 const AUTO_EFFORT = "auto";
-const MODEL_BUTTON_WIDTH = 230;
-const EFFORT_BUTTON_WIDTH = 112;
+const AUTO_MODE = "auto_default";
+const MODEL_BUTTON_WIDTH = 196;
+const EFFORT_BUTTON_WIDTH = 96;
+const MODE_BUTTON_WIDTH = 122;
 
 function findModelMeta(
   fullId: string,
@@ -93,10 +96,30 @@ function effortChoicesFor(
   ];
 }
 
+function modeChoicesFor(
+  spec: RoleModelSpecDto | null,
+  providers: ProviderCatalogItemDto[],
+): ProviderModeChoiceDto[] {
+  if (!spec || !spec.model || spec.model === "auto") return [];
+  const providerId = spec.model.split("/")[0] ?? "";
+  const entry = providers.find((p) => p.provider === providerId);
+  if (!entry) return [];
+  if (entry.modeOptions && entry.modeOptions.length > 0) {
+    return entry.modeOptions;
+  }
+  return entry.modes.map((id) => ({ id, label: capitalize(id) }));
+}
+
+function isDangerousModeId(modeId: string): boolean {
+  return modeId === "full-access" || modeId === "bypassPermissions";
+}
+
 function PickerButton({
   theme,
   label,
   width,
+  icon,
+  tone,
   muted,
   disabled,
   onPress,
@@ -104,10 +127,18 @@ function PickerButton({
   theme: PluginTheme;
   label: string;
   width: number;
+  icon?: string;
+  tone?: "warning";
   muted?: boolean;
   disabled?: boolean;
   onPress: () => void;
 }) {
+  const fg =
+    tone === "warning"
+      ? theme.colors.statusWarning
+      : muted
+        ? theme.colors.foregroundMuted
+        : theme.colors.foreground;
   return (
     <Pressable
       accessibilityRole="button"
@@ -124,17 +155,19 @@ function PickerButton({
         paddingVertical: 7,
         borderRadius: 7,
         borderWidth: 1,
-        borderColor: theme.colors.border,
+        borderColor:
+          tone === "warning" ? theme.colors.statusWarning : theme.colors.border,
         backgroundColor:
           hovered && !disabled ? theme.colors.surface2 : theme.colors.surface1,
         opacity: disabled ? 0.55 : 1,
       })}
     >
+      {icon ? <Icon name={icon} size={13} color={fg} /> : null}
       <Text
         numberOfLines={1}
         style={{
           flex: 1,
-          color: muted ? theme.colors.foregroundMuted : theme.colors.foreground,
+          color: fg,
           fontSize: 12,
           fontWeight: "500",
         }}
@@ -227,7 +260,7 @@ function GroupLabel({ theme, text }: { theme: PluginTheme; text: string }) {
   );
 }
 
-/** One settings row per role: model picker + reasoning effort picker, aligned in fixed columns. */
+/** One settings row per role: model picker + reasoning effort picker + permission mode picker. */
 function RoleModelRow({
   theme,
   compact,
@@ -252,6 +285,7 @@ function RoleModelRow({
   const t = UI_TEXT[lang];
   const [modelOpen, setModelOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
+  const [modeOpen, setModeOpen] = useState(false);
   const [query, setQuery] = useState("");
 
   const currentModel = spec === null ? NONE_MODEL : spec.model || "auto";
@@ -267,6 +301,18 @@ function RoleModelRow({
         ? t.effortDefault
         : (effortChoices.find((c) => c.id === currentEffort)?.label ??
           capitalize(currentEffort));
+
+  const modeChoices = useMemo(
+    () => modeChoicesFor(spec, providers),
+    [spec, providers],
+  );
+  const currentMode = spec?.mode || AUTO_MODE;
+  const modeLabel =
+    modeChoices.length === 0
+      ? t.modeDefault
+      : currentMode === AUTO_MODE
+        ? t.modeDefault
+        : (modeChoices.find((c) => c.id === currentMode)?.label ?? currentMode);
 
   const filteredGroups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -301,9 +347,16 @@ function RoleModelRow({
         nextMeta.thinkingOptions.some((opt) => opt.id === spec.thinking))
         ? spec.thinking
         : nextMeta?.defaultThinkingId;
+    const nextProviderId = nextModel.split("/")[0] ?? "";
+    const nextProvider = providers.find((p) => p.provider === nextProviderId);
+    const keepMode =
+      spec?.mode && nextProvider && nextProvider.modes.includes(spec.mode)
+        ? spec.mode
+        : undefined;
     onChange({
       model: nextModel,
       ...(keepThinking ? { thinking: keepThinking } : {}),
+      ...(keepMode ? { mode: keepMode } : {}),
     });
   };
 
@@ -313,6 +366,17 @@ function RoleModelRow({
     onChange({
       model: spec.model,
       ...(id === AUTO_EFFORT ? {} : { thinking: id }),
+      ...(spec.mode ? { mode: spec.mode } : {}),
+    });
+  };
+
+  const selectMode = (id: string) => {
+    setModeOpen(false);
+    if (!spec) return;
+    onChange({
+      model: spec.model,
+      ...(spec.thinking ? { thinking: spec.thinking } : {}),
+      ...(id === AUTO_MODE ? {} : { mode: id }),
     });
   };
 
@@ -321,7 +385,8 @@ function RoleModelRow({
       <View
         style={{
           flexDirection: "row",
-          flexWrap: compact ? "wrap" : "nowrap",
+          flexWrap: "wrap",
+          justifyContent: compact ? "flex-start" : "flex-end",
           gap: 6,
         }}
       >
@@ -339,6 +404,16 @@ function RoleModelRow({
           disabled={effortChoices.length === 0}
           label={effortLabel}
           onPress={() => setEffortOpen(true)}
+        />
+        <PickerButton
+          theme={theme}
+          width={MODE_BUTTON_WIDTH}
+          icon={isDangerousModeId(currentMode) ? "ShieldOff" : "ShieldCheck"}
+          tone={isDangerousModeId(currentMode) ? "warning" : undefined}
+          muted={modeChoices.length === 0 || currentMode === AUTO_MODE}
+          disabled={modeChoices.length === 0}
+          label={modeLabel}
+          onPress={() => setModeOpen(true)}
         />
       </View>
 
@@ -439,6 +514,32 @@ function RoleModelRow({
           )}
         </Modal.Content>
       </Modal>
+
+      <Modal
+        title={`${t.modeLabel} · ${title}`}
+        open={modeOpen}
+        onOpenChange={setModeOpen}
+      >
+        <Modal.Content contentContainerStyle={{ gap: 2 }}>
+          {[
+            {
+              id: AUTO_MODE,
+              label: t.modeDefaultOption,
+              description: t.modeDefaultDesc,
+            },
+            ...modeChoices,
+          ].map((choice) => (
+            <OptionRow
+              key={choice.id}
+              theme={theme}
+              title={choice.label}
+              subtitle={choice.description ?? choice.id}
+              selected={currentMode === choice.id}
+              onPress={() => selectMode(choice.id)}
+            />
+          ))}
+        </Modal.Content>
+      </Modal>
     </SettingsRow>
   );
 }
@@ -533,7 +634,6 @@ export function TeamConfigView({
   const [newTeamName, setNewTeamName] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [complexOpen, setComplexOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -687,7 +787,7 @@ export function TeamConfigView({
       <View
         style={{
           width: "100%",
-          maxWidth: 760,
+          maxWidth: 880,
           alignSelf: "center",
           gap: 22,
         }}
@@ -872,107 +972,95 @@ export function TeamConfigView({
             <SettingsSection
               title={t.sectionComplex}
               info={t.sectionComplexInfo}
-              trailing={
-                <ActionButton
-                  theme={theme}
-                  icon={complexOpen ? "ChevronUp" : "ChevronDown"}
-                  label={complexOpen ? t.collapseBtn : t.expandBtn}
-                  onPress={() => setComplexOpen((open) => !open)}
-                />
-              }
             >
-              {complexOpen ? (
-                <SettingsCard>
-                  <SettingsSelect
-                    label={t.planAuthorLabel}
-                    value={activePreset.complexMode}
-                    options={[
-                      { value: "simple" as const, label: t.planAuthorSimple },
-                      { value: "expert" as const, label: t.planAuthorExpert },
-                    ]}
-                    onValueChange={(value) =>
-                      updatePreset({
-                        complexMode: value,
-                        ...(value === "expert" && !activePreset.expert
-                          ? { expert: { model: "auto" } }
-                          : {}),
-                      })
-                    }
+              <SettingsCard>
+                <SettingsSelect
+                  label={t.planAuthorLabel}
+                  value={activePreset.complexMode}
+                  options={[
+                    { value: "simple" as const, label: t.planAuthorSimple },
+                    { value: "expert" as const, label: t.planAuthorExpert },
+                  ]}
+                  onValueChange={(value) =>
+                    updatePreset({
+                      complexMode: value,
+                      ...(value === "expert" && !activePreset.expert
+                        ? { expert: { model: "auto" } }
+                        : {}),
+                    })
+                  }
+                />
+                {activePreset.complexMode === "expert" ? (
+                  <RoleModelRow
+                    theme={theme}
+                    compact={compact}
+                    lang={lang}
+                    title={t.expertRoleTitle}
+                    hint={t.expertRoleHint}
+                    spec={activePreset.expert ?? { model: "auto" }}
+                    providers={bundle.providers}
+                    onChange={(next) => {
+                      if (next) updatePreset({ expert: next });
+                    }}
                   />
-                  {activePreset.complexMode === "expert" ? (
+                ) : null}
+                <SettingsSwitch
+                  label={t.separatePlanRevTitle}
+                  hint={t.separatePlanRevHint}
+                  value={activePreset.separatePlanReviewers ?? false}
+                  onValueChange={(value) =>
+                    updatePreset({
+                      separatePlanReviewers: value,
+                      planReviewers: [...activePreset.codeReviewers],
+                    })
+                  }
+                />
+                {activePreset.separatePlanReviewers ? (
+                  <>
                     <RoleModelRow
                       theme={theme}
                       compact={compact}
                       lang={lang}
-                      title={t.expertRoleTitle}
-                      hint={t.expertRoleHint}
-                      spec={activePreset.expert ?? { model: "auto" }}
+                      title={t.planRevRoleTitle(0)}
+                      hint={t.planRevRoleHint}
+                      spec={activePreset.planReviewers[0] ?? { model: "auto" }}
                       providers={bundle.providers}
                       onChange={(next) => {
-                        if (next) updatePreset({ expert: next });
-                      }}
-                    />
-                  ) : null}
-                  <SettingsSwitch
-                    label={t.separatePlanRevTitle}
-                    hint={t.separatePlanRevHint}
-                    value={activePreset.separatePlanReviewers ?? false}
-                    onValueChange={(value) =>
-                      updatePreset({
-                        separatePlanReviewers: value,
-                        planReviewers: [...activePreset.codeReviewers],
-                      })
-                    }
-                  />
-                  {activePreset.separatePlanReviewers ? (
-                    <>
-                      <RoleModelRow
-                        theme={theme}
-                        compact={compact}
-                        lang={lang}
-                        title={t.planRevRoleTitle(0)}
-                        hint={t.planRevRoleHint}
-                        spec={
-                          activePreset.planReviewers[0] ?? { model: "auto" }
-                        }
-                        providers={bundle.providers}
-                        onChange={(next) => {
-                          if (!next) return;
-                          const p2 =
-                            activePreset.planReviewers.length >= 2
-                              ? activePreset.planReviewers[1]
-                              : null;
-                          updatePreset({
-                            planReviewers: p2 ? [next, p2] : [next],
-                          });
-                        }}
-                      />
-                      <RoleModelRow
-                        theme={theme}
-                        compact={compact}
-                        lang={lang}
-                        title={t.planRevRoleTitle(1)}
-                        hint={t.planRevRoleHint}
-                        spec={
+                        if (!next) return;
+                        const p2 =
                           activePreset.planReviewers.length >= 2
                             ? activePreset.planReviewers[1]
-                            : null
-                        }
-                        allowNone
-                        providers={bundle.providers}
-                        onChange={(next) => {
-                          const p1 = activePreset.planReviewers[0] ?? {
-                            model: "auto",
-                          };
-                          updatePreset({
-                            planReviewers: next ? [p1, next] : [p1],
-                          });
-                        }}
-                      />
-                    </>
-                  ) : null}
-                </SettingsCard>
-              ) : null}
+                            : null;
+                        updatePreset({
+                          planReviewers: p2 ? [next, p2] : [next],
+                        });
+                      }}
+                    />
+                    <RoleModelRow
+                      theme={theme}
+                      compact={compact}
+                      lang={lang}
+                      title={t.planRevRoleTitle(1)}
+                      hint={t.planRevRoleHint}
+                      spec={
+                        activePreset.planReviewers.length >= 2
+                          ? activePreset.planReviewers[1]
+                          : null
+                      }
+                      allowNone
+                      providers={bundle.providers}
+                      onChange={(next) => {
+                        const p1 = activePreset.planReviewers[0] ?? {
+                          model: "auto",
+                        };
+                        updatePreset({
+                          planReviewers: next ? [p1, next] : [p1],
+                        });
+                      }}
+                    />
+                  </>
+                ) : null}
+              </SettingsCard>
             </SettingsSection>
           </>
         ) : null}

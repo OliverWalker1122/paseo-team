@@ -61,7 +61,23 @@ function makeMockPaseo(agentsList: Array<Record<string, unknown>> = []) {
               provider: "antigravity",
               label: "Antigravity",
               status: "ready",
-              modes: [{ id: "default" }, { id: "auto" }],
+              modes: [
+                {
+                  id: "default",
+                  label: "Default",
+                  description: "Ask before risky actions",
+                },
+                {
+                  id: "auto",
+                  label: "Auto",
+                  description: "Auto approve safe tools",
+                },
+                {
+                  id: "full-access",
+                  label: "Full access",
+                  description: "Unrestricted execution",
+                },
+              ],
               models: [
                 {
                   id: "gemini-4-neon",
@@ -75,7 +91,15 @@ function makeMockPaseo(agentsList: Array<Record<string, unknown>> = []) {
               provider: "claude",
               label: "Claude",
               status: "ready",
-              modes: [{ id: "auto" }, { id: "acceptEdits" }],
+              modes: [
+                { id: "auto", label: "Auto mode" },
+                { id: "acceptEdits", label: "Accept edits" },
+                {
+                  id: "bypassPermissions",
+                  label: "Bypass permissions",
+                  description: "Skip permission prompts",
+                },
+              ],
               models: [
                 {
                   id: "claude-opus-5-5",
@@ -237,6 +261,40 @@ test("resolveTeamGuideForCwd, startTeamTask, and read-only paseo_team_roster wor
   const bundle = await buildConfigBundle(paseo, cwd);
   assert.equal(bundle.effectiveTeamName, "标准");
   assert.equal(bundle.providers.length, 3);
+  assert.deepEqual(
+    bundle.providers[0].modeOptions?.map((m) => m.id),
+    ["default", "auto", "full-access"],
+  );
+  assert.equal(bundle.providers[0].modeOptions?.[2].label, "Full access");
+
+  // Explicit per-role permission modes override default fallback; invalid modes fall back cleanly.
+  saveConfig({
+    schemaVersion: 5,
+    default: "标准",
+    teams: {
+      标准: {
+        ...readyPreset,
+        developer: {
+          model: "antigravity/gemini-4-neon",
+          thinking: "xhigh",
+          mode: "full-access",
+        },
+        codeReviewers: [
+          {
+            model: "claude/claude-opus-5-5",
+            thinking: "high",
+            mode: "bypassPermissions",
+          },
+          {
+            model: "codex/gpt-6.2-astra",
+            thinking: "high",
+            mode: "nonexistent-mode",
+          },
+        ],
+      },
+    },
+    projects: {},
+  });
 
   const guideRes = await resolveTeamGuideForCwd(paseo, cwd, {
     requireReview: true,
@@ -245,6 +303,10 @@ test("resolveTeamGuideForCwd, startTeamTask, and read-only paseo_team_roster wor
   });
   assert.equal(guideRes.unset.length, 0);
   assert.match(guideRes.guide, /antigravity\/gemini-4-neon/);
+  assert.match(guideRes.guide, /"modeId":"full-access"/);
+  assert.match(guideRes.guide, /"modeId":"bypassPermissions"/);
+  assert.match(guideRes.guide, /"modeId":"auto-review"/);
+  assert.doesNotMatch(guideRes.guide, /nonexistent-mode/);
   assert.match(guideRes.guide, /paseo-team\.role/);
 
   // startTeamTask sends kickoff message & marks paseo-team.enabled=true (no task.json lock!)

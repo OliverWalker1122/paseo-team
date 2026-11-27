@@ -89,11 +89,8 @@ export async function readProviderCatalog(
         thinkingOptions?: { id: string; label?: string }[];
         defaultThinkingOptionId?: string;
       }[] = Array.isArray(entry.models) ? entry.models : [];
-      let rawModes: { id: string; label?: string }[] = Array.isArray(
-        entry.modes,
-      )
-        ? entry.modes
-        : [];
+      let rawModes: { id: string; label?: string; description?: string }[] =
+        Array.isArray(entry.modes) ? entry.modes : [];
 
       if (isReady && rawModels.length === 0) {
         try {
@@ -143,11 +140,19 @@ export async function readProviderCatalog(
       }
 
       if (isReady || models.length > 0) {
+        const modeOptions = rawModes
+          .filter((item) => Boolean(item && typeof item.id === "string"))
+          .map((item) => ({
+            id: item.id,
+            label: item.label || item.id,
+            ...(item.description ? { description: item.description } : {}),
+          }));
         providers.push({
           provider: entry.provider,
           label: entry.label || entry.provider,
           ready: isReady,
-          modes: rawModes.map((item) => item.id).filter(Boolean),
+          modes: modeOptions.map((item) => item.id),
+          modeOptions,
           ...(entry.defaultModeId
             ? { defaultModeId: entry.defaultModeId }
             : {}),
@@ -316,7 +321,14 @@ function resolveRoleLaunchSpec(options: {
   const availableModes = catEntry?.modes ?? [];
 
   let modeId: string | undefined;
-  if (availableModes.includes("auto-review")) {
+  const configuredMode = spec.mode?.trim();
+  if (
+    configuredMode &&
+    configuredMode !== "auto_default" &&
+    (availableModes.length === 0 || availableModes.includes(configuredMode))
+  ) {
+    modeId = configuredMode;
+  } else if (availableModes.includes("auto-review")) {
     modeId = "auto-review";
   } else if (availableModes.includes("auto")) {
     modeId = "auto";

@@ -26,6 +26,7 @@ export const ComplexModeSchema = z.enum(["expert", "simple"]);
 export const RoleModelSpecSchema = z.object({
   model: z.string().min(1),
   thinking: z.string().min(1).optional(),
+  mode: z.string().min(1).optional(),
 });
 
 export const TeamPresetSchema = z.object({
@@ -59,11 +60,18 @@ export const ProviderModelOptionSchema = z.object({
   defaultThinkingId: z.string().optional(),
 });
 
+export const ProviderModeChoiceSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  description: z.string().optional(),
+});
+
 export const ProviderCatalogItemSchema = z.object({
   provider: z.string(),
   label: z.string(),
   ready: z.boolean(),
   modes: z.array(z.string()),
+  modeOptions: z.array(ProviderModeChoiceSchema).optional(),
   defaultModeId: z.string().optional(),
   models: z.array(ProviderModelOptionSchema),
 });
@@ -138,6 +146,7 @@ export type RoleModelSpecDto = z.infer<typeof RoleModelSpecSchema>;
 export type TeamPresetDto = z.infer<typeof TeamPresetSchema>;
 export type PaseoTeamConfigDto = z.infer<typeof PaseoTeamConfigSchema>;
 export type ProviderCatalogItemDto = z.infer<typeof ProviderCatalogItemSchema>;
+export type ProviderModeChoiceDto = z.infer<typeof ProviderModeChoiceSchema>;
 export type ProviderModelOptionDto = z.infer<typeof ProviderModelOptionSchema>;
 export type ConfigBundleDto = z.infer<typeof ConfigBundleSchema>;
 export type AgentRoleDto = z.infer<typeof AgentRoleSchema>;
