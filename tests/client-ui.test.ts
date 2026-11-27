@@ -1293,7 +1293,7 @@ test("UI components: WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, and
   uiSandbox.renderer.rerender();
   assert.match(collectText(uiSandbox.renderer.root), /已完成历史任务/);
 
-  // 5. Route-first UI regression: before coordinator calls paseo_team_set_route, render only Coordinator
+  // 5. Route-first UI regression: before coordinator calls paseo_team(action="set_route"), render only Coordinator
   // with "评估复杂度中" (no premature CI or hidden-stages noise); after route is decided, render routeReason & expanded stages.
   uiSandbox.renderer.render(panelVnode);
   const pendingRouteTask = sampleTaskSnapshot({
@@ -1342,7 +1342,7 @@ test("UI components: WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, and
   assert.doesNotMatch(routingText, /验收门禁/);
   assert.doesNotMatch(routingText, /CI 待执行/);
 
-  // After coordinator calls paseo_team_set_route, the confirmed stages and routeReason render together.
+  // After coordinator calls paseo_team(action="set_route"), the confirmed stages and routeReason render together.
   uiSandbox.emitSubscription("paseo_team.conversation.watch", {
     mode: "team_task",
     viewerAgentId: "todo-coord-1",

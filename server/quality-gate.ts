@@ -158,12 +158,32 @@ export function ciProblem(
       .filter((d) => roundOf(d) < current)
       .map((d) => Date.parse(String(d?.deliveredAt)) || 0),
   );
+
+  if (ci?.status === "fail") {
+    const detail = filled(ci.summary) ? ` (${ci.summary.trim()})` : "";
+    return `Latest check reported failure${detail}.`;
+  }
+  if (ci?.status === "pass") {
+    const checkedAt = Date.parse(String(ci.checkedAt ?? "")) || 0;
+    if (
+      previousDeliveryAt > 0 &&
+      checkedAt > 0 &&
+      checkedAt < previousDeliveryAt
+    ) {
+      return `Latest passing check predates the round ${current - 1} delivery; rerun checks after the rework.`;
+    }
+    return null;
+  }
+
+  // Legacy support for older tasks that stored .log.json sidecars.
   const check = latestCheck(taskDir);
-  if (!check) return "No paseo_team_run_check result in the task directory.";
+  if (!check) {
+    return "No passing check reported yet (Developer should run project checks and report `Checks: PASS` in its reply).";
+  }
   if (!check.passed) return `Latest check ${check.name} did not pass.`;
   // mtimeMs has sub-millisecond precision; deliveredAt is whole ms, so compare at ms resolution.
   if (Math.floor(check.at) <= previousDeliveryAt) {
-    return `Latest check ${check.name} predates the round ${current - 1} delivery; rerun paseo_team_run_check after the rework.`;
+    return `Latest check ${check.name} predates the round ${current - 1} delivery; rerun checks after the rework.`;
   }
   return null;
 }
@@ -188,7 +208,7 @@ function reviewProblems(
     .filter((n) => !submitted.has(n.agentId))
     .map(
       (n) =>
-        `${String(n.label ?? role)} (${String(n.agentId)}) has not submitted a ${stage} verdict via paseo_team_submit_review.`,
+        `${String(n.label ?? role)} (${String(n.agentId)}) has not reported a ${stage} verdict yet.`,
     );
   if (reviewers.length === 0) {
     return problems.length > 0 ? problems : [`No ${stage} review submitted.`];
@@ -228,7 +248,7 @@ export function inspectQualityGate(options: {
     asList(record?.deliveries).length > 0;
   const deliveryProblems = deliveryRecorded
     ? []
-    : ["No delivery: the Developer must call paseo_team_submit_delivery."];
+    : ["No Developer delivery recorded yet."];
 
   const ciIssue = ciProblem(taskDir, record);
   // Dispatching a reviewer makes its stage required, so an unsubmitted one always blocks.

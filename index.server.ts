@@ -16,9 +16,6 @@ import {
   buildConfigBundle,
   buildConversationGraph,
   createCoordinatorTool,
-  createDeveloperTools,
-  createExpertTools,
-  createReviewerTools,
   listPipelineSnapshots,
   notifyTaskChanges,
   startTeamTask,
@@ -26,17 +23,13 @@ import {
 } from "./server/handlers.ts";
 import {
   assignReviewerPerspective,
-  buildCoordinatorReminderNotice,
   buildDeveloperPrompt,
   buildExpertPrompt,
   buildReviewerPrompt,
-  buildTurnHandoffReminder,
 } from "./server/prompts.ts";
 import { inspectQualityGate } from "./server/quality-gate.ts";
 import {
   type AgentRole,
-  checkTurnHandoff,
-  consumeReminderCallback,
   findTaskByAgentId,
   listTasksForProject,
   loadTask,
@@ -45,13 +38,7 @@ import {
   resolveCircuitBreaker,
   saveTask,
 } from "./server/task-store.ts";
-
-const HANDOFF_TOOL: Partial<Record<AgentRole, string>> = {
-  developer: "paseo_team_submit_delivery",
-  expert: "paseo_team_submit_plan",
-  "plan-reviewer": "paseo_team_submit_review",
-  "code-reviewer": "paseo_team_submit_review",
-};
+import { extractTurnReply, observeMemberTurn } from "./server/turn-observer.ts";
 
 export function isAutoAllowedTeamTool(
   role: AgentRole | undefined,
@@ -62,22 +49,8 @@ export function isAutoAllowedTeamTool(
     return (
       /(?:^|__|_|\/|:|\.)(?:create_agent|send_agent_prompt|list_providers|list_models|list_profiles|inspect_provider|get_agent_status|get_agent_activity|list_agents|list_hosts|list_workspaces|list_pending_permissions)$/.test(
         toolName,
-      ) ||
-      /(?:^|__|_|\/|:|\.)paseo_team(?:_(?:task_summary|set_route|submit_plan|record_review|record_delivery|complete))?$/.test(
-        toolName,
-      )
+      ) || /(?:^|__|_|\/|:|\.)paseo_team$/.test(toolName)
     );
-  }
-  if (role === "developer") {
-    return /(?:^|__|_|\/|:|\.)paseo_team_(?:run_check|submit_delivery)$/.test(
-      toolName,
-    );
-  }
-  if (role === "expert") {
-    return /(?:^|__|_|\/|:|\.)paseo_team_submit_plan$/.test(toolName);
-  }
-  if (role === "plan-reviewer" || role === "code-reviewer") {
-    return /(?:^|__|_|\/|:|\.)paseo_team_submit_review$/.test(toolName);
   }
   return false;
 }
@@ -637,10 +610,6 @@ export default function contribute(server: PluginServerContext) {
                   lang: promptLang,
                 }),
               ],
-              tools: [
-                ...(request.tools ?? []),
-                ...createDeveloperTools(recordPath, request.agentId),
-              ],
             };
           }
 
@@ -654,10 +623,6 @@ export default function contribute(server: PluginServerContext) {
                   taskDir,
                   lang: promptLang,
                 }),
-              ],
-              tools: [
-                ...(request.tools ?? []),
-                ...createExpertTools(recordPath, request.agentId),
               ],
             };
           }
@@ -680,14 +645,6 @@ export default function contribute(server: PluginServerContext) {
                 stage: subagentRole === "plan-reviewer" ? "plan" : "code",
                 lang: promptLang,
               }),
-            ],
-            tools: [
-              ...(request.tools ?? []),
-              ...createReviewerTools(
-                recordPath,
-                request.agentId,
-                subagentRole === "plan-reviewer" ? "plan" : "code",
-              ),
             ],
           };
         }
@@ -760,12 +717,6 @@ export default function contribute(server: PluginServerContext) {
               if (inferred) {
                 role = inferred;
                 match = { ...parentMatch, matchedRole: inferred };
-              } else if (
-                toolName &&
-                /(?:^|__|_|\/|:|\.)paseo_team_run_check$/.test(toolName)
-              ) {
-                role = "developer";
-                match = { ...parentMatch, matchedRole: "developer" };
               }
             }
           }
@@ -819,72 +770,46 @@ export default function contribute(server: PluginServerContext) {
   cleanups.push(
     server.addHook(
       "agent.turn.after",
-      async ({ agent, outcome }, { paseo }) => {
+      async ({ agent, turnId, outcome }, { paseo }) => {
         try {
           const match = findTaskByAgentId(agent.id);
           if (!match) return;
-          // Handoff check: a member's finished turn must end with its submit tool.
+          // Passive single-channel observation: read the member's native Paseo reply
+          // when its turn completes to keep the Team Graph and review history in sync.
+          const memberRole =
+            match.matchedRole === "developer" ||
+            match.matchedRole === "expert" ||
+            match.matchedRole === "plan-reviewer" ||
+            match.matchedRole === "code-reviewer"
+              ? match.matchedRole
+              : null;
           if (
-            match.matchedRole !== "coordinator" &&
+            memberRole &&
+            outcome.kind === "completed" &&
             match.record.lifecycleStatus !== "completed" &&
             match.record.lifecycleStatus !== "abandoned"
           ) {
-            const promptLang = detectPromptLanguage(match.record.goal);
-            const callback = consumeReminderCallback(
-              match.recordPath,
-              agent.id,
-              outcome.kind !== "completed",
-            );
-            if (callback) {
-              if (callback.record.coordinatorAgentId) {
-                await paseo.agents
-                  .ref(callback.record.coordinatorAgentId)
-                  .send(
-                    buildCoordinatorReminderNotice({
-                      memberLabel: callback.node.label,
-                      agentId: agent.id,
-                      kind: callback.kind,
-                      verdict: callback.node.verdict,
-                      round: callback.node.round,
-                      summary: callback.node.summary,
-                      lang: promptLang,
-                    }),
-                  )
-                  .catch(() => {});
-              }
-            } else if (outcome.kind === "completed") {
-              const handoff = checkTurnHandoff(match.recordPath, agent.id);
-              if (handoff === "remind") {
-                const tool = HANDOFF_TOOL[match.matchedRole];
-                if (tool) {
-                  await paseo.agents
-                    .ref(agent.id)
-                    .send(
-                      buildTurnHandoffReminder({
-                        toolName: tool,
-                        lang: promptLang,
-                      }),
-                    )
-                    .catch(() => {});
+            try {
+              const handle = paseo.agents.ref(agent.id);
+              const page = await handle.timeline?.refetch?.({
+                direction: "tail",
+                limit: 1,
+                wholeTurns: true,
+              });
+              const entries = Array.isArray(page?.entries) ? page.entries : [];
+              if (entries.length > 0) {
+                const { text, shellHint } = extractTurnReply(entries, turnId);
+                if (text) {
+                  observeMemberTurn(match.recordPath, {
+                    role: memberRole,
+                    agentId: agent.id,
+                    text,
+                    shellHint,
+                  });
                 }
-              } else if (
-                handoff === "missing" &&
-                match.record.coordinatorAgentId
-              ) {
-                const latest = loadTask(match.recordPath);
-                const node = latest.nodes.find((n) => n.agentId === agent.id);
-                await paseo.agents
-                  .ref(match.record.coordinatorAgentId)
-                  .send(
-                    buildCoordinatorReminderNotice({
-                      memberLabel: node?.label ?? match.matchedRole,
-                      agentId: agent.id,
-                      kind: "missing",
-                      lang: promptLang,
-                    }),
-                  )
-                  .catch(() => {});
               }
+            } catch {
+              // Passive observation must never disrupt native agent turns.
             }
           }
           notifyTaskChanges();

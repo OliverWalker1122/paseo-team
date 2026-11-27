@@ -39,22 +39,18 @@ import {
   reviewerPerspectiveLabel,
 } from "./prompts.ts";
 import {
-  ciProblem,
   computeWorkspaceChangeStats,
   inspectQualityGate,
 } from "./quality-gate.ts";
-import { runCheck } from "./run-check.ts";
 import {
   buildRecoveryBrief,
   findTaskByAgentId,
-  handoffOwed,
   initTask,
   listAllRecentTasks,
   listTasksForProject,
   loadTask,
   markTaskCompleted,
   type NodeVisualStatus,
-  nextDeliveryRound,
   nextReviewRound,
   readReviewRounds,
   type PipelineStageId,
@@ -1076,11 +1072,17 @@ export function toPipelineSnapshot(
 
   const ciStatus: PipelineTaskSnapshotDto["ciStatus"] = record.ci?.waived
     ? "waived"
-    : record.ci?.log
+    : record.ci?.status === "pass"
       ? gateChecks?.ciPassed === false
         ? "pending"
         : "pass"
-      : "pending";
+      : record.ci?.status === "fail"
+        ? "pending"
+        : record.ci?.log
+          ? gateChecks?.ciPassed === false
+            ? "pending"
+            : "pass"
+          : "pending";
 
   return {
     recordPath,
@@ -1980,15 +1982,7 @@ const findingsSchema = z
   .describe('One issue per item, prefixed "blocking:" or "advice:".');
 
 const coordinatorToolInputSchema = z.object({
-  action: z.enum([
-    "set_route",
-    "submit_plan",
-    "record_delivery",
-    "record_review",
-    "resolve_breaker",
-    "complete",
-    "summary",
-  ]),
+  action: z.enum(["set_route", "update", "complete", "summary"]),
   isComplex: z.boolean().optional(),
   planReview: z.boolean().optional(),
   codeReview: z.boolean().optional(),
@@ -1999,17 +1993,14 @@ const coordinatorToolInputSchema = z.object({
   summary: z.string().min(1).optional(),
   agentId: z.string().min(1).optional(),
   architectureImpact: z.string().min(1).optional(),
-  ciLog: z.string().optional(),
+  ciStatus: z.enum(["pass", "fail"]).optional(),
+  ciSummary: z.string().optional(),
   ciWaivedUserQuote: z.string().optional(),
-  requireCodeReview: z.boolean().optional(),
-  codeReviewReason: z.string().optional(),
   stage: z.enum(["plan", "code"]).optional(),
   verdict: verdictSchema.optional(),
   findings: findingsSchema,
   round: z.number().int().min(1).optional(),
-  profile: z.string().optional(),
-  targetVersionOrCommit: z.string().optional(),
-  userAuthorizedExtraRound: z.string().optional(),
+  force: z.boolean().optional(),
   inspectOnly: z.boolean().optional(),
 });
 
@@ -2060,7 +2051,7 @@ export function createCoordinatorTool(
     name: "paseo_team",
     title: "Paseo Team Coordinator",
     description:
-      "Paseo Team workflow tool (use only during an active /paseo-team task). Actions: set_route, submit_plan, record_delivery, record_review, resolve_breaker, complete, summary.",
+      "Paseo Team workflow tool (use only during an active /paseo-team task). Actions: set_route, update, complete, summary.",
     input: coordinatorToolInputSchema,
     async execute(args, context) {
       const recordPath = resolveCoordinatorRecordPath(fixedRecordPath, context);
@@ -2138,123 +2129,137 @@ export function createCoordinatorTool(
         };
       }
 
-      if (args.action === "submit_plan") {
-        if (!args.planFile?.trim() || !args.summary?.trim()) {
-          return {
-            text: 'action="submit_plan" requires non-empty planFile and summary.',
-            isError: true,
-          };
-        }
-        try {
-          const updated = recordPlanSubmission(recordPath, {
-            planFile: args.planFile,
-            summary: args.summary,
-          });
-          notifyTaskChanges();
-          return { text: `Recorded plan ${updated.planVersion}.` };
-        } catch (err) {
-          return {
-            text: err instanceof Error ? err.message : String(err),
-            isError: true,
-          };
-        }
-      }
-
-      if (args.action === "record_delivery") {
-        if (!args.summary?.trim() || !args.architectureImpact?.trim()) {
-          return {
-            text: 'action="record_delivery" requires non-empty summary and architectureImpact.',
-            isError: true,
-          };
-        }
-        const owned = memberOwnsHandoff(recordPath, args.agentId, "developer");
-        if (owned) return { text: owned, isError: true };
-        return deliveryResult(
-          recordCandidateDelivery(recordPath, {
-            ...(args.agentId ? { agentId: args.agentId } : {}),
-            summary: args.summary,
-            architectureImpact: args.architectureImpact,
-            ...(args.ciLog !== undefined ? { ciLog: args.ciLog } : {}),
-            ...(args.ciWaivedUserQuote !== undefined
-              ? { ciWaivedUserQuote: args.ciWaivedUserQuote }
-              : {}),
-            ...(args.requireCodeReview !== undefined
-              ? { requireCodeReview: args.requireCodeReview }
-              : {}),
-            ...(args.codeReviewReason !== undefined
-              ? { codeReviewReason: args.codeReviewReason }
-              : {}),
-          }),
-        );
-      }
-
-      if (args.action === "record_review") {
-        if (
-          !args.stage ||
-          !args.agentId?.trim() ||
-          !args.verdict ||
-          !args.summary?.trim()
-        ) {
-          return {
-            text: 'action="record_review" requires stage, agentId, verdict, and non-empty summary.',
-            isError: true,
-          };
-        }
-        const owned = memberOwnsHandoff(recordPath, args.agentId);
-        if (owned) return { text: owned, isError: true };
-        return submitReview(recordPath, {
-          stage: args.stage,
-          agentId: args.agentId,
-          verdict: args.verdict,
-          summary: args.summary,
-          ...(args.findings ? { findings: args.findings } : {}),
-          ...(args.round !== undefined ? { round: args.round } : {}),
-          ...(args.profile !== undefined ? { profile: args.profile } : {}),
-          ...(args.targetVersionOrCommit !== undefined
-            ? { targetVersionOrCommit: args.targetVersionOrCommit }
-            : {}),
-          ...(args.userAuthorizedExtraRound !== undefined
-            ? { userAuthorizedExtraRound: args.userAuthorizedExtraRound }
-            : {}),
-          source: "coordinator",
-        });
-      }
-
-      if (args.action === "resolve_breaker") {
-        if (!args.decision || !args.reason?.trim()) {
-          return {
-            text: 'action="resolve_breaker" requires decision ("extra_round" or "waive_stage") and non-empty reason quoting the user ruling.',
-            isError: true,
-          };
-        }
-        try {
-          const res = resolveCircuitBreaker(recordPath, {
-            decision: args.decision,
-            ...(args.stage ? { stage: args.stage } : {}),
-            reason: args.reason,
-          });
-          notifyTaskChanges();
-          return {
-            text:
-              args.decision === "extra_round"
-                ? `Breaker lifted (${res.stage}): extra round granted (maxRounds=${res.maxRounds}).`
-                : `Stage "${res.stage}" waived per user decision; task resumed.`,
-            structuredContent: {
-              stage: res.stage,
+      if (args.action === "update") {
+        // 1. Resolve circuit breaker / user ruling (extra_round or waive_stage).
+        if (args.decision) {
+          if (!args.reason?.trim()) {
+            return {
+              text: 'action="update" with decision requires a non-empty reason quoting the user ruling.',
+              isError: true,
+            };
+          }
+          try {
+            const res = resolveCircuitBreaker(recordPath, {
               decision: args.decision,
+              ...(args.stage ? { stage: args.stage } : {}),
+              reason: args.reason,
+            });
+            notifyTaskChanges();
+            return {
+              text:
+                args.decision === "extra_round"
+                  ? `Breaker lifted (${res.stage}): extra round granted (maxRounds=${res.maxRounds}).`
+                  : `Stage "${res.stage}" waived per user decision; task resumed.`,
+              structuredContent: {
+                stage: res.stage,
+                decision: args.decision,
+                maxRounds: res.maxRounds,
+                lifecycleStatus: res.record.lifecycleStatus,
+                planReview: res.record.planReview,
+                codeReview: res.record.codeReview,
+                circuitBroken: res.record.circuitBroken,
+              },
+            };
+          } catch (err) {
+            return {
+              text: err instanceof Error ? err.message : String(err),
+              isError: true,
+            };
+          }
+        }
+
+        // 2. Record a plan draft (e.g., Coordinator drafted plan.md in simple mode).
+        if (args.planFile?.trim()) {
+          if (!args.summary?.trim()) {
+            return {
+              text: 'action="update" with planFile requires non-empty summary.',
+              isError: true,
+            };
+          }
+          try {
+            const updated = recordPlanSubmission(recordPath, {
+              planFile: args.planFile,
+              summary: args.summary,
+            });
+            notifyTaskChanges();
+            return { text: `Recorded plan ${updated.planVersion}.` };
+          } catch (err) {
+            return {
+              text: err instanceof Error ? err.message : String(err),
+              isError: true,
+            };
+          }
+        }
+
+        // 3. Manual review verdict override (only if passive turn observation missed a non-standard reply).
+        if (args.stage && args.verdict) {
+          if (!args.agentId?.trim() || !args.summary?.trim()) {
+            return {
+              text: 'action="update" with stage/verdict requires agentId and non-empty summary.',
+              isError: true,
+            };
+          }
+          const problem = reviewInputProblem(args.verdict, args.findings);
+          if (problem) return { text: problem, isError: true };
+          const res = recordReviewVerdict(recordPath, {
+            stage: args.stage,
+            agentId: args.agentId,
+            round:
+              args.round ?? nextReviewRound(current, args.stage, args.agentId),
+            verdict: args.verdict,
+            summary: args.summary,
+            ...(args.findings ? { findings: args.findings } : {}),
+            source: "coordinator",
+          });
+          notifyTaskChanges();
+          return {
+            text: res.message,
+            structuredContent: {
+              status: res.status,
+              round: res.round,
               maxRounds: res.maxRounds,
-              lifecycleStatus: res.record.lifecycleStatus,
-              planReview: res.record.planReview,
-              codeReview: res.record.codeReview,
-              circuitBroken: res.record.circuitBroken,
             },
           };
-        } catch (err) {
+        }
+
+        // 4. Manual delivery / CI update (e.g., user-quoted CI waiver or manual delivery sync).
+        if (
+          args.summary?.trim() ||
+          args.ciStatus ||
+          args.ciWaivedUserQuote?.trim()
+        ) {
+          const updated = recordCandidateDelivery(recordPath, {
+            ...(args.agentId ? { agentId: args.agentId } : {}),
+            summary:
+              args.summary?.trim() ||
+              current.delivery?.summary ||
+              "Updated delivery state",
+            architectureImpact:
+              args.architectureImpact?.trim() ||
+              current.delivery?.architectureImpact ||
+              "None",
+            ...(args.ciStatus ? { ciStatus: args.ciStatus } : {}),
+            ...(args.ciSummary ? { ciSummary: args.ciSummary } : {}),
+            ...(args.ciWaivedUserQuote
+              ? { ciWaivedUserQuote: args.ciWaivedUserQuote }
+              : {}),
+          });
+          const change = computeWorkspaceChangeStats(updated.projectRoot);
+          notifyTaskChanges();
           return {
-            text: err instanceof Error ? err.message : String(err),
-            isError: true,
+            text: `Updated delivery (codeReview=${updated.codeReview}).`,
+            structuredContent: {
+              delivery: updated.candidate,
+              change,
+              codeReview: updated.codeReview,
+            },
           };
         }
+
+        return {
+          text: 'action="update" needs one of: decision+reason, planFile+summary, stage+verdict+agentId+summary, or summary/ciStatus/ciWaivedUserQuote.',
+          isError: true,
+        };
       }
 
       if (current.lifecycleStatus === "abandoned") {
@@ -2264,6 +2269,20 @@ export function createCoordinatorTool(
         };
       }
       const rep = inspectQualityGate({ recordPath });
+      if (args.force && !args.inspectOnly) {
+        if (!args.reason?.trim()) {
+          return {
+            text: "force=true requires a non-empty reason quoting the user approval to close despite open checks.",
+            isError: true,
+          };
+        }
+        markTaskCompleted(recordPath);
+        notifyTaskChanges();
+        return {
+          text: `Task completed per user ruling (${args.reason.trim()}).`,
+          structuredContent: { ...rep, forced: true },
+        };
+      }
       if (rep.status === "READY" && !args.inspectOnly) {
         markTaskCompleted(recordPath);
       }
@@ -2307,244 +2326,6 @@ export function reviewInputProblem(
     return `${verdict} needs at least one "blocking:" finding with file:line and the concrete failure path.`;
   }
   return null;
-}
-
-function submitReview(
-  recordPath: string,
-  input: {
-    stage: "plan" | "code";
-    agentId: string;
-    verdict: z.infer<typeof verdictSchema>;
-    summary: string;
-    findings?: string[];
-    round?: number;
-    profile?: string;
-    targetVersionOrCommit?: string;
-    userAuthorizedExtraRound?: string;
-    source: "self" | "coordinator";
-  },
-) {
-  const problem = reviewInputProblem(input.verdict, input.findings);
-  if (problem) return { text: problem, isError: true };
-  const record = loadTask(recordPath);
-  if (
-    input.stage === "code" &&
-    !record.delivery &&
-    !record.deliveries?.length
-  ) {
-    return {
-      text: "No delivery is recorded yet, so there is nothing to review.",
-      isError: true,
-    };
-  }
-  const res = recordReviewVerdict(recordPath, {
-    ...input,
-    round: input.round ?? nextReviewRound(record, input.stage, input.agentId),
-  });
-  notifyTaskChanges();
-  return {
-    text: res.message,
-    structuredContent: {
-      status: res.status,
-      round: res.round,
-      maxRounds: res.maxRounds,
-    },
-  };
-}
-
-/**
- * Paseo forwards a member's final reply to the coordinator while the turn.after
- * hook reminds the member, so both could record the same handoff. The member
- * owns it until the reminder has failed (node blocked); only then may the
- * coordinator record on its behalf.
- */
-export function memberOwnsHandoff(
-  recordPath: string,
-  agentId: string | undefined,
-  fallbackRole?: "developer",
-): string | null {
-  const record = loadTask(recordPath);
-  const nodes = record.nodes;
-  const node = agentId
-    ? nodes.find((n) => n.agentId === agentId)
-    : nodes.findLast((n) => n.role === fallbackRole && n.agentId);
-  if (!node) return null;
-  const who = `${node.label} (${node.agentId})`;
-  if (node.reminded) {
-    return `${who} was reminded to submit itself and is retrying; wait for its next reply instead of recording for it.`;
-  }
-  if (!handoffOwed(record, node)) {
-    return `${who} already submitted this handoff itself; nothing to record.`;
-  }
-  return null;
-}
-
-function deliveryResult(updated: TaskRecord) {
-  const change = computeWorkspaceChangeStats(updated.projectRoot);
-  const advice =
-    updated.codeReview !== "required" &&
-    (change.files > 5 || change.lines > 200)
-      ? ` Diff is ${change.files} files / ${change.lines} lines; consider code review.`
-      : "";
-  notifyTaskChanges();
-  return {
-    text: `Recorded delivery (codeReview=${updated.codeReview}).${advice}`,
-    structuredContent: {
-      delivery: updated.candidate,
-      change,
-      codeReview: updated.codeReview,
-      codeReviewReason: updated.codeReviewReason,
-    },
-  };
-}
-
-function createSubmitPlanTool(recordPath: string, agentId?: string) {
-  return defineAgentTool({
-    name: "paseo_team_submit_plan",
-    title: "Submit Plan",
-    description:
-      "Hand off a finished plan or root-cause analysis. The file must already exist in the task evidence directory; each submission is the next plan version reviewers judge.",
-    input: z.object({
-      planFile: z
-        .string()
-        .min(1)
-        .describe("File name in the task evidence directory, e.g. plan.md"),
-      summary: z.string().min(1),
-    }),
-    async execute(args) {
-      try {
-        const updated = recordPlanSubmission(recordPath, { ...args, agentId });
-        notifyTaskChanges();
-        return { text: `Recorded plan ${updated.planVersion}.` };
-      } catch (err) {
-        return {
-          text: err instanceof Error ? err.message : String(err),
-          isError: true,
-        };
-      }
-    },
-  });
-}
-
-export function createExpertTools(
-  recordPath: string,
-  agentId: string,
-): AgentToolDefinition[] {
-  return [createSubmitPlanTool(recordPath, agentId)];
-}
-
-export function createReviewerTools(
-  recordPath: string,
-  agentId: string,
-  stage: "plan" | "code",
-): AgentToolDefinition[] {
-  return [
-    defineAgentTool({
-      name: "paseo_team_submit_review",
-      title: "Submit Review Verdict",
-      description:
-        'Hand off your verdict when the review is finished. REQUEST_CHANGES/BLOCKED need at least one "blocking:" finding; APPROVE allows only "advice:" findings. The round is derived automatically.',
-      input: z.object({
-        verdict: verdictSchema,
-        summary: z.string().min(1),
-        findings: findingsSchema,
-      }),
-      async execute(args) {
-        return submitReview(recordPath, {
-          ...args,
-          stage,
-          agentId,
-          source: "self",
-        });
-      },
-    }),
-  ];
-}
-
-export function createDeveloperTools(
-  recordPath: string,
-  agentId: string,
-): AgentToolDefinition[] {
-  const taskDir = path.dirname(path.resolve(recordPath));
-
-  const runCheckTool = defineAgentTool({
-    name: "paseo_team_run_check",
-    title: "Run Credential-Isolated Full CI Check",
-    description:
-      "Run full tests/CI in the workspace with SKIP_DOTENV=true and write the .log plus a .log.json result sidecar.",
-    input: z.object({
-      logFileName: z.string().min(5),
-      command: z.string().min(1),
-      args: z.array(z.string()),
-      cwd: z.string().optional(),
-    }),
-    async execute(args) {
-      const record = loadTask(recordPath);
-      // Never overwrite a previous run: ci-1.log -> ci-1-2.log, ci-1-3.log, ...
-      const requested = path.basename(args.logFileName.trim());
-      const stem = requested.replace(/\.log$/i, "");
-      let safeBase = `${stem}.log`;
-      for (let n = 2; existsSync(path.join(taskDir, safeBase)); n += 1) {
-        safeBase = `${stem}-${n}.log`;
-      }
-      const logPath = path.join(taskDir, safeBase);
-      const targetCwd = args.cwd?.trim() || record.projectRoot;
-      const result = runCheck(args.command, args.args, {
-        log: logPath,
-        cwd: targetCwd,
-      });
-      // Track the latest run (pass or fail) so the UI matches what the gate checks.
-      try {
-        const latest = loadTask(recordPath);
-        if (!latest.ci?.waived) {
-          latest.ci = { log: safeBase };
-          saveTask(recordPath, latest);
-        }
-      } catch {
-        // Non-fatal
-      }
-      notifyTaskChanges();
-      return {
-        text: JSON.stringify(result, null, 2),
-        structuredContent: result,
-        isError: result.status !== "PASS",
-      };
-    },
-  });
-
-  const submitDeliveryTool = defineAgentTool({
-    name: "paseo_team_submit_delivery",
-    title: "Submit Delivery",
-    description:
-      "Hand off finished work. Requires a passing paseo_team_run_check that ran after the previous round's delivery.",
-    input: z.object({
-      summary: z.string().min(1),
-      architectureImpact: z
-        .string()
-        .min(1)
-        .describe('Architecture/performance impact, or "None".'),
-      ciLog: z.string().optional(),
-    }),
-    async execute(args) {
-      const record = loadTask(recordPath);
-      const problem = ciProblem(
-        taskDir,
-        record as unknown as Record<string, unknown>,
-        nextDeliveryRound(record),
-      );
-      if (problem) {
-        return {
-          text: `${problem} Run the full project checks with paseo_team_run_check, then submit again.`,
-          isError: true,
-        };
-      }
-      return deliveryResult(
-        recordCandidateDelivery(recordPath, { ...args, agentId }),
-      );
-    },
-  });
-
-  return [runCheckTool, submitDeliveryTool];
 }
 
 export { buildCoordinatorSystemPrompt };

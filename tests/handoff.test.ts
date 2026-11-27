@@ -9,7 +9,6 @@ import {
 } from "../index.server.ts";
 import {
   buildConversationGraph,
-  memberOwnsHandoff,
   parseInlineTaskDirectives,
   reviewInputProblem,
   toPipelineSnapshot,
@@ -17,7 +16,6 @@ import {
 } from "../server/handlers.ts";
 import { inspectQualityGate } from "../server/quality-gate.ts";
 import {
-  checkTurnHandoff,
   findTaskByAgentId,
   initTask,
   loadTask,
@@ -82,31 +80,25 @@ test("review findings must be tagged and match the verdict", () => {
   );
 });
 
-test("turn without submit reminds once after delivery, then marks pending; gate names the agent", (t) => {
+test("dispatched reviewer without verdict blocks the gate and names the agent", (t) => {
   const { make } = setup(t);
-  const { recordPath } = make("Check handoff");
+  const { recordPath } = make("Check gate naming");
   registerTaskAgent(recordPath, {
     role: "code-reviewer",
     agentId: "rev-1",
     profile: "auto",
     briefSummary: "Review",
   });
-  // Before any delivery exists, submit_review would reject, so do not nag.
-  assert.equal(checkTurnHandoff(recordPath, "rev-1"), "ok");
   recordCandidateDelivery(recordPath, {
     summary: "d1",
     architectureImpact: "None",
     ciWaivedUserQuote: "user waived CI for test",
   });
-  assert.equal(checkTurnHandoff(recordPath, "rev-1"), "remind");
   const gate = inspectQualityGate({ recordPath });
   assert.ok(
-    gate.missing.some(
-      (m) => m.includes("rev-1") && m.includes("submit_review"),
-    ),
+    gate.missing.some((m) => m.includes("rev-1")),
     gate.missing.join("\n"),
   );
-  assert.equal(checkTurnHandoff(recordPath, "rev-1"), "missing");
   recordReviewVerdict(recordPath, {
     stage: "code",
     agentId: "rev-1",
@@ -114,9 +106,7 @@ test("turn without submit reminds once after delivery, then marks pending; gate 
     verdict: "APPROVE",
     summary: "ok",
   });
-  assert.equal(checkTurnHandoff(recordPath, "rev-1"), "ok");
-  // Unknown agents (e.g. the coordinator) are never nagged.
-  assert.equal(checkTurnHandoff(recordPath, "someone-else"), "ok");
+  assert.equal(inspectQualityGate({ recordPath }).status, "READY");
 });
 
 test("plan submission stays inside the task dir and bumps the plan round", (t) => {
@@ -269,9 +259,9 @@ test("single coordinated task renders directly while multiple sequential tasks o
   assert.equal(wsLatest.task?.goal, "Newest task on chat-2");
 });
 
-test("coordinator may record for a member only after its reminder failed", (t) => {
+test("recording a second reviewer verdict preserves earlier reviewer source metadata", (t) => {
   const { make } = setup(t);
-  const { recordPath } = make("Guard duplicate handoffs");
+  const { recordPath } = make("Preserve source");
   registerTaskAgent(recordPath, {
     role: "code-reviewer",
     agentId: "rev-1",
@@ -279,7 +269,7 @@ test("coordinator may record for a member only after its reminder failed", (t) =
     briefSummary: "Review",
   });
 
-  // Dispatched but unsubmitted reviewer blocks the gate even without "with review".
+  // Dispatched but unsubmitted reviewer blocks the gate.
   assert.equal(
     inspectQualityGate({ recordPath }).checks.codeReviewSatisfied,
     false,
@@ -289,11 +279,6 @@ test("coordinator may record for a member only after its reminder failed", (t) =
     architectureImpact: "None",
     ciWaivedUserQuote: "user waived CI for test",
   });
-  assert.equal(memberOwnsHandoff(recordPath, "rev-1"), null);
-  checkTurnHandoff(recordPath, "rev-1"); // first miss: reminder sent
-  assert.match(memberOwnsHandoff(recordPath, "rev-1") ?? "", /reminded/);
-  checkTurnHandoff(recordPath, "rev-1"); // second miss: coordinator may act
-  assert.equal(memberOwnsHandoff(recordPath, "rev-1"), null);
   recordReviewVerdict(recordPath, {
     stage: "code",
     agentId: "rev-1",
@@ -302,11 +287,6 @@ test("coordinator may record for a member only after its reminder failed", (t) =
     summary: "ok",
     source: "self",
   });
-  assert.match(
-    memberOwnsHandoff(recordPath, "rev-1") ?? "",
-    /already submitted/,
-  );
-  // A later write must not strip the earlier entry's source.
   registerTaskAgent(recordPath, {
     role: "code-reviewer",
     agentId: "rev-2",
@@ -389,35 +369,6 @@ test("preset phrases are recognized after Chinese punctuation", () => {
     parseInlineTaskDirectives("加 search 命令").teamOverride,
     undefined,
   );
-});
-
-test("follow-up turns after a handoff are not nagged; a rework request is", (t) => {
-  const { make } = setup(t);
-  const { recordPath } = make("Owed handoffs");
-  registerTaskAgent(recordPath, {
-    role: "developer",
-    agentId: "dev-1",
-    profile: "auto",
-    briefSummary: "Build",
-  });
-  recordCandidateDelivery(recordPath, {
-    agentId: "dev-1",
-    summary: "d1",
-    architectureImpact: "None",
-    ciWaivedUserQuote: "user said skip CI for this test",
-  });
-  // Coordinator asks a question afterwards: nothing is owed.
-  assert.equal(checkTurnHandoff(recordPath, "dev-1"), "ok");
-  recordReviewVerdict(recordPath, {
-    stage: "code",
-    agentId: "rev-1",
-    round: 1,
-    verdict: "REQUEST_CHANGES",
-    summary: "fix",
-    findings: ["blocking: a.ts:1 bug"],
-  });
-  // Rework requested: a turn without a new delivery is reminded.
-  assert.equal(checkTurnHandoff(recordPath, "dev-1"), "remind");
 });
 
 test("review phrases recognize code/plan modifiers and negations", () => {
@@ -877,21 +828,6 @@ test("permission hook auto-allows coordinator read-only checks and scoped child 
     true,
   );
   assert.equal(
-    isAutoAllowedTeamTool("developer", "mcp_paseo_paseo_team_run_check"),
-    true,
-  );
-  assert.equal(
-    isAutoAllowedTeamTool("developer", "paseo.paseo_team_submit_delivery"),
-    true,
-  );
-  assert.equal(
-    isAutoAllowedTeamTool(
-      "code-reviewer",
-      "mcp_paseo_paseo_team_submit_review",
-    ),
-    true,
-  );
-  assert.equal(
     isAutoAllowedTeamTool("coordinator", "paseo.create_agent"),
     true,
   );
@@ -910,11 +846,27 @@ test("permission hook auto-allows coordinator read-only checks and scoped child 
     false,
   );
   assert.equal(
-    isAutoAllowedTeamTool("coordinator", "mcp_paseo_paseo_team_set_route"),
-    true,
+    isAutoAllowedTeamTool("code-reviewer", "mcp_paseo_paseo_team"),
+    false,
+  );
+  // Subagents have no custom paseo_team_* tools in single-channel mode.
+  assert.equal(
+    isAutoAllowedTeamTool("developer", "mcp_paseo_paseo_team_run_check"),
+    false,
   );
   assert.equal(
-    isAutoAllowedTeamTool("developer", "mcp_paseo_paseo_team_set_route"),
+    isAutoAllowedTeamTool("developer", "paseo.paseo_team_submit_delivery"),
+    false,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool(
+      "code-reviewer",
+      "mcp_paseo_paseo_team_submit_review",
+    ),
+    false,
+  );
+  assert.equal(
+    isAutoAllowedTeamTool("coordinator", "mcp_paseo_paseo_team_set_route"),
     false,
   );
   // Non-coordinators must never be auto-allowed coordinator management tools.

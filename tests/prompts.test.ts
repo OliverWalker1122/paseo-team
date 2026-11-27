@@ -3,21 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import {
-  createCoordinatorTools,
-  createDeveloperTools,
-  createExpertTools,
-  createReviewerTools,
-} from "../server/handlers.ts";
+import { createCoordinatorTools } from "../server/handlers.ts";
 import {
   assignReviewerPerspective,
-  buildCoordinatorReminderNotice,
   buildCoordinatorSystemPrompt,
   buildDeveloperPrompt,
   buildExpertPrompt,
   buildKickoffPrompt,
   buildReviewerPrompt,
-  buildTurnHandoffReminder,
   getSafetyRulesText,
   SAFETY_RULES_EN,
   SAFETY_RULES_ZH,
@@ -69,7 +62,6 @@ test("safety rules enforce credential redlines in both languages without contrad
     assert.match(text, /SKIP_DOTENV=true/);
     assert.match(text, /DOTENV_CONFIG_PATH=\/dev\/null/);
     assert.match(text, /printenv/);
-    // Must not contradict Coordinator's "plugin injects safety rules, briefs need not repeat them".
     assert.doesNotMatch(
       text,
       /Include this exact section verbatim whenever spawning subagents|再派生子 agent 时，必须将本节原文写入其简报/,
@@ -77,16 +69,12 @@ test("safety rules enforce credential redlines in both languages without contrad
   }
 });
 
-test("coordinator system prompt covers both languages, both complex modes, and only real tool names", (t) => {
+test("coordinator system prompt covers both languages, native single-channel messaging, and only the real paseo_team tool", (t) => {
   const { recordPath } = makeSampleRecord(t);
-  const allRealPluginTools = new Set([
-    ...createCoordinatorTools(recordPath).map((tool) => tool.name),
-    ...createDeveloperTools(recordPath, "dev-1").map((tool) => tool.name),
-    ...createExpertTools(recordPath, "exp-1").map((tool) => tool.name),
-    ...createReviewerTools(recordPath, "rev-1", "code").map(
-      (tool) => tool.name,
-    ),
-  ]);
+  const allRealPluginTools = new Set(
+    createCoordinatorTools(recordPath).map((tool) => tool.name),
+  );
+  assert.deepEqual([...allRealPluginTools], ["paseo_team"]);
 
   for (const lang of ["zh", "en"] as const) {
     for (const complexMode of ["simple", "expert"] as const) {
@@ -101,7 +89,7 @@ test("coordinator system prompt covers both languages, both complex modes, and o
       assert.match(prompt, /task-coord-1/);
       assert.match(prompt, /\/tmp\/evidence\/task-coord-1/);
       assert.match(prompt, /create_agent/);
-      assert.match(prompt, /CIRCUIT_BROKEN/);
+      assert.match(prompt, /send_agent_prompt/);
       assert.match(prompt, /\.worktrees/);
       assert.match(prompt, /git commit/);
       assert.ok(
@@ -109,14 +97,13 @@ test("coordinator system prompt covers both languages, both complex modes, and o
         `coordinator prompt (${lang}) must embed safety rules`,
       );
 
-      // Yield-after-dispatch rule must remain explicit so coordinators do not poll.
       if (lang === "zh") {
         assert.match(prompt, /立即结束本轮/);
         assert.match(prompt, /不要轮询/);
         assert.match(prompt, /同一时刻只有一名 Developer/);
       } else {
         assert.match(prompt, /End your turn immediately/);
-        assert.match(prompt, /do not poll/i);
+        assert.match(prompt, /without polling/i);
         assert.match(prompt, /One Developer writes at a time/);
       }
 
@@ -126,57 +113,33 @@ test("coordinator system prompt covers both languages, both complex modes, and o
         assert.match(prompt, lang === "zh" ? /绝不自审/ : /never self-approve/);
       }
 
-      // Every plugin tool mentioned in coordinator prompt must actually exist.
       const mentioned = extractPluginToolMentions(prompt);
-      assert.ok(
-        mentioned.includes("paseo_team"),
-        "coordinator prompt must mention paseo_team",
-      );
+      assert.deepEqual(mentioned, ["paseo_team"]);
       assert.match(prompt, /action:\s*"set_route"/);
-      assert.match(prompt, /action:\s*"submit_plan"/);
-      assert.match(prompt, /action:\s*"record_delivery"/);
-      assert.match(prompt, /action:\s*"record_review"/);
+      assert.match(prompt, /action:\s*"update"/);
       assert.match(prompt, /action:\s*"complete"/);
       assert.match(prompt, /action:\s*"summary"/);
-      assert.match(prompt, /action:\s*"resolve_breaker"/);
-      assert.ok(
-        mentioned.includes("paseo_team_submit_delivery"),
-        "coordinator prompt must mention paseo_team_submit_delivery",
-      );
-      assert.ok(
-        mentioned.includes("paseo_team_submit_review"),
-        "coordinator prompt must mention paseo_team_submit_review",
-      );
-      for (const toolName of mentioned) {
-        assert.ok(
-          allRealPluginTools.has(toolName),
-          `coordinator prompt referenced unknown plugin tool: ${toolName}`,
-        );
-      }
     }
   }
 });
 
-test("developer and expert prompts match their actual registered tool names and constraints", (t) => {
-  const { recordPath } = makeSampleRecord(t);
-  const devTools = createDeveloperTools(recordPath, "dev-1")
-    .map((tool) => tool.name)
-    .sort();
-  const expertTools = createExpertTools(recordPath, "exp-1")
-    .map((tool) => tool.name)
-    .sort();
-
+test("developer and expert prompts require zero custom plugin tools and specify native reply format", () => {
   for (const lang of ["zh", "en"] as const) {
     const devPrompt = buildDeveloperPrompt({
       taskId: "task-dev-1",
       taskDir: "/tmp/evidence/task-dev-1",
       lang,
     });
-    assert.deepEqual(extractPluginToolMentions(devPrompt), devTools);
-    assert.match(devPrompt, /summary/);
-    assert.match(devPrompt, /architectureImpact/);
+    assert.deepEqual(extractPluginToolMentions(devPrompt), []);
+    assert.match(devPrompt, /SKIP_DOTENV=true/);
     assert.match(devPrompt, /\.worktrees/);
     assert.match(devPrompt, /git commit/);
+    assert.match(devPrompt, lang === "zh" ? /摘要：/ : /Summary:/);
+    assert.match(devPrompt, lang === "zh" ? /检查：/ : /Checks:/);
+    assert.match(
+      devPrompt,
+      lang === "zh" ? /架构影响：/ : /Architecture impact:/,
+    );
     assert.ok(devPrompt.includes(getSafetyRulesText(lang)));
 
     const expertPrompt = buildExpertPrompt({
@@ -184,7 +147,7 @@ test("developer and expert prompts match their actual registered tool names and 
       taskDir: "/tmp/evidence/task-exp-1",
       lang,
     });
-    assert.deepEqual(extractPluginToolMentions(expertPrompt), expertTools);
+    assert.deepEqual(extractPluginToolMentions(expertPrompt), []);
     assert.match(expertPrompt, /\/tmp\/evidence\/task-exp-1/);
     assert.match(
       expertPrompt,
@@ -194,12 +157,7 @@ test("developer and expert prompts match their actual registered tool names and 
   }
 });
 
-test("reviewer prompt distinguishes plan vs code stages, all three perspectives, and verdict format", (t) => {
-  const { recordPath } = makeSampleRecord(t);
-  const reviewerTools = createReviewerTools(recordPath, "rev-1", "code")
-    .map((tool) => tool.name)
-    .sort();
-
+test("reviewer prompt distinguishes plan vs code stages, uses zero custom tools, and sets native verdict format", () => {
   assert.equal(assignReviewerPerspective(0, 1), "comprehensive");
   assert.equal(assignReviewerPerspective(0, 2), "spec-boundary");
   assert.equal(assignReviewerPerspective(1, 2), "arch-simplicity");
@@ -220,11 +178,10 @@ test("reviewer prompt distinguishes plan vs code stages, all three perspectives,
           lang,
         }),
       );
-      // All three perspective prompts must be distinct.
       assert.equal(new Set(rendered).size, 3);
 
       for (const prompt of rendered) {
-        assert.deepEqual(extractPluginToolMentions(prompt), reviewerTools);
+        assert.deepEqual(extractPluginToolMentions(prompt), []);
         assert.match(prompt, /APPROVE/);
         assert.match(prompt, /REQUEST_CHANGES/);
         assert.match(prompt, /BLOCKED/);
@@ -252,25 +209,32 @@ test("reviewer prompt distinguishes plan vs code stages, all three perspectives,
               ? /独立代码审查指引/
               : /Independent Code Reviewer Guide/,
           );
+          assert.match(
+            prompt,
+            lang === "zh"
+              ? /终止所有临时启动的后台服务/
+              : /terminate any temporary background server/,
+          );
         }
       }
     }
   }
 });
 
-test("kickoff prompt, recovery brief, and turn handoff reminders stay structured and bilingual", (t) => {
+test("recovery brief includes findings and kickoff prompt embeds concise native protocol in both languages", (t) => {
   const { recordPath } = makeSampleRecord(t);
   registerTaskAgent(recordPath, {
     role: "developer",
     agentId: "dev-99",
-    profile: "codex/gpt-6.1-sol",
-    briefSummary: "Implement fix",
+    profile: "antigravity/gemini-4-neon",
+    briefSummary: "Fix bug",
   });
   recordCandidateDelivery(recordPath, {
     agentId: "dev-99",
-    summary: "Implemented fix",
+    summary: "Fixed bug",
     architectureImpact: "None",
-    ciWaivedUserQuote: "user waived CI for prompt test",
+    ciStatus: "pass",
+    ciSummary: "npm test passed",
   });
   registerTaskAgent(recordPath, {
     role: "code-reviewer",
@@ -317,12 +281,10 @@ test("kickoff prompt, recovery brief, and turn handoff reminders stay structured
   });
   assert.match(zhKickoff, /\[Team 任务启动\]/);
   assert.match(zhKickoff, /create_agent/);
-  assert.match(zhKickoff, /`paseo_team`/);
+  assert.deepEqual(extractPluginToolMentions(zhKickoff), ["paseo_team"]);
   assert.match(zhKickoff, /action: "set_route"/);
-  assert.match(zhKickoff, /action: "resolve_breaker"/);
+  assert.match(zhKickoff, /action: "update"/);
   assert.match(zhKickoff, /action: "complete"/);
-  assert.match(zhKickoff, /CIRCUIT_BROKEN/);
-  assert.match(zhKickoff, /paseo_team_\*/);
   assert.match(zhKickoff, /\/tmp\/evidence\/t-kick-zh/);
   assert.ok(zhKickoff.includes(SAFETY_RULES_ZH));
   assert.match(zhKickoff, /用户已明确要求方案评审/);
@@ -340,50 +302,12 @@ test("kickoff prompt, recovery brief, and turn handoff reminders stay structured
   });
   assert.match(enKickoff, /\[Team Kickoff\]/);
   assert.match(enKickoff, /mode: `expert`/);
-  assert.match(enKickoff, /`paseo_team`/);
+  assert.deepEqual(extractPluginToolMentions(enKickoff), ["paseo_team"]);
   assert.match(enKickoff, /action: "set_route"/);
-  assert.match(enKickoff, /action: "resolve_breaker"/);
+  assert.match(enKickoff, /action: "update"/);
   assert.match(enKickoff, /action: "complete"/);
-  assert.match(enKickoff, /CIRCUIT_BROKEN/);
-  assert.match(enKickoff, /paseo_team_\*/);
   assert.match(enKickoff, /\/tmp\/evidence\/t-kick-en/);
   assert.ok(enKickoff.includes(SAFETY_RULES_EN));
   assert.match(enKickoff, /User explicitly requested plan review/);
   assert.match(enKickoff, /claude\/claude-opus-5-5/);
-
-  for (const kind of ["submitted", "missing", "failed"] as const) {
-    const zhNote = buildCoordinatorReminderNotice({
-      memberLabel: "方案审查 #1",
-      agentId: "rev-1",
-      kind,
-      verdict: "REQUEST_CHANGES",
-      round: 1,
-      summary: "Need fix",
-      lang: "zh",
-    });
-    const enNote = buildCoordinatorReminderNotice({
-      memberLabel: "Plan Reviewer #1",
-      agentId: "rev-1",
-      kind,
-      verdict: "REQUEST_CHANGES",
-      round: 1,
-      summary: "Need fix",
-      lang: "en",
-    });
-    assert.match(zhNote, /\[Team 提醒回执\]/);
-    assert.match(enNote, /\[Team Reminder Update\]/);
-  }
-
-  for (const toolName of [
-    "paseo_team_submit_delivery",
-    "paseo_team_submit_plan",
-    "paseo_team_submit_review",
-  ]) {
-    const zhRem = buildTurnHandoffReminder({ toolName, lang: "zh" });
-    const enRem = buildTurnHandoffReminder({ toolName, lang: "en" });
-    assert.match(zhRem, /\[Team 交接检查\]/);
-    assert.ok(zhRem.includes(`\`${toolName}\``));
-    assert.match(enRem, /\[Team handoff check\]/);
-    assert.ok(enRem.includes(`\`${toolName}\``));
-  }
 });

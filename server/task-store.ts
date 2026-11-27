@@ -72,11 +72,8 @@ export interface TaskAgentNode {
   verdict?: ReviewVerdict;
   summary?: string;
   startedAt?: string;
-  /** Handoff bookkeeping written by the turn hooks and submit tools. */
+  /** Handoff bookkeeping written by turn observation and coordinator updates. */
   submittedAt?: string;
-  reminded?: boolean;
-  /** True when a plugin-initiated reminder turn submitted and should notify the coordinator on turn end. */
-  reminderCallbackPending?: boolean;
   updatedAt: string;
 }
 
@@ -219,7 +216,13 @@ export interface TaskRecord {
   codeReviewReason?: string;
   codeReviewRound: number;
   codeReviewers: ReviewerRecordEntry[];
-  ci: { log?: string; waived?: string } | null;
+  ci: {
+    log?: string;
+    waived?: string;
+    status?: "pass" | "fail";
+    summary?: string;
+    checkedAt?: string;
+  } | null;
   delivery: TaskDeliveryInfo | null;
   deliveries?: TaskDeliveryRoundEntry[];
   circuitBroken: CircuitBreakerInfo | null;
@@ -898,8 +901,20 @@ function normalizeLoadedTaskRecord(
     const ciObj = rawObj.ci as Record<string, unknown>;
     const log = asNonEmptyString(ciObj.log);
     const waived = asNonEmptyString(ciObj.waived);
-    if (log || waived) {
-      ci = { ...(log ? { log } : {}), ...(waived ? { waived } : {}) };
+    const status =
+      ciObj.status === "pass" || ciObj.status === "fail"
+        ? ciObj.status
+        : undefined;
+    const summary = asNonEmptyString(ciObj.summary);
+    const checkedAt = asNonEmptyString(ciObj.checkedAt);
+    if (log || waived || status) {
+      ci = {
+        ...(log ? { log } : {}),
+        ...(waived ? { waived } : {}),
+        ...(status ? { status } : {}),
+        ...(summary ? { summary } : {}),
+        ...(checkedAt ? { checkedAt } : {}),
+      };
     }
   }
 
@@ -1533,15 +1548,10 @@ export function recordReviewVerdict(
 
   const node = record.nodes.find((n) => n.agentId === input.agentId);
   if (node) {
-    const wasReminded = Boolean(node.reminded);
     node.round = input.round;
     node.verdict = input.verdict;
     node.summary = input.summary;
     node.submittedAt = now;
-    node.reminded = false;
-    if (wasReminded) {
-      node.reminderCallbackPending = true;
-    }
     node.status =
       input.verdict === "APPROVE"
         ? "approved"
@@ -1640,21 +1650,31 @@ export function nextReviewRound(
 
 export function recordPlanSubmission(
   recordPath: string,
-  input: { agentId?: string; planFile: string; summary: string },
+  input: {
+    agentId?: string;
+    planFile?: string;
+    summary: string;
+    allowMissingFile?: boolean;
+  },
 ): TaskRecord {
   const record = loadTask(recordPath);
   const taskDir = path.dirname(path.resolve(recordPath));
-  const file = path.resolve(taskDir, input.planFile.trim());
-  if (path.dirname(file) !== taskDir) {
-    throw new Error(
-      "The plan file must be directly in the task evidence directory.",
-    );
-  }
-  const st = existsSync(file) ? lstatSync(file) : null;
-  if (!st?.isFile() || st.size === 0) {
-    throw new Error(
-      `Plan file ${path.basename(file)} is missing or empty; write it first.`,
-    );
+  if (input.planFile?.trim()) {
+    const file = path.resolve(taskDir, input.planFile.trim());
+    if (path.dirname(file) !== taskDir) {
+      if (!input.allowMissingFile) {
+        throw new Error(
+          "The plan file must be directly in the task evidence directory.",
+        );
+      }
+    } else {
+      const st = existsSync(file) ? lstatSync(file) : null;
+      if ((!st?.isFile() || st.size === 0) && !input.allowMissingFile) {
+        throw new Error(
+          `Plan file ${path.basename(file)} is missing or empty; write it first.`,
+        );
+      }
+    }
   }
   const now = new Date().toISOString();
   const n = (record.planSubmissions ?? 0) + 1;
@@ -1670,133 +1690,12 @@ export function recordPlanSubmission(
     ? record.nodes.find((x) => x.agentId === input.agentId)
     : undefined;
   if (node) {
-    const wasReminded = Boolean(node.reminded);
     node.status = "completed";
     node.summary = input.summary.trim();
     node.submittedAt = now;
-    node.reminded = false;
-    if (wasReminded) {
-      node.reminderCallbackPending = true;
-    }
     node.updatedAt = now;
   }
   return saveTask(recordPath, record);
-}
-
-/**
- * Whether this member still owes a handoff: it never submitted, or the pipeline
- * has moved past its last submission (rework requested, or a newer target to
- * review). Follow-up turns such as answering the coordinator owe nothing.
- */
-export function handoffOwed(record: TaskRecord, node: TaskAgentNode): boolean {
-  const hasDelivery = Boolean(record.delivery || record.deliveries?.length);
-  if (node.role === "code-reviewer" && !hasDelivery) return false;
-  if (!node.submittedAt) return true;
-  const failed = (list: ReviewerRecordEntry[], round: number) =>
-    list.some((r) => r.round === round && r.status !== "APPROVE");
-  const lastDelivery = Math.max(
-    0,
-    ...(record.deliveries ?? []).map((d) => d.round),
-  );
-  const plans = record.planSubmissions ?? 0;
-  const own = (list: ReviewerRecordEntry[]) =>
-    Math.max(
-      0,
-      ...list.filter((r) => r.agentId === node.agentId).map((r) => r.round),
-    );
-  switch (node.role) {
-    case "developer":
-      return (
-        record.codeReviewRound >= lastDelivery &&
-        failed(record.codeReviewers, record.codeReviewRound)
-      );
-    case "expert":
-      return (
-        record.planReviewRound >= plans &&
-        failed(record.planReviewers, record.planReviewRound)
-      );
-    case "code-reviewer":
-      return lastDelivery > own(record.codeReviewers);
-    case "plan-reviewer":
-      return plans > own(record.planReviewers);
-    default:
-      return false;
-  }
-}
-
-/**
- * turn.after: did this turn end with the role's submit tool? Returns "remind"
- * once, then "missing" (node flagged in the graph) so reminders never loop.
- */
-export function checkTurnHandoff(
-  recordPath: string,
-  agentId: string,
-): "ok" | "remind" | "missing" {
-  const record = loadTask(recordPath);
-  const node = record.nodes.find((n) => n.agentId === agentId);
-  if (
-    !node ||
-    !["developer", "expert", "plan-reviewer", "code-reviewer"].includes(
-      node.role,
-    )
-  ) {
-    return "ok";
-  }
-  if (!handoffOwed(record, node)) return "ok";
-  const now = new Date().toISOString();
-  if (!node.reminded) {
-    node.reminded = true;
-    saveTask(recordPath, record);
-    return "remind";
-  }
-  // A member may legitimately be waiting (e.g. told to hold for plan review), so
-  // this is not an error: its reply explains why, and the coordinator decides.
-  node.reminded = false;
-  node.reminderCallbackPending = false;
-  node.summary =
-    "Handoff pending: reminded once without a submission; see its reply.";
-  node.updatedAt = now;
-  saveTask(recordPath, record);
-  return "missing";
-}
-
-/**
- * Consumes a pending coordinator callback after a plugin-initiated reminder turn.
- * Paseo only sends native parent callbacks for coordinator-initiated turns, so
- * the plugin itself must notify the coordinator when a reminded turn ends.
- */
-export function consumeReminderCallback(
-  recordPath: string,
-  agentId: string,
-  turnFailed = false,
-): {
-  kind: "submitted" | "failed";
-  node: TaskAgentNode;
-  record: TaskRecord;
-} | null {
-  const record = loadTask(recordPath);
-  const node = record.nodes.find((n) => n.agentId === agentId);
-  if (!node) return null;
-  if (node.reminderCallbackPending) {
-    node.reminderCallbackPending = false;
-    const saved = saveTask(recordPath, record);
-    return {
-      kind: "submitted",
-      node: saved.nodes.find((n) => n.agentId === agentId) ?? node,
-      record: saved,
-    };
-  }
-  if (turnFailed && node.reminded) {
-    node.reminded = false;
-    node.updatedAt = new Date().toISOString();
-    const saved = saveTask(recordPath, record);
-    return {
-      kind: "failed",
-      node: saved.nodes.find((n) => n.agentId === agentId) ?? node,
-      record: saved,
-    };
-  }
-  return null;
 }
 
 export function resolveCircuitBreaker(
@@ -1865,6 +1764,8 @@ export function recordCandidateDelivery(
     agentId?: string;
     candidate?: string;
     ciLog?: string;
+    ciStatus?: "pass" | "fail";
+    ciSummary?: string;
     ciWaivedUserQuote?: string;
     summary: string;
     architectureImpact: string;
@@ -1884,15 +1785,21 @@ export function recordCandidateDelivery(
 
   let resolvedCiLog: string | undefined;
   if (input.ciWaivedUserQuote?.trim()) {
-    record.ci = { waived: input.ciWaivedUserQuote.trim() };
+    record.ci = { waived: input.ciWaivedUserQuote.trim(), checkedAt: now };
+  } else if (input.ciStatus) {
+    record.ci = {
+      status: input.ciStatus,
+      ...(input.ciSummary?.trim() ? { summary: input.ciSummary.trim() } : {}),
+      checkedAt: now,
+    };
   } else if (input.ciLog?.trim()) {
     resolvedCiLog = path.basename(input.ciLog.trim());
-    record.ci = { log: resolvedCiLog };
+    record.ci = { log: resolvedCiLog, checkedAt: now };
   } else if (!record.ci?.waived) {
     const autoLog = findLatestCiLog(taskDir);
     if (autoLog) {
       resolvedCiLog = autoLog;
-      record.ci = { log: autoLog };
+      record.ci = { log: autoLog, checkedAt: now };
     }
   }
 
@@ -1943,14 +1850,9 @@ export function recordCandidateDelivery(
       (n) => n.role === "developer" && n.agentId === input.agentId!.trim(),
     );
     if (devNode) {
-      const wasReminded = Boolean(devNode.reminded);
       devNode.status = "completed";
       devNode.summary = input.summary.trim();
       devNode.submittedAt = now;
-      devNode.reminded = false;
-      if (wasReminded) {
-        devNode.reminderCallbackPending = true;
-      }
       devNode.updatedAt = now;
     }
   } else {

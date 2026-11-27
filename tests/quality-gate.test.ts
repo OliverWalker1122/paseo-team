@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { inspectQualityGate } from "../server/quality-gate.ts";
-import { runCheck } from "../server/run-check.ts";
 import {
   initTask,
   loadTask,
@@ -62,14 +61,18 @@ const preset = {
   complexMode: "simple" as const,
 };
 
-function pass(taskDir: string, name: string, cwd: string, code = 0) {
-  return runCheck(process.execPath, ["-e", `process.exit(${code})`], {
-    log: path.join(taskDir, name),
-    cwd,
-  });
+function writeLegacySidecar(taskDir: string, name: string, passed = true) {
+  writeFileSync(path.join(taskDir, name), passed ? "ok\n" : "fail\n");
+  writeFileSync(
+    path.join(taskDir, `${name}.json`),
+    JSON.stringify({
+      status: passed ? "PASS" : "FAIL",
+      exitCode: passed ? 0 : 1,
+    }),
+  );
 }
 
-test("gate passes on recorded evidence and ignores later workspace edits", (t) => {
+test("gate passes on recorded native CI evidence and ignores later workspace edits", (t) => {
   const { repoDir, stateRoot } = setupWorkspace(t);
   const created = initTask({
     cwd: repoDir,
@@ -81,13 +84,14 @@ test("gate passes on recorded evidence and ignores later workspace edits", (t) =
   });
 
   writeFileSync(path.join(repoDir, "app.mjs"), "export const v = 2;\n");
-  assert.equal(pass(created.taskDir, "ci-1.log", repoDir).status, "PASS");
   const delivered = recordCandidateDelivery(created.recordPath, {
-    ciLog: "ci-1.log",
+    ciStatus: "pass",
+    ciSummary: "npm test 10/10",
     summary: "Implemented stats()",
     architectureImpact: "None",
   });
   assert.equal(delivered.candidate, "delivery-r1");
+  assert.equal(delivered.ci?.status, "pass");
 
   for (const agentId of ["rev-1", "rev-2"]) {
     registerTaskAgent(created.recordPath, {
@@ -124,7 +128,7 @@ test("gate passes on recorded evidence and ignores later workspace edits", (t) =
   assert.equal(completed.lifecycleStatus, "completed");
 });
 
-test("rework round needs a fresh CI run and only the latest review round counts", (t) => {
+test("rework round needs fresh CI (native status or legacy sidecar) and only the latest review round counts", async (t) => {
   const { repoDir, stateRoot } = setupWorkspace(t);
   const created = initTask({
     cwd: repoDir,
@@ -135,7 +139,7 @@ test("rework round needs a fresh CI run and only the latest review round counts"
     stateRoot,
   });
 
-  pass(created.taskDir, "ci-1.log", repoDir);
+  writeLegacySidecar(created.taskDir, "ci-1.log", true);
   recordCandidateDelivery(created.recordPath, {
     summary: "Round 1",
     architectureImpact: "None",
@@ -160,7 +164,8 @@ test("rework round needs a fresh CI run and only the latest review round counts"
     false,
   );
 
-  // Round 2 delivered without rerunning CI: the old run is stale.
+  // Round 2 delivered without rerunning CI: the old legacy run is stale.
+  await new Promise((r) => setTimeout(r, 15));
   const r2 = recordCandidateDelivery(created.recordPath, {
     summary: "Round 2",
     architectureImpact: "None",
@@ -171,13 +176,25 @@ test("rework round needs a fresh CI run and only the latest review round counts"
     false,
   );
 
-  // A failing latest run is not enough either.
-  pass(created.taskDir, "ci-2.log", repoDir, 1);
+  // A failing native check report blocks ciPassed.
+  recordCandidateDelivery(created.recordPath, {
+    summary: "Round 2 failed",
+    architectureImpact: "None",
+    ciStatus: "fail",
+    ciSummary: "1 test failed",
+  });
   assert.equal(
     inspectQualityGate({ recordPath: created.recordPath }).checks.ciPassed,
     false,
   );
-  pass(created.taskDir, "ci-3.log", repoDir);
+
+  // A fresh passing native check report satisfies ciPassed.
+  recordCandidateDelivery(created.recordPath, {
+    summary: "Round 2 fixed",
+    architectureImpact: "None",
+    ciStatus: "pass",
+    ciSummary: "all tests passed",
+  });
 
   // A fresh reviewer approving round 2 supersedes round 1 findings.
   recordReviewVerdict(created.recordPath, {
@@ -196,7 +213,7 @@ test("rework round needs a fresh CI run and only the latest review round counts"
   });
 });
 
-test("registers parallel developers and auto-binds the latest CI log from a subdirectory", (t) => {
+test("registers parallel developers and binds reported passing CI", (t) => {
   const { repoDir, stateRoot } = setupWorkspace(t);
   const subDir = path.join(repoDir, "packages", "core");
   mkdirSync(subDir, { recursive: true });
@@ -230,12 +247,13 @@ test("registers parallel developers and auto-binds the latest CI log from a subd
     ],
   );
 
-  assert.equal(pass(created.taskDir, "ci-1.log", subDir).status, "PASS");
   const delivered = recordCandidateDelivery(created.recordPath, {
     summary: "Completed both slices",
     architectureImpact: "None",
+    ciStatus: "pass",
+    ciSummary: "npm test passed",
   });
-  assert.equal(delivered.ci?.log, "ci-1.log");
+  assert.equal(delivered.ci?.status, "pass");
   assert.equal(
     inspectQualityGate({ recordPath: created.recordPath }).status,
     "READY",
@@ -301,10 +319,11 @@ test("resolveCircuitBreaker supports waiving a broken plan stage and granting an
   assert.equal(waived.record.planReview, "waived");
 
   // Developer delivers R1; Rev #1 approves, Rev #2 requests changes.
-  pass(created.taskDir, "ci-1.log", repoDir);
   recordCandidateDelivery(created.recordPath, {
     summary: "R1 implementation",
     architectureImpact: "None",
+    ciStatus: "pass",
+    ciSummary: "npm test 94/94",
   });
   for (const id of ["code-r1", "code-r2"]) {
     registerTaskAgent(created.recordPath, {
@@ -331,10 +350,11 @@ test("resolveCircuitBreaker supports waiving a broken plan stage and granting an
   });
 
   // R2 rework: only code-r2 re-reviews (selective R2) and still requests changes -> trips code breaker.
-  pass(created.taskDir, "ci-2.log", repoDir);
   recordCandidateDelivery(created.recordPath, {
     summary: "R2 fix",
     architectureImpact: "None",
+    ciStatus: "pass",
+    ciSummary: "npm test 98/98",
   });
   const codeBroken = recordReviewVerdict(created.recordPath, {
     stage: "code",
@@ -356,10 +376,11 @@ test("resolveCircuitBreaker supports waiving a broken plan stage and granting an
   assert.equal(extra.record.lifecycleStatus, "active");
   assert.equal(extra.record.circuitBroken, null);
 
-  pass(created.taskDir, "ci-3.log", repoDir);
   recordCandidateDelivery(created.recordPath, {
     summary: "R3 targeted fix",
     architectureImpact: "None",
+    ciStatus: "pass",
+    ciSummary: "npm test 99/99",
   });
   const r3 = recordReviewVerdict(created.recordPath, {
     stage: "code",

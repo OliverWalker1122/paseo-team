@@ -452,11 +452,16 @@ async function runLiveScenario({
     assert.equal(readFileSync(probePath, "utf8").trim(), expectedLine);
     assert.equal(finalRecord.routeDecided, true);
 
-    // 2. Developer & (if required) Reviewers must be registered and completed/approved.
+    // 2. Developer & (if required) Reviewers must be registered and passively observed via native Paseo replies.
     const devNode = finalRecord.nodes.find((n) => n.role === "developer");
     assert.ok(devNode?.agentId, "developer node must be registered");
     assert.equal(devNode.status, "completed");
-    assert.ok(finalRecord.ci?.log, "CI log must be recorded via run_check");
+    assert.ok(
+      finalRecord.ci?.status === "pass" ||
+        finalRecord.ci?.log ||
+        finalRecord.ci?.waived,
+      "CI pass/log/waiver must be recorded",
+    );
 
     if (requireReview) {
       const reviewers = finalRecord.nodes.filter(
@@ -469,7 +474,7 @@ async function runLiveScenario({
       }
       assert.ok(
         (finalRecord.codeReviewers ?? []).every((r) => r.source === "self"),
-        "all live reviewers should self-submit via paseo_team_submit_review",
+        "all live reviewers should have verdicts observed passively from native replies",
       );
     }
 

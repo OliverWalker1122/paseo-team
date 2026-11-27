@@ -57,6 +57,7 @@ function createPluginHarness(t: test.TestContext) {
     patch: Record<string, unknown>;
   }> = [];
   const agentDirectory = new Map<string, Record<string, unknown>>();
+  const timelines = new Map<string, unknown[]>();
 
   let createdSeq = 0;
   const paseoMock = {
@@ -184,6 +185,11 @@ function createPluginHarness(t: test.TestContext) {
               response: opts.response,
             });
           },
+          timeline: {
+            async refetch() {
+              return { entries: timelines.get(agentId) ?? [] };
+            },
+          },
         };
       },
     },
@@ -229,6 +235,7 @@ function createPluginHarness(t: test.TestContext) {
     reloadedAgents,
     metadataUpdates,
     agentDirectory,
+    timelines,
     async invokeHook(name: string, payload: Record<string, unknown>) {
       const fn = hooks.get(name);
       assert.ok(fn, `expected hook ${name} to be registered`);
@@ -510,7 +517,7 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
   );
   assert.equal(loadTask(recordPath).coordinatorAgentId, "coord-open");
 
-  // 2. Expert via labels.
+  // 2. Expert via labels -> dedicated prompt, ZERO custom plugin tools.
   const expOut = (await h.invokeHook("agent.open.before", {
     request: {
       ...baseReq,
@@ -523,10 +530,10 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
   assert.match(expOut.appendSystemPrompt[1], /独立专家指引/);
   assert.deepEqual(
     expOut.tools.map((tool) => tool.name),
-    ["existing_tool", "paseo_team_submit_plan"],
+    ["existing_tool"],
   );
 
-  // 3. Developer via single-active-task title fallback (no labels, no metadata).
+  // 3. Developer via single-active-task title fallback -> dedicated prompt, ZERO custom plugin tools.
   const devOut = (await h.invokeHook("agent.open.before", {
     request: {
       ...baseReq,
@@ -538,10 +545,10 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
   assert.match(devOut.appendSystemPrompt[1], /Developer 指引/);
   assert.deepEqual(
     devOut.tools.map((tool) => tool.name),
-    ["existing_tool", "paseo_team_run_check", "paseo_team_submit_delivery"],
+    ["existing_tool"],
   );
 
-  // 4. Plan reviewers get plan-review guide and split perspectives.
+  // 4. Plan reviewers get plan-review guide, split perspectives, and ZERO custom plugin tools.
   const planRev0 = (await h.invokeHook("agent.open.before", {
     request: {
       ...baseReq,
@@ -566,10 +573,10 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
   assert.match(planRev1.appendSystemPrompt[1], /架构一致性与复杂度删减/);
   assert.deepEqual(
     planRev0.tools.map((tool) => tool.name),
-    ["existing_tool", "paseo_team_submit_review"],
+    ["existing_tool"],
   );
 
-  // 5. Code reviewers get code-review guide.
+  // 5. Code reviewers get code-review guide and ZERO custom plugin tools.
   const codeRev0 = (await h.invokeHook("agent.open.before", {
     request: {
       ...baseReq,
@@ -582,7 +589,7 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
   assert.match(codeRev0.appendSystemPrompt[1], /独立代码审查指引/);
   assert.deepEqual(
     codeRev0.tools.map((tool) => tool.name),
-    ["existing_tool", "paseo_team_submit_review"],
+    ["existing_tool"],
   );
 
   // 6. Resume path via findTaskByAgentId (labels omitted on resume).
@@ -597,9 +604,9 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
   })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
   assert.match(resumedDev.appendSystemPrompt[1], /Developer 指引/);
 
-  // 7. Regression (Claude resumed coordinator): even when a second active task exists in the same workspace
-  // and create_agent omits `labels.task`/`labels.role`, `paseo.parent-agent-id` + colon-prefixed titles
-  // ("Developer: ...", "Reviewer #1: ...") deterministically attach member tools to the parent coordinator's task.
+  // 7. Regression: even when a second active task exists in the same workspace and
+  // create_agent omits labels.task/labels.role, `paseo.parent-agent-id` + colon-prefixed titles
+  // ("Developer: ...", "Code Review #1: ...", "Plan Review #1: ...") bind cleanly with zero custom tools.
   initTask({
     cwd: h.workspaceDir,
     goal: "另一个陈旧的未结项任务（验证多活跃任务下按 parent-agent-id 精准绑定）",
@@ -618,7 +625,7 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
   assert.match(colonDev.appendSystemPrompt[1], /Developer 指引/);
   assert.deepEqual(
     colonDev.tools.map((tool) => tool.name),
-    ["existing_tool", "paseo_team_run_check", "paseo_team_submit_delivery"],
+    ["existing_tool"],
   );
   recordCandidateDelivery(recordPath, {
     agentId: "dev-colon",
@@ -638,7 +645,7 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
   assert.match(colonRev.appendSystemPrompt[1], /独立代码审查指引/);
   assert.deepEqual(
     colonRev.tools.map((tool) => tool.name),
-    ["existing_tool", "paseo_team_submit_review"],
+    ["existing_tool"],
   );
   assert.equal(
     loadTask(recordPath).nodes.find((n) => n.agentId === "rev-colon-1")
@@ -715,27 +722,25 @@ test("agent.permission.before handles multi-provider prefixes, prevents Antigrav
   });
   assert.equal(h.permissionResponses.length, 0);
 
-  // 2. Antigravity reviewer submits review -> auto-allowed AND remembered.
+  // 2. Coordinator calls `paseo_team`, `list_pending_permissions`, scoped `respond_to_permission`, and `create_agent`.
   await h.invokeHook("agent.permission.before", {
     agent: {
-      id: "rev-ag",
-      parentAgentId: "coord-ag",
+      id: "coord-ag",
+      parentAgentId: null,
       provider: "antigravity",
       cwd: h.workspaceDir,
-      title: "Code Reviewer #1",
+      title: "[Team] Test",
       background: false,
       metadata: {},
     },
     request: {
-      id: "perm-rev-submit",
+      id: "perm-coord-team",
       provider: "antigravity",
-      name: "mcp_paseo_paseo_team_submit_review",
+      name: "mcp_paseo_paseo_team",
       kind: "tool",
       actions: allowActions,
     },
   });
-
-  // 3. Antigravity coordinator checks pending permissions & responds for child -> auto-allowed (T19 fix).
   await h.invokeHook("agent.permission.before", {
     agent: {
       id: "coord-ag",
@@ -769,27 +774,7 @@ test("agent.permission.before handles multi-provider prefixes, prevents Antigrav
       provider: "antigravity",
       name: "mcp_paseo_respond_to_permission",
       kind: "tool",
-      input: { agentId: "rev-ag", requestId: "perm-rev-submit" },
-      actions: allowActions,
-    },
-  });
-
-  // 4. Codex dot-prefix & Claude double-underscore prefix work too.
-  await h.invokeHook("agent.permission.before", {
-    agent: {
-      id: "dev-claude",
-      parentAgentId: "coord-ag",
-      provider: "claude",
-      cwd: h.workspaceDir,
-      title: "Dev",
-      background: false,
-      metadata: {},
-    },
-    request: {
-      id: "perm-dev-check",
-      provider: "claude",
-      name: "mcp__paseo__paseo_team_run_check",
-      kind: "tool",
+      input: { agentId: "rev-ag", requestId: "perm-child-action" },
       actions: allowActions,
     },
   });
@@ -812,7 +797,7 @@ test("agent.permission.before handles multi-provider prefixes, prevents Antigrav
     },
   });
 
-  // 5. Blocked: foreign agent permission response, dangerous kill_agent, shell, and developer calling coordinator tool.
+  // 3. Blocked: foreign agent permission response, dangerous kill_agent, shell, and developer calling coordinator tool.
   for (const blocked of [
     {
       agentId: "coord-ag",
@@ -860,32 +845,12 @@ test("agent.permission.before handles multi-provider prefixes, prevents Antigrav
     });
   }
 
-  // 6. Unregistered child fallback for run_check under active coordinator.
-  await h.invokeHook("agent.permission.before", {
-    agent: {
-      id: "dev-race",
-      parentAgentId: "coord-ag",
-      provider: "antigravity",
-      cwd: h.workspaceDir,
-      title: "Unregistered dev",
-      background: false,
-      metadata: {},
-    },
-    request: {
-      id: "perm-race-check",
-      provider: "antigravity",
-      name: "mcp_paseo_paseo_team_run_check",
-      kind: "tool",
-      actions: allowActions,
-    },
-  });
-
   assert.deepEqual(
     h.permissionResponses.map((r) => [r.agentId, r.requestId, r.response]),
     [
       [
-        "rev-ag",
-        "perm-rev-submit",
+        "coord-ag",
+        "perm-coord-team",
         { behavior: "allow", selectedActionId: "allow-once" },
       ],
       [
@@ -899,29 +864,19 @@ test("agent.permission.before handles multi-provider prefixes, prevents Antigrav
         { behavior: "allow", selectedActionId: "allow-once" },
       ],
       [
-        "dev-claude",
-        "perm-dev-check",
-        { behavior: "allow", selectedActionId: "allow-once" },
-      ],
-      [
         "coord-ag",
         "perm-codex-dot",
-        { behavior: "allow", selectedActionId: "allow-once" },
-      ],
-      [
-        "dev-race",
-        "perm-race-check",
         { behavior: "allow", selectedActionId: "allow-once" },
       ],
     ],
   );
 });
 
-test("agent.turn.before notifies subscribers and agent.turn.after reminds once per missed handoff without nagging coordinators or failures", async (t) => {
+test("agent.turn.before notifies subscribers and agent.turn.after passively parses native member replies without sending plugin reminders", async (t) => {
   const h = createPluginHarness(t);
   const { recordPath, record } = initTask({
     cwd: h.workspaceDir,
-    goal: "测试交接提醒钩子",
+    goal: "测试单轨原生回合观测钩子",
     teamName: "标准",
     preset: samplePreset,
     requireReview: true,
@@ -958,131 +913,100 @@ test("agent.turn.before notifies subscribers and agent.turn.after reminds once p
   await new Promise((r) => setTimeout(r, 160));
   assert.ok(notifications >= 1, "agent.turn.before should notify task changes");
 
-  // Coordinator turn end -> never reminded.
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "coord-turn" },
-    turnId: "t-c1",
-    outcome: { kind: "completed" },
-  });
-  assert.equal(h.sentMessages.length, 0);
-
-  // Reviewer before any delivery -> never reminded.
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-turn" },
-    turnId: "t-r0",
-    outcome: { kind: "completed" },
-  });
-  assert.equal(h.sentMessages.length, 0);
-
-  // Failed turn -> never reminded.
+  // Failed turn -> never parsed or recorded, zero plugin messages.
+  h.timelines.set("dev-turn", [
+    {
+      turnId: "t-d0",
+      item: { type: "assistant_message", text: "Checks: PASS" },
+    },
+  ]);
   await h.invokeHook("agent.turn.after", {
     agent: { id: "dev-turn" },
     turnId: "t-d0",
     outcome: { kind: "failed", error: { message: "boom" } },
   });
+  assert.equal(loadTask(recordPath).delivery, null);
   assert.equal(h.sentMessages.length, 0);
 
-  // Developer completed turn without submit_delivery -> reminded ONCE in Chinese.
+  // Completed Developer turn -> delivery & CI pass parsed passively from native reply.
+  h.timelines.set("dev-turn", [
+    {
+      turnId: "t-d1",
+      item: {
+        type: "assistant_message",
+        text: "摘要：完成改动\n检查：通过（npm test 12/12）\n架构影响：无",
+      },
+    },
+  ]);
   await h.invokeHook("agent.turn.after", {
     agent: { id: "dev-turn" },
     turnId: "t-d1",
     outcome: { kind: "completed" },
   });
-  assert.equal(h.sentMessages.length, 1);
-  assert.equal(h.sentMessages[0].agentId, "dev-turn");
-  assert.match(h.sentMessages[0].text, /\[Team 交接检查\]/);
-  assert.match(h.sentMessages[0].text, /`paseo_team_submit_delivery`/);
+  assert.equal(loadTask(recordPath).candidate, "delivery-r1");
+  assert.equal(loadTask(recordPath).ci?.status, "pass");
+  assert.equal(h.sentMessages.length, 0);
 
-  // Second missed turn -> NO duplicate reminder to dev-turn, DOES send reminder update to coordinator.
+  // Reviewer asking a clarifying question (no verdict) -> updates summary passively, NEVER sends a reminder!
+  h.timelines.set("rev-turn", [
+    {
+      turnId: "t-r-q",
+      item: {
+        type: "assistant_message",
+        text: "先确认一下：需要兼容旧格式吗？",
+      },
+    },
+  ]);
   await h.invokeHook("agent.turn.after", {
-    agent: { id: "dev-turn" },
-    turnId: "t-d2",
+    agent: { id: "rev-turn" },
+    turnId: "t-r-q",
     outcome: { kind: "completed" },
   });
-  assert.equal(h.sentMessages.length, 2);
-  assert.equal(h.sentMessages[1].agentId, "coord-turn");
-  assert.match(h.sentMessages[1].text, /\[Team 提醒回执\]/);
-  assert.match(h.sentMessages[1].text, /dev-turn/);
+  assert.equal(loadTask(recordPath).codeReviewers.length, 0);
+  assert.equal(h.sentMessages.length, 0);
 
-  // After delivery exists, reviewer missing submit_review gets reminded once.
-  recordCandidateDelivery(recordPath, {
-    agentId: "dev-turn",
-    summary: "done",
-    architectureImpact: "无",
-    ciWaivedUserQuote: "waived for turn test",
-  });
+  // Reviewer finishing review with native verdict -> passively recorded with findings!
+  h.timelines.set("rev-turn", [
+    {
+      turnId: "t-r1",
+      item: {
+        type: "assistant_message",
+        text: "结论：REQUEST_CHANGES\n摘要：缺少空值判断\n- 阻断：app.ts:10 未处理空值",
+      },
+    },
+  ]);
   await h.invokeHook("agent.turn.after", {
     agent: { id: "rev-turn" },
     turnId: "t-r1",
     outcome: { kind: "completed" },
   });
-  assert.equal(h.sentMessages.length, 3);
-  assert.equal(h.sentMessages[2].agentId, "rev-turn");
-  assert.match(h.sentMessages[2].text, /`paseo_team_submit_review`/);
+  const afterRev = loadTask(recordPath);
+  assert.equal(afterRev.codeReviewers.length, 1);
+  assert.equal(afterRev.codeReviewers[0].status, "REQUEST_CHANGES");
+  assert.deepEqual(afterRev.codeReviewers[0].findings, [
+    "blocking: app.ts:10 未处理空值",
+  ]);
+  assert.equal(h.sentMessages.length, 0);
 
-  // Regression (a37abfe6 deadlock): when reminded reviewer succeeds during its plugin-initiated retry
-  // and ends that turn, the plugin MUST notify the coordinator (Paseo does not send native parent callbacks
-  // for plugin-initiated turns!).
-  recordReviewVerdict(recordPath, {
-    stage: "code",
-    agentId: "rev-turn",
-    round: 1,
-    verdict: "REQUEST_CHANGES",
-    summary: "Need one fix",
-    findings: ["blocking: app.ts:10 fix race"],
-    source: "self",
-  });
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-turn" },
-    turnId: "t-r1-retry",
-    outcome: { kind: "completed" },
-  });
-  assert.equal(h.sentMessages.length, 4);
-  assert.equal(h.sentMessages[3].agentId, "coord-turn");
-  assert.match(h.sentMessages[3].text, /\[Team 提醒回执\]/);
-  assert.match(h.sentMessages[3].text, /REQUEST_CHANGES/);
-
-  // If a reminded member's retry turn fails/cancels, clear reminded and notify coordinator so it never hangs.
-  registerTaskAgent(recordPath, {
-    role: "code-reviewer",
-    agentId: "rev-turn-fail",
-    profile: "codex/gpt-6.2-astra",
-    briefSummary: "Rev fail",
-  });
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-turn-fail" },
-    turnId: "t-rf1",
-    outcome: { kind: "completed" },
-  });
-  assert.equal(h.sentMessages.length, 5);
-  assert.equal(h.sentMessages[4].agentId, "rev-turn-fail");
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-turn-fail" },
-    turnId: "t-rf2",
-    outcome: { kind: "failed", error: { message: "quota exceeded" } },
-  });
-  assert.equal(h.sentMessages.length, 6);
-  assert.equal(h.sentMessages[5].agentId, "coord-turn");
-  assert.match(h.sentMessages[5].text, /异常中止/);
-
-  // Abandoned task -> no reminders.
+  // Abandoned task -> turn.after ignores further replies cleanly.
   await h.invokeRpc(controlTaskRpc.name, {
     recordPath,
     action: "abandon_task",
     language: "zh",
   });
-  registerTaskAgent(recordPath, {
-    role: "code-reviewer",
-    agentId: "rev-turn-2",
-    profile: "codex/gpt-6.2-astra",
-    briefSummary: "Rev 2",
-  });
+  h.timelines.set("rev-turn", [
+    {
+      turnId: "t-r2",
+      item: { type: "assistant_message", text: "结论：APPROVE" },
+    },
+  ]);
   await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-turn-2" },
+    agent: { id: "rev-turn" },
     turnId: "t-r2",
     outcome: { kind: "completed" },
   });
-  assert.equal(h.sentMessages.length, 6);
+  assert.equal(loadTask(recordPath).codeReviewers[0].status, "REQUEST_CHANGES");
+  assert.equal(h.sentMessages.length, 0);
 });
 
 test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> R1 rework -> R2 dual approve -> complete", async (t) => {
@@ -1218,15 +1142,7 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
     true,
   );
   assert.equal(
-    (await teamTool.execute({ action: "submit_plan" }, coordCtx())).isError,
-    true,
-  );
-  assert.equal(
-    (await teamTool.execute({ action: "record_delivery" }, coordCtx())).isError,
-    true,
-  );
-  assert.equal(
-    (await teamTool.execute({ action: "record_review" }, coordCtx())).isError,
+    (await teamTool.execute({ action: "update" }, coordCtx())).isError,
     true,
   );
 
@@ -1251,6 +1167,8 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
   assert.equal(loadTask(started.recordPath).routeDecided, true);
   assert.equal(loadTask(started.recordPath).planReview, "not-required");
   assert.equal(loadTask(started.recordPath).codeReview, "required");
+
+  // Subagents open with ZERO custom plugin tools (100% native Paseo messaging).
   const devTools = await openToolMap({
     agentId: "dev-l2",
     provider: "antigravity",
@@ -1269,41 +1187,58 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
     title: "CR #2",
     labels: { task: started.taskId, role: "code-reviewer" },
   });
+  assert.equal(devTools.size, 0);
+  assert.equal(rev0Tools.size, 0);
+  assert.equal(rev1Tools.size, 0);
 
-  // Submitting delivery before run_check is rejected.
-  const premature = await devTools.get("paseo_team_submit_delivery")!.execute({
-    summary: "early",
-    architectureImpact: "None",
-  });
-  assert.equal(premature.isError, true);
-
-  // R1: run real passing check via node -e, then submit delivery.
+  // R1: Developer replies natively after running tests -> agent.turn.after passively records delivery & CI pass.
   writeFileSync(path.join(h.workspaceDir, "app.txt"), "v1\n");
-  const ci1 = await devTools.get("paseo_team_run_check")!.execute({
-    logFileName: "ci-1.log",
-    command: process.execPath,
-    args: ["-e", "console.log('tests ok r1')"],
+  h.timelines.set("dev-l2", [
+    {
+      turnId: "dev-r1",
+      item: {
+        type: "assistant_message",
+        text: "Summary: Implemented v1 in app.txt\nChecks: PASS (tests ok r1)\nArchitecture impact: None",
+      },
+    },
+  ]);
+  await h.invokeHook("agent.turn.after", {
+    agent: { id: "dev-l2" },
+    turnId: "dev-r1",
+    outcome: { kind: "completed" },
   });
-  assert.equal(ci1.isError, false);
-  const del1 = await devTools.get("paseo_team_submit_delivery")!.execute({
-    summary: "Implemented v1",
-    architectureImpact: "None",
-  });
-  assert.notEqual(del1.isError, true);
+  assert.equal(loadTask(started.recordPath).candidate, "delivery-r1");
+  assert.equal(loadTask(started.recordPath).ci?.status, "pass");
 
-  // R1 review: rev0 APPROVE, rev1 REQUEST_CHANGES -> gate still blocked.
-  const r1v0 = await rev0Tools.get("paseo_team_submit_review")!.execute({
-    verdict: "APPROVE",
-    summary: "Looks good",
-    findings: [],
+  // R1 review: rev0 replies APPROVE, rev1 replies REQUEST_CHANGES -> passively recorded; gate still blocked.
+  h.timelines.set("rev-l2-0", [
+    {
+      turnId: "r1-0",
+      item: {
+        type: "assistant_message",
+        text: "Verdict: APPROVE\nSummary: Looks good",
+      },
+    },
+  ]);
+  h.timelines.set("rev-l2-1", [
+    {
+      turnId: "r1-1",
+      item: {
+        type: "assistant_message",
+        text: "Verdict: REQUEST_CHANGES\nSummary: Needs edge fix\n- blocking: app.txt:1 missing newline check",
+      },
+    },
+  ]);
+  await h.invokeHook("agent.turn.after", {
+    agent: { id: "rev-l2-0" },
+    turnId: "r1-0",
+    outcome: { kind: "completed" },
   });
-  assert.notEqual(r1v0.isError, true);
-  const r1v1 = await rev1Tools.get("paseo_team_submit_review")!.execute({
-    verdict: "REQUEST_CHANGES",
-    summary: "Needs edge fix",
-    findings: ["blocking: app.txt:1 missing newline check"],
+  await h.invokeHook("agent.turn.after", {
+    agent: { id: "rev-l2-1" },
+    turnId: "r1-1",
+    outcome: { kind: "completed" },
   });
-  assert.notEqual(r1v1.isError, true);
 
   const blockedComplete = await teamTool.execute(
     { action: "complete" },
@@ -1312,31 +1247,39 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
   assert.equal(blockedComplete.isError, true);
   assert.match(blockedComplete.text, /Quality gate BLOCKED/);
 
-  // R2 rework: fresh CI run (ensure mtime > delivery-r1 timestamp) + delivery-r2.
+  // R2 rework: Developer replies natively with fresh passing check -> selective R2 re-review by rev1 only!
   await new Promise((r) => setTimeout(r, 15));
   writeFileSync(path.join(h.workspaceDir, "app.txt"), "v2\n");
-  const ci2 = await devTools.get("paseo_team_run_check")!.execute({
-    logFileName: "ci-2.log",
-    command: process.execPath,
-    args: ["-e", "console.log('tests ok r2')"],
+  h.timelines.set("dev-l2", [
+    {
+      turnId: "dev-r2",
+      item: {
+        type: "assistant_message",
+        text: "Summary: Fixed blocking finding in v2\nChecks: PASS (tests ok r2)\nArchitecture impact: None",
+      },
+    },
+  ]);
+  await h.invokeHook("agent.turn.after", {
+    agent: { id: "dev-l2" },
+    turnId: "dev-r2",
+    outcome: { kind: "completed" },
   });
-  assert.equal(ci2.isError, false);
-  const del2 = await devTools.get("paseo_team_submit_delivery")!.execute({
-    summary: "Fixed blocking finding in v2",
-    architectureImpact: "None",
-  });
-  assert.notEqual(del2.isError, true);
+  assert.equal(loadTask(started.recordPath).candidate, "delivery-r2");
 
-  // R2 reviews: both approve.
-  await rev0Tools.get("paseo_team_submit_review")!.execute({
-    verdict: "APPROVE",
-    summary: "Verified v2",
-    findings: [],
-  });
-  await rev1Tools.get("paseo_team_submit_review")!.execute({
-    verdict: "APPROVE",
-    summary: "Fix confirmed",
-    findings: [],
+  // Selective R2: rev1 approves (rev0 already approved in R1).
+  h.timelines.set("rev-l2-1", [
+    {
+      turnId: "r2-1",
+      item: {
+        type: "assistant_message",
+        text: "Verdict: APPROVE\nSummary: Fix confirmed",
+      },
+    },
+  ]);
+  await h.invokeHook("agent.turn.after", {
+    agent: { id: "rev-l2-1" },
+    turnId: "r2-1",
+    outcome: { kind: "completed" },
   });
 
   // Final quality gate passes and marks task completed.
@@ -1360,7 +1303,7 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
   assert.match(mutateCompleted.text, /already completed/);
 
   // Starting a 2nd task on the SAME chat automatically routes the same persistent `paseo_team`
-  // tool to task #2 with ZERO reload!
+  // tool to task #2 with ZERO reload, and supports `force: true` with user ruling reason.
   const started2 = (await h.invokeRpc(startTeamTaskRpc.name, {
     cwd: h.workspaceDir,
     workspaceId: "wks_l2",
@@ -1370,9 +1313,20 @@ test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> 
   assert.notEqual(started2.taskId, started.taskId);
   const sum2 = await teamTool.execute({ action: "summary" }, coordCtx());
   assert.match(sum2.text, new RegExp(started2.taskId));
+  assert.equal(
+    (await teamTool.execute({ action: "complete", force: true }, coordCtx()))
+      .isError,
+    true,
+  );
+  const forced = await teamTool.execute(
+    { action: "complete", force: true, reason: "User accepted as-is in chat" },
+    coordCtx(),
+  );
+  assert.notEqual(forced.isError, true);
+  assert.equal(loadTask(started2.recordPath).lifecycleStatus, "completed");
   h.sentMessages.length = 0;
 
-  // No spurious turn.after reminders after all members submitted cleanly.
+  // Zero spurious plugin messages after task completion.
   for (const memberId of ["dev-l2", "rev-l2-0", "rev-l2-1"]) {
     await h.invokeHook("agent.turn.after", {
       agent: { id: memberId },
@@ -1426,7 +1380,7 @@ test("regression: task started without plan review dynamically upgrades to planR
   assert.equal(started.coordinatorAgentId, "main-chat-7e7bc091");
   assert.equal(loadTask(started.recordPath).planReview, "not-required");
 
-  // 2. User later sends "需要方案评审" in the chat -> Coordinator writes plan.md, calls submit_plan, and spawns plan reviewers.
+  // 2. User later sends "需要方案评审" in the chat -> Coordinator writes plan.md, calls update(planFile), and spawns plan reviewers.
   const openOut = (await h.invokeHook("agent.open.before", {
     request: {
       workspaceId: "wks_pm",
@@ -1467,7 +1421,7 @@ test("regression: task started without plan review dynamically upgrades to planR
   writeFileSync(path.join(taskDir, "plan.md"), "# 方案 v1\n");
   const planRes = await coordTools.get("paseo_team")!.execute(
     {
-      action: "submit_plan",
+      action: "update",
       planFile: "plan.md",
       summary: "方案 v1",
     },
@@ -1500,7 +1454,7 @@ test("regression: task started without plan review dynamically upgrades to planR
   assert.match(blockedGate.text, /plan-rev-1/);
 
   // Regression (a37abfe6): when Plan Review hits R2 circuit breaker and the user chooses
-  // to waive remaining plan review in chat, coordinator calls `paseo_team(resolve_breaker)`
+  // to waive remaining plan review in chat, coordinator calls `paseo_team(update)` with decision="waive_stage"
   // to unlock the task and let the Quality Gate pass after development!
   recordReviewVerdict(started.recordPath, {
     stage: "plan",
@@ -1521,19 +1475,19 @@ test("regression: task started without plan review dynamically upgrades to planR
   assert.equal(broken.status, "CIRCUIT_BROKEN");
   assert.equal(loadTask(started.recordPath).lifecycleStatus, "blocked");
 
-  // Validation error if decision or reason is missing.
+  // Validation error if reason is missing when decision is given.
   assert.equal(
     (
       await coordTools
         .get("paseo_team")!
-        .execute({ action: "resolve_breaker" }, coordCtx)
+        .execute({ action: "update", decision: "waive_stage" }, coordCtx)
     ).isError,
     true,
   );
 
   const waived = await coordTools.get("paseo_team")!.execute(
     {
-      action: "resolve_breaker",
+      action: "update",
       decision: "waive_stage",
       stage: "plan",
       reason: "用户选择写前拦截后跳过第3轮方案评审直接开发",
