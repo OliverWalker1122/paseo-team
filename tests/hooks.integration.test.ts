@@ -1878,4 +1878,78 @@ test("L2 integration: draft-chat /paseo-team fallback via paseo_team(action='sta
   assert.equal(blockedComplete.isError, true);
   assert.equal(blockedComplete.structuredContent, undefined);
   assert.match(blockedComplete.text, /Quality gate BLOCKED/);
+
+  // 9. Single-active-task guard: once task #1 is routed/active, neither the same chat nor another
+  //    active chat in the same working tree can start a second concurrent task.
+  h.agentDirectory.get(draftAgentId)!.status = "idle";
+  await assert.rejects(
+    () =>
+      h.invokeRpc(startTeamTaskRpc.name, {
+        cwd: h.workspaceDir,
+        workspaceId: "wks_todo",
+        agentId: draftAgentId,
+        rawArgs: "并发第二个任务应该被拦截",
+      }),
+    /同一对话不能同时运行两个任务|already has an active team task/,
+  );
+
+  const concurrentToolStart = await teamTool.execute(
+    { action: "start", rawArgs: "并发第二个任务应该被拦截" },
+    toolCtx,
+  );
+  assert.equal(concurrentToolStart.isError, true);
+  assert.match(
+    concurrentToolStart.text,
+    /同一对话不能同时运行两个任务|already has an active team task/,
+  );
+
+  // Another non-archived chat in the SAME workspace directory is also blocked while task #1 is active.
+  const otherChatId = "other-chat-in-same-dir";
+  h.agentDirectory.set(otherChatId, {
+    id: otherChatId,
+    workspaceId: "wks_todo",
+    cwd: h.workspaceDir,
+    provider: "claude",
+    model: "claude-opus-5-5",
+    status: "idle",
+    parentAgentId: null,
+    metadata: {},
+  });
+  await assert.rejects(
+    () =>
+      h.invokeRpc(startTeamTaskRpc.name, {
+        cwd: h.workspaceDir,
+        workspaceId: "wks_todo",
+        agentId: otherChatId,
+        rawArgs: "同目录另一个对话并发任务",
+      }),
+    /另一个对话的未结项团队任务|Another chat in this workspace directory/,
+  );
+
+  // If the first chat was archived in Paseo, its orphaned task is auto-abandoned and chat #2 can start cleanly.
+  h.agentDirectory.get(draftAgentId)!.archivedAt = "2026-11-27T12:00:00.000Z";
+  const recovered = (await h.invokeRpc(startTeamTaskRpc.name, {
+    cwd: h.workspaceDir,
+    workspaceId: "wks_todo",
+    agentId: otherChatId,
+    rawArgs: "原主控归档后在同目录启动新任务",
+  })) as { taskId: string; recordPath: string };
+  assert.ok(recovered.taskId);
+  assert.equal(loadTask(meta.recordPath).lifecycleStatus, "abandoned");
+  assert.equal(loadTask(recovered.recordPath).lifecycleStatus, "active");
+
+  // Abandoning task #2 via control RPC unlocks starting task #3 sequentially on the same chat.
+  await h.invokeRpc(controlTaskRpc.name, {
+    recordPath: recovered.recordPath,
+    action: "abandon_task",
+    language: "zh",
+  });
+  const third = (await h.invokeRpc(startTeamTaskRpc.name, {
+    cwd: h.workspaceDir,
+    workspaceId: "wks_todo",
+    agentId: otherChatId,
+    rawArgs: "放弃后串行启动下一个任务",
+  })) as { taskId: string; recordPath: string };
+  assert.ok(third.taskId);
+  assert.notEqual(third.taskId, recovered.taskId);
 });

@@ -1796,6 +1796,49 @@ async function prepareTeamTaskKickoff(
     );
   }
 
+  // Single-active-task guard per working directory (worktree-isolated via resolveProjectKey):
+  // sequential tasks after completion/abandonment are allowed; concurrent active tasks on the
+  // same working tree would stomp files, mix git diffs, and collide on coordinator routing.
+  const openProjectTasks = listTasksForProject(input.cwd).filter(
+    (item) =>
+      item.record.lifecycleStatus !== "completed" &&
+      item.record.lifecycleStatus !== "abandoned",
+  );
+  for (const openItem of openProjectTasks) {
+    const otherCoordId = openItem.record.coordinatorAgentId?.trim();
+    const sameChat = otherCoordId === coordinatorAgentId;
+    if (!sameChat && otherCoordId) {
+      const otherSnap = await paseo.agents
+        .ref(otherCoordId)
+        .refresh()
+        .catch(() => null);
+      const otherAgent = otherSnap?.agent as
+        { archivedAt?: string | null } | undefined;
+      if (otherAgent?.archivedAt) {
+        // Orphaned task whose coordinator chat was already archived in Paseo: auto-abandon so it never bricks the workspace.
+        openItem.record.lifecycleStatus = "abandoned";
+        saveTask(openItem.recordPath, openItem.record);
+        notifyTaskChanges();
+        continue;
+      }
+    }
+    const briefGoal =
+      openItem.record.goal.replace(/\s+/g, " ").trim().slice(0, 48) ||
+      openItem.record.taskId;
+    if (sameChat) {
+      throw new Error(
+        zh
+          ? `当前对话已有未结项的团队任务（${briefGoal}，ID: ${openItem.record.taskId}），同一对话不能同时运行两个任务。\n- 如需补充或调整当前需求，直接发送普通消息即可，无需再发 /paseo-team；\n- 如需作废当前任务并重启，请先在「团队状态图」点击「放弃任务」；\n- 如需并行开发另一个独立需求，请在 Paseo 新建独立的 worktree 工作区。`
+          : `This chat already has an active team task ("${briefGoal}", ${openItem.record.taskId}). Only one active task can run per chat/workspace at a time.\n- To refine the current task, reply directly without /paseo-team.\n- To discard it and start fresh, click "Abandon" in Team Graph first.\n- To run a second task in parallel, create a separate Paseo worktree workspace.`,
+      );
+    }
+    throw new Error(
+      zh
+        ? `当前工作目录已有另一个对话的未结项团队任务（${briefGoal}，ID: ${openItem.record.taskId}），同目录并发开发会导致文件与 git diff 互相覆盖。\n- 请先完成或在该工作区「团队状态图」点击「放弃任务」；\n- 如需并行开发，请在 Paseo 新建独立的 worktree 工作区。`
+        : `Another chat in this workspace directory already has an active team task ("${briefGoal}", ${openItem.record.taskId}). Running two teams on the same working tree would overwrite files and mix git diffs.\n- Finish or abandon that task in Team Graph first, or create a separate Paseo worktree workspace to run in parallel.`,
+    );
+  }
+
   const created = initTask({
     cwd: input.cwd,
     goal: parsed.goal,

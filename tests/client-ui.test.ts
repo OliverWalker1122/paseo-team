@@ -1228,7 +1228,7 @@ test("UI components: WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, and
   uiSandbox.renderer.rerender();
   assert.match(collectText(uiSandbox.renderer.root), /主控 Coordinator/);
 
-  // 3. Multiple tasks on the same chat render as collapsible subtrees.
+  // 3. Multiple sequential tasks on the same chat render a top switcher + full-width canvas.
   uiSandbox.emitSubscription("paseo_team.conversation.watch", {
     mode: "launcher",
     viewerAgentId: "todo-coord-1",
@@ -1245,7 +1245,22 @@ test("UI components: WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, and
     ],
   });
   uiSandbox.renderer.rerender();
-  assert.match(collectText(uiSandbox.renderer.root), /本对话 · 2 个团队任务/);
+  const multiText = collectText(uiSandbox.renderer.root);
+  assert.match(multiText, /本对话 · 2 个团队任务/);
+  assert.match(multiText, /为 todo\.mjs 新增 clear 子命令并补充测试/);
+  assert.match(multiText, /返回主对话/);
+
+  // Clicking the earlier task pill switches the full-width canvas to that task.
+  const earlierTaskPill = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Pressable" && collectText(n).includes("早期已完成任务"),
+  )[0];
+  assert.ok(earlierTaskPill, "expected task switcher pill for earlier task");
+  (earlierTaskPill.props.onPress as () => void)();
+  uiSandbox.renderer.rerender();
+  const switchedText = collectText(uiSandbox.renderer.root);
+  assert.match(switchedText, /早期已完成任务/);
+  assert.match(switchedText, /主控 Coordinator/);
 
   // 4. GlobalTeamGraphScreen renders Setup (including model modal & blindspot warning) and History tab.
   const screenVnode = {

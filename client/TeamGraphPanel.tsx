@@ -964,7 +964,6 @@ function TaskFlowCanvas({
   onOpenAgent,
   onOpenConfig,
   onTaskUpdated,
-  showGoal = true,
 }: {
   theme: PluginTheme;
   compact: boolean;
@@ -974,8 +973,6 @@ function TaskFlowCanvas({
   onOpenAgent?: (agentId: string, serverId?: string) => void;
   onOpenConfig?: () => void;
   onTaskUpdated?: (next: PipelineTaskSnapshotDto) => void;
-  /** Off where the goal is already shown on the row that opened this canvas. */
-  showGoal?: boolean;
 }) {
   const t = UI_TEXT[lang];
   const toast = useToast();
@@ -1087,40 +1084,17 @@ function TaskFlowCanvas({
             onPress={() => setGoalExpanded((prev) => !prev)}
             style={{ flex: 1, minWidth: compact ? "100%" : 0 }}
           >
-            {showGoal ? (
-              <Text
-                numberOfLines={goalExpanded ? undefined : 2}
-                style={{
-                  color: theme.colors.foreground,
-                  fontSize: 15,
-                  fontWeight: "600",
-                  lineHeight: 22,
-                }}
-              >
-                {task.goal}
-              </Text>
-            ) : (
-              // The opening row already shows goal and status; keep one quiet meta line.
-              <Text
-                numberOfLines={goalExpanded ? undefined : 1}
-                style={{
-                  color: theme.colors.foregroundMuted,
-                  fontSize: 12,
-                  lineHeight: 20,
-                  paddingVertical: 3,
-                }}
-              >
-                {[
-                  ...metaParts,
-                  task.skippedStageCount
-                    ? t.hiddenStagesHint(task.skippedStageCount)
-                    : "",
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-                {goalExpanded ? `\n${task.goal}` : ""}
-              </Text>
-            )}
+            <Text
+              numberOfLines={goalExpanded ? undefined : 2}
+              style={{
+                color: theme.colors.foreground,
+                fontSize: 15,
+                fontWeight: "600",
+                lineHeight: 22,
+              }}
+            >
+              {task.goal}
+            </Text>
           </Pressable>
           <View
             style={{
@@ -1130,7 +1104,7 @@ function TaskFlowCanvas({
               flexShrink: 0,
             }}
           >
-            {showGoal && mainChatAgentId && onOpenAgent ? (
+            {mainChatAgentId && onOpenAgent ? (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={t.backToMainChat}
@@ -1236,61 +1210,55 @@ function TaskFlowCanvas({
           </View>
         </View>
 
-        {showGoal ? (
+        <View
+          style={{
+            flexDirection: "row",
+            flexWrap: "wrap",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+          }}
+        >
           <View
             style={{
               flexDirection: "row",
               flexWrap: "wrap",
               alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
+              gap: 6,
             }}
           >
             <View
               style={{
-                flexDirection: "row",
-                flexWrap: "wrap",
-                alignItems: "center",
-                gap: 6,
+                width: 7,
+                height: 7,
+                borderRadius: 4,
+                backgroundColor: toneColor(theme, status.tone),
+              }}
+            />
+            <Text
+              style={{
+                color: toneColor(theme, status.tone),
+                fontSize: 12,
+                fontWeight: "600",
               }}
             >
-              <View
-                style={{
-                  width: 7,
-                  height: 7,
-                  borderRadius: 4,
-                  backgroundColor: toneColor(theme, status.tone),
-                }}
-              />
-              <Text
-                style={{
-                  color: toneColor(theme, status.tone),
-                  fontSize: 12,
-                  fontWeight: "600",
-                }}
-              >
-                {status.label}
-              </Text>
-              <Text
-                style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}
-              >
-                {metaParts.map((part) => ` · ${part}`).join("")}
-              </Text>
-            </View>
-
-            {!isRoutingPending &&
-            task.skippedStageCount &&
-            task.skippedStageCount > 0 ? (
-              <Text
-                style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
-              >
-                {t.hiddenStagesHint(task.skippedStageCount)}
-              </Text>
-            ) : null}
+              {status.label}
+            </Text>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+              {metaParts.map((part) => ` · ${part}`).join("")}
+            </Text>
           </View>
-        ) : null}
 
-        {showGoal && !isRoutingPending && task.routeReason ? (
+          {!isRoutingPending &&
+          task.skippedStageCount &&
+          task.skippedStageCount > 0 ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+              {t.hiddenStagesHint(task.skippedStageCount)}
+            </Text>
+          ) : null}
+        </View>
+
+        {!isRoutingPending && task.routeReason ? (
           <Text
             numberOfLines={2}
             style={{
@@ -1548,7 +1516,7 @@ function SingleConversationGraphView({
       ) : (
         <>
           {payload.tasks?.length ? (
-            <LauncherTaskTree
+            <ConversationTaskSwitcher
               theme={theme}
               compact={compact}
               lang={lang}
@@ -1556,6 +1524,18 @@ function SingleConversationGraphView({
               viewerAgentId={payload.viewerAgentId}
               onOpenAgent={onOpenAgent}
               onOpenConfig={onOpenConfig}
+              onTaskUpdated={(nextTask) =>
+                setPayload((prev) =>
+                  prev && prev.tasks
+                    ? {
+                        ...prev,
+                        tasks: prev.tasks.map((item) =>
+                          item.taskId === nextTask.taskId ? nextTask : item,
+                        ),
+                      }
+                    : prev,
+                )
+              }
             />
           ) : (
             <View
@@ -1624,8 +1604,8 @@ function SingleConversationGraphView({
   );
 }
 
-/** One chat roots several task subtrees; each branch is one coordinator's pipeline. */
-function LauncherTaskTree({
+/** Full-width canvas for sequential team tasks on one chat, with a compact top switcher. */
+function ConversationTaskSwitcher({
   theme,
   compact,
   lang,
@@ -1633,6 +1613,7 @@ function LauncherTaskTree({
   viewerAgentId,
   onOpenAgent,
   onOpenConfig,
+  onTaskUpdated,
 }: {
   theme: PluginTheme;
   compact: boolean;
@@ -1641,172 +1622,144 @@ function LauncherTaskTree({
   viewerAgentId: string | null;
   onOpenAgent?: (agentId: string, serverId?: string) => void;
   onOpenConfig?: () => void;
+  onTaskUpdated?: (next: PipelineTaskSnapshotDto) => void;
 }) {
   const t = UI_TEXT[lang];
   const newestId = tasks[0]?.taskId ?? null;
-  const [expanded, setExpanded] = useState<string | null>(newestId);
-  // A newly started task opens its branch.
-  useEffect(() => setExpanded(newestId), [newestId]);
-  const [showEarlier, setShowEarlier] = useState(false);
-  // Keep the newest few and anything still active in view; fold the finished rest.
-  const recent = tasks.filter(
-    (task, i) =>
-      i < 3 || task.lifecycleStatus === "active" || task.taskId === expanded,
-  );
-  const earlierCount = tasks.length - recent.length;
-  const shown = showEarlier ? tasks : recent;
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(newestId);
+  // Automatically focus a newly started task.
+  useEffect(() => setSelectedTaskId(newestId), [newestId]);
+  const [showAll, setShowAll] = useState(false);
+
+  const activeTask =
+    tasks.find((item) => item.taskId === selectedTaskId) ?? tasks[0] ?? null;
+  if (!activeTask) return null;
+
+  const visiblePills = showAll
+    ? tasks
+    : tasks.filter(
+        (item, idx) =>
+          idx < 4 ||
+          item.lifecycleStatus === "active" ||
+          item.taskId === activeTask.taskId,
+      );
+  const hiddenCount = tasks.length - visiblePills.length;
 
   return (
-    <View style={{ gap: 10 }}>
-      <View
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
-        }}
-      >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <Icon
-            name="MessageSquare"
-            size={14}
-            color={theme.colors.foreground}
-          />
-          <Text
+    <View style={{ gap: 14 }}>
+      {tasks.length > 1 ? (
+        <View
+          style={{
+            flexDirection: "row",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 6,
+            paddingBottom: 10,
+            borderBottomWidth: 1,
+            borderColor: theme.colors.border,
+          }}
+        >
+          <View
             style={{
-              color: theme.colors.foreground,
-              fontSize: 14,
-              fontWeight: "700",
-            }}
-          >
-            {t.launcherRoot(tasks.length)}
-          </Text>
-        </View>
-        {viewerAgentId && onOpenAgent ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t.backToMainChat}
-            onPress={() =>
-              onOpenAgent(viewerAgentId, tasks[0]?.coordinatorServerId)
-            }
-            style={({ hovered }: HoverState) => ({
               flexDirection: "row",
               alignItems: "center",
               gap: 5,
-              paddingHorizontal: 10,
-              paddingVertical: 5,
-              borderRadius: 6,
-              borderWidth: 1,
-              borderColor: theme.colors.border,
-              backgroundColor: hovered
-                ? theme.colors.surface2
-                : theme.colors.surface1,
-            })}
-          >
-            <Icon name="ArrowLeft" size={13} color={theme.colors.foreground} />
-            <Text
-              style={{
-                color: theme.colors.foreground,
-                fontSize: 12,
-                fontWeight: "500",
-              }}
-            >
-              {t.backToMainChat}
-            </Text>
-          </Pressable>
-        ) : null}
-      </View>
-      {shown.map((task) => {
-        const open = expanded === task.taskId;
-        const status = taskStatusInfo(lang, task);
-        const finished =
-          task.lifecycleStatus === "completed" ||
-          task.lifecycleStatus === "abandoned";
-        return (
-          <View
-            key={task.taskId}
-            style={{
-              marginLeft: 6,
-              paddingLeft: 12,
-              borderLeftWidth: 2,
-              borderColor: theme.colors.border,
-              gap: 8,
+              marginRight: 4,
             }}
           >
-            <Pressable
-              accessibilityRole="button"
-              accessibilityState={{ expanded: open }}
-              onPress={() => setExpanded(open ? null : task.taskId)}
+            <Icon
+              name="History"
+              size={13}
+              color={theme.colors.foregroundMuted}
+            />
+            <Text
               style={{
-                flexDirection: "row",
-                alignItems: open ? "flex-start" : "center",
-                gap: 8,
+                color: theme.colors.foregroundMuted,
+                fontSize: 12,
+                fontWeight: "600",
               }}
             >
-              <Icon
-                name={open ? "ChevronDown" : "ChevronRight"}
-                size={14}
-                color={theme.colors.foregroundMuted}
-              />
-              <Text
-                style={{
-                  color: toneColor(theme, status.tone),
-                  fontSize: 12,
-                  fontWeight: "700",
-                }}
-              >
-                {status.label}
-              </Text>
-              <Text
-                numberOfLines={open ? 3 : 1}
-                style={{
-                  flex: 1,
-                  color:
-                    finished && !open
-                      ? theme.colors.foregroundMuted
-                      : theme.colors.foreground,
-                  fontSize: 13,
-                  lineHeight: 19,
-                }}
-              >
-                {open ? task.goal : shortGoal(task.goal)}
-              </Text>
-              {!open ? (
-                <Text
-                  style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
-                >
-                  {formatShortTime(task.updatedAt)}
-                </Text>
-              ) : null}
-            </Pressable>
-            {open ? (
-              <TaskFlowCanvas
-                theme={theme}
-                compact={compact}
-                lang={lang}
-                task={task}
-                viewerAgentId={viewerAgentId}
-                onOpenAgent={onOpenAgent}
-                onOpenConfig={onOpenConfig}
-                showGoal={false}
-              />
-            ) : null}
+              {t.launcherRoot(tasks.length)}
+            </Text>
           </View>
-        );
-      })}
-      {earlierCount > 0 ? (
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => setShowEarlier((v) => !v)}
-          style={{ marginLeft: 6, paddingLeft: 14, paddingVertical: 2 }}
-        >
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-            {showEarlier
-              ? t.hideEarlierTasks
-              : t.showEarlierTasks(earlierCount)}
-          </Text>
-        </Pressable>
+          {visiblePills.map((task) => {
+            const selected = task.taskId === activeTask.taskId;
+            const status = taskStatusInfo(lang, task);
+            return (
+              <Pressable
+                key={task.taskId}
+                accessibilityRole="button"
+                accessibilityState={{ selected }}
+                onPress={() => setSelectedTaskId(task.taskId)}
+                style={({ hovered }: HoverState) => ({
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 6,
+                  maxWidth: compact ? 180 : 220,
+                  paddingHorizontal: 9,
+                  paddingVertical: 4,
+                  borderRadius: 999,
+                  borderWidth: 1,
+                  borderColor: selected
+                    ? theme.colors.foregroundMuted
+                    : theme.colors.border,
+                  backgroundColor: selected
+                    ? theme.colors.surface2
+                    : hovered
+                      ? theme.colors.surface1
+                      : "transparent",
+                })}
+              >
+                <View
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: 3,
+                    backgroundColor: toneColor(theme, status.tone),
+                  }}
+                />
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    flexShrink: 1,
+                    color: selected
+                      ? theme.colors.foreground
+                      : theme.colors.foregroundMuted,
+                    fontSize: 12,
+                    fontWeight: selected ? "600" : "400",
+                  }}
+                >
+                  {shortGoal(task.goal)}
+                </Text>
+              </Pressable>
+            );
+          })}
+          {hiddenCount > 0 || showAll ? (
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setShowAll((v) => !v)}
+              style={{ paddingHorizontal: 6, paddingVertical: 4 }}
+            >
+              <Text
+                style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
+              >
+                {showAll ? t.hideEarlierTasks : t.showEarlierTasks(hiddenCount)}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
       ) : null}
+
+      <TaskFlowCanvas
+        theme={theme}
+        compact={compact}
+        lang={lang}
+        task={activeTask}
+        viewerAgentId={viewerAgentId}
+        onOpenAgent={onOpenAgent}
+        onOpenConfig={onOpenConfig}
+        onTaskUpdated={onTaskUpdated}
+      />
     </View>
   );
 }
