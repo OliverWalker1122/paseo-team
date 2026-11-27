@@ -1,3 +1,4 @@
+import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
   getConfigBundleRpc,
@@ -14,15 +15,19 @@ import { detectPromptLanguage } from "./shared/i18n.ts";
 import { saveConfig } from "./server/config-store.ts";
 import {
   buildConfigBundle,
-  buildConversationGraph,
+  buildConversationGraphFromMap,
   createRosterTool,
+  fetchLiveAgentMap,
   inferTeamRole,
-  listActiveTrees,
+  listActiveTreesFromMap,
+  type LiveAgentRecord,
   notifyConfigChanges,
+  parseAgentEntriesToMap,
   parseInlineTaskDirectives,
   resolveTeamGuideForCwd,
   startTeamTask,
   subscribeConfigChanges,
+  toLiveAgentRecord,
 } from "./server/handlers.ts";
 import {
   buildDeveloperPrompt,
@@ -65,8 +70,258 @@ function parsePerspective(raw: string | undefined): ReviewerPerspective {
   return "comprehensive";
 }
 
+type LiveMapListener = (liveMap: Map<string, LiveAgentRecord>) => void;
+
+interface SharedAgentHub {
+  listeners: Set<LiveMapListener>;
+  liveMap: Map<string, LiveAgentRecord> | null;
+  debounce: ReturnType<typeof setTimeout> | null;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  unsubStream: (() => void) | null;
+  unsubLocal: (() => void) | null;
+  unsubConfig: (() => void) | null;
+  releaseStream: (() => Promise<void>) | null;
+  disposed: boolean;
+}
+
+/**
+ * Maintains ONE ref-counted daemon `agents.list({ subscribe: {} })` stream per
+ * `PaseoApi` instance. Note: `paseo.agents.subscribe()` alone only listens to
+ * locally-forwarded events and never opens a daemon subscription on its own —
+ * opening `agents.list({ subscribe: {} })` is what actually streams live
+ * `agent_update` (upsert/remove) and reconnect `snapshot` events from Paseo.
+ */
+function createLiveAgentHubManager() {
+  const hubs = new Map<PaseoApi, SharedAgentHub>();
+
+  const teardownHub = (paseo: PaseoApi, hub: SharedAgentHub) => {
+    if (hub.disposed) return;
+    hub.disposed = true;
+    hubs.delete(paseo);
+    if (hub.debounce) {
+      clearTimeout(hub.debounce);
+      hub.debounce = null;
+    }
+    if (hub.retryTimer) {
+      clearTimeout(hub.retryTimer);
+      hub.retryTimer = null;
+    }
+    hub.unsubStream?.();
+    hub.unsubStream = null;
+    hub.unsubLocal?.();
+    hub.unsubLocal = null;
+    hub.unsubConfig?.();
+    hub.unsubConfig = null;
+    const release = hub.releaseStream;
+    hub.releaseStream = null;
+    if (release) {
+      void release().catch(() => {});
+    }
+    hub.listeners.clear();
+  };
+
+  const broadcastNow = (hub: SharedAgentHub) => {
+    if (hub.disposed || !hub.liveMap) return;
+    const snapshot = hub.liveMap;
+    for (const listener of hub.listeners) {
+      try {
+        listener(snapshot);
+      } catch {
+        // Ignore individual listener failure
+      }
+    }
+  };
+
+  const scheduleBroadcast = (hub: SharedAgentHub) => {
+    if (hub.disposed || hub.debounce) return;
+    hub.debounce = setTimeout(() => {
+      hub.debounce = null;
+      broadcastNow(hub);
+    }, 80);
+  };
+
+  const startHubStream = (paseo: PaseoApi, hub: SharedAgentHub) => {
+    const applyUpdate = (payload: {
+      kind?: string;
+      agent?: unknown;
+      agentId?: string;
+    }) => {
+      if (hub.disposed) return;
+      if (!hub.liveMap) hub.liveMap = new Map();
+      if (payload.kind === "upsert") {
+        const rec = toLiveAgentRecord(payload.agent);
+        if (rec) {
+          hub.liveMap.set(rec.id, rec);
+          scheduleBroadcast(hub);
+        }
+        return;
+      }
+      if (payload.kind === "remove" && typeof payload.agentId === "string") {
+        if (hub.liveMap.delete(payload.agentId)) {
+          scheduleBroadcast(hub);
+        }
+      }
+    };
+
+    const refreshViaFetch = () => {
+      void fetchLiveAgentMap(paseo).then((fresh) => {
+        if (hub.disposed) return;
+        hub.liveMap = fresh;
+        broadcastNow(hub);
+      });
+    };
+
+    const openSubscription = () => {
+      if (hub.disposed) return;
+      void paseo.agents
+        .list({
+          filter: { includeArchived: true },
+          page: { limit: 200 },
+          subscribe: {},
+        })
+        .then((res) => {
+          const maybeSub = (
+            res as unknown as {
+              entries?: Array<{ agent?: unknown }>;
+              subscription?: {
+                subscribe?: (obs: {
+                  snapshot?: (data: {
+                    entries?: Array<{ agent?: unknown }>;
+                  }) => void;
+                  update?: (msg: {
+                    type?: string;
+                    payload?: {
+                      kind?: string;
+                      agent?: unknown;
+                      agentId?: string;
+                    };
+                  }) => void;
+                }) => () => void;
+                release?: () => Promise<void>;
+              };
+            }
+          ).subscription;
+
+          if (hub.disposed) {
+            if (maybeSub?.release) void maybeSub.release().catch(() => {});
+            return;
+          }
+
+          hub.liveMap = parseAgentEntriesToMap(res.entries);
+          broadcastNow(hub);
+
+          if (maybeSub && typeof maybeSub.subscribe === "function") {
+            hub.releaseStream = maybeSub.release
+              ? () => maybeSub.release!()
+              : null;
+            hub.unsubStream = maybeSub.subscribe({
+              snapshot: (snap) => {
+                if (hub.disposed) return;
+                hub.liveMap = parseAgentEntriesToMap(snap?.entries);
+                broadcastNow(hub);
+              },
+              update: (msg) => {
+                if (msg?.type === "agent_update" && msg.payload) {
+                  applyUpdate(msg.payload);
+                }
+              },
+            });
+          } else if (typeof paseo.agents.subscribe === "function") {
+            // Fallback for simple test harnesses that emit via agents.subscribe()
+            hub.unsubLocal = paseo.agents.subscribe((payload) => {
+              if (payload && typeof payload === "object") {
+                applyUpdate(
+                  payload as {
+                    kind?: string;
+                    agent?: unknown;
+                    agentId?: string;
+                  },
+                );
+              } else {
+                refreshViaFetch();
+              }
+            });
+          }
+        })
+        .catch((err) => {
+          if (hub.disposed) return;
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!/Daemon client closed/i.test(msg)) {
+            console.error("[paseo-team] agents.list subscribe failed:", err);
+          }
+          refreshViaFetch();
+          if (!hub.retryTimer) {
+            hub.retryTimer = setTimeout(() => {
+              hub.retryTimer = null;
+              openSubscription();
+            }, 2_000);
+          }
+        });
+    };
+
+    hub.unsubConfig = subscribeConfigChanges(() => {
+      if (hub.liveMap) broadcastNow(hub);
+      else refreshViaFetch();
+    });
+
+    openSubscription();
+  };
+
+  return {
+    subscribe(
+      paseo: PaseoApi,
+      signal: AbortSignal,
+      listener: LiveMapListener,
+    ): void {
+      if (signal.aborted) return;
+      let hub = hubs.get(paseo);
+      if (!hub) {
+        hub = {
+          listeners: new Set(),
+          liveMap: null,
+          debounce: null,
+          retryTimer: null,
+          unsubStream: null,
+          unsubLocal: null,
+          unsubConfig: null,
+          releaseStream: null,
+          disposed: false,
+        };
+        hubs.set(paseo, hub);
+        hub.listeners.add(listener);
+        startHubStream(paseo, hub);
+      } else {
+        hub.listeners.add(listener);
+        if (hub.liveMap) {
+          listener(hub.liveMap);
+        }
+      }
+
+      signal.addEventListener(
+        "abort",
+        () => {
+          const current = hubs.get(paseo);
+          if (!current) return;
+          current.listeners.delete(listener);
+          if (current.listeners.size === 0) {
+            teardownHub(paseo, current);
+          }
+        },
+        { once: true },
+      );
+    },
+    disposeAll(): void {
+      for (const [paseo, hub] of [...hubs.entries()]) {
+        teardownHub(paseo, hub);
+      }
+    },
+  };
+}
+
 export default function contribute(server: PluginServerContext) {
   const cleanups: (() => void)[] = [];
+  const liveAgentHubs = createLiveAgentHubManager();
+  cleanups.push(() => liveAgentHubs.disposeAll());
 
   server.handle(getConfigBundleRpc, async ({ cwd }, { paseo }) => {
     return buildConfigBundle(paseo, cwd);
@@ -86,27 +341,31 @@ export default function contribute(server: PluginServerContext) {
     watchConversationGraphSubscription,
     (input, { paseo, push, signal }) => {
       let pushing = false;
-      let queued = false;
+      let pendingMap: Map<string, LiveAgentRecord> | null = null;
+      let lastSerialized: string | null = null;
 
-      const emit = async () => {
+      const deliver = async (initialMap: Map<string, LiveAgentRecord>) => {
         if (signal.aborted) return;
         if (pushing) {
-          queued = true;
+          pendingMap = initialMap;
           return;
         }
         pushing = true;
+        let currentMap: Map<string, LiveAgentRecord> | null = initialMap;
         try {
-          do {
-            queued = false;
-            if (signal.aborted) break;
-            const payload = await buildConversationGraph(paseo, input);
-            if (!signal.aborted) {
+          while (currentMap && !signal.aborted) {
+            const payload = buildConversationGraphFromMap(currentMap, input);
+            const serialized = JSON.stringify(payload);
+            if (serialized !== lastSerialized) {
+              lastSerialized = serialized;
               await push({
                 ...payload,
                 timestamp: new Date().toISOString(),
               });
             }
-          } while (queued && !signal.aborted);
+            currentMap = pendingMap;
+            pendingMap = null;
+          }
         } catch {
           // Ignore push errors after disconnect
         } finally {
@@ -114,32 +373,9 @@ export default function contribute(server: PluginServerContext) {
         }
       };
 
-      let debounce: ReturnType<typeof setTimeout> | null = null;
-      const scheduleEmit = () => {
-        if (signal.aborted || debounce) return;
-        debounce = setTimeout(() => {
-          debounce = null;
-          void emit();
-        }, 150);
-      };
-
-      const unsubConfig = subscribeConfigChanges(() => void emit());
-      const unsubAgents = paseo.agents.subscribe(() => scheduleEmit());
-
-      signal.addEventListener(
-        "abort",
-        () => {
-          if (debounce) {
-            clearTimeout(debounce);
-            debounce = null;
-          }
-          unsubConfig();
-          unsubAgents();
-        },
-        { once: true },
-      );
-
-      void emit();
+      liveAgentHubs.subscribe(paseo, signal, (liveMap) => {
+        void deliver(liveMap);
+      });
     },
   );
 
@@ -147,27 +383,31 @@ export default function contribute(server: PluginServerContext) {
     watchActiveTreesSubscription,
     (input, { paseo, push, signal }) => {
       let pushing = false;
-      let queued = false;
+      let pendingMap: Map<string, LiveAgentRecord> | null = null;
+      let lastSerialized: string | null = null;
 
-      const emit = async () => {
+      const deliver = async (initialMap: Map<string, LiveAgentRecord>) => {
         if (signal.aborted) return;
         if (pushing) {
-          queued = true;
+          pendingMap = initialMap;
           return;
         }
         pushing = true;
+        let currentMap: Map<string, LiveAgentRecord> | null = initialMap;
         try {
-          do {
-            queued = false;
-            if (signal.aborted) break;
-            const trees = await listActiveTrees(paseo, input);
-            if (!signal.aborted) {
+          while (currentMap && !signal.aborted) {
+            const trees = listActiveTreesFromMap(currentMap, input);
+            const serialized = JSON.stringify(trees);
+            if (serialized !== lastSerialized) {
+              lastSerialized = serialized;
               await push({
                 trees,
                 timestamp: new Date().toISOString(),
               });
             }
-          } while (queued && !signal.aborted);
+            currentMap = pendingMap;
+            pendingMap = null;
+          }
         } catch {
           // Ignore push errors after disconnect
         } finally {
@@ -175,32 +415,9 @@ export default function contribute(server: PluginServerContext) {
         }
       };
 
-      let debounce: ReturnType<typeof setTimeout> | null = null;
-      const scheduleEmit = () => {
-        if (signal.aborted || debounce) return;
-        debounce = setTimeout(() => {
-          debounce = null;
-          void emit();
-        }, 150);
-      };
-
-      const unsubConfig = subscribeConfigChanges(() => void emit());
-      const unsubAgents = paseo.agents.subscribe(() => scheduleEmit());
-
-      signal.addEventListener(
-        "abort",
-        () => {
-          if (debounce) {
-            clearTimeout(debounce);
-            debounce = null;
-          }
-          unsubConfig();
-          unsubAgents();
-        },
-        { once: true },
-      );
-
-      void emit();
+      liveAgentHubs.subscribe(paseo, signal, (liveMap) => {
+        void deliver(liveMap);
+      });
     },
   );
 

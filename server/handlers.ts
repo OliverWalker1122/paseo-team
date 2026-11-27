@@ -754,81 +754,96 @@ export interface LiveAgentRecord {
   updatedAt: string;
 }
 
+export function toLiveAgentRecord(
+  rawAgent: unknown,
+  nowIso = new Date().toISOString(),
+): LiveAgentRecord | null {
+  if (!rawAgent || typeof rawAgent !== "object") return null;
+  const a = rawAgent as Record<string, unknown>;
+  const id = String(a.id ?? "");
+  if (!id) return null;
+  const labels =
+    a.labels && typeof a.labels === "object"
+      ? (a.labels as Record<string, string>)
+      : {};
+  const metadata =
+    a.metadata && typeof a.metadata === "object"
+      ? (a.metadata as Record<string, unknown>)
+      : {};
+  const pendingCount = Array.isArray(a.pendingPermissions)
+    ? a.pendingPermissions.length
+    : 0;
+  const rawStatus = String(a.status ?? "idle");
+  let status: LiveAgentStatusDto = "idle";
+  if (pendingCount > 0) {
+    status = "awaiting_permission";
+  } else if (
+    rawStatus === "initializing" ||
+    rawStatus === "running" ||
+    rawStatus === "error" ||
+    rawStatus === "closed"
+  ) {
+    status = rawStatus;
+  }
+  const parentAgentId =
+    (typeof a.parentAgentId === "string" && a.parentAgentId) ||
+    (typeof labels["paseo.parent-agent-id"] === "string" &&
+      labels["paseo.parent-agent-id"]) ||
+    null;
+  const createdAt =
+    typeof a.createdAt === "string" && a.createdAt ? a.createdAt : nowIso;
+  const updatedAt =
+    typeof a.updatedAt === "string" && a.updatedAt ? a.updatedAt : createdAt;
+
+  return {
+    id,
+    workspaceId: typeof a.workspaceId === "string" ? a.workspaceId : null,
+    parentAgentId,
+    title: typeof a.title === "string" ? a.title.trim() : "",
+    cwd: typeof a.cwd === "string" ? a.cwd : "",
+    status,
+    provider: typeof a.provider === "string" ? a.provider : "agent",
+    model: typeof a.model === "string" ? a.model : null,
+    thinkingOptionId:
+      typeof a.thinkingOptionId === "string" ? a.thinkingOptionId : null,
+    labels,
+    isTeamEnabled: metadata[TEAM_ENABLED_METADATA_KEY] === true,
+    background: Boolean(a.background),
+    archivedAt: typeof a.archivedAt === "string" ? a.archivedAt : null,
+    createdAt,
+    updatedAt,
+  };
+}
+
+export function parseAgentEntriesToMap(
+  entries: ReadonlyArray<{ agent?: unknown }> | undefined,
+): Map<string, LiveAgentRecord> {
+  const map = new Map<string, LiveAgentRecord>();
+  if (!Array.isArray(entries)) return map;
+  const now = new Date().toISOString();
+  for (const entry of entries) {
+    const rec = toLiveAgentRecord(entry?.agent, now);
+    if (rec) map.set(rec.id, rec);
+  }
+  return map;
+}
+
 export async function fetchLiveAgentMap(
   paseo: PaseoApi,
 ): Promise<Map<string, LiveAgentRecord>> {
-  const map = new Map<string, LiveAgentRecord>();
   try {
     const listed = await paseo.agents.list({
       filter: { includeArchived: true },
       page: { limit: 200 },
     });
-    const now = new Date().toISOString();
-    for (const entry of listed.entries) {
-      const a = entry.agent as unknown as Record<string, unknown>;
-      const id = String(a.id ?? "");
-      if (!id) continue;
-      const labels =
-        a.labels && typeof a.labels === "object"
-          ? (a.labels as Record<string, string>)
-          : {};
-      const metadata =
-        a.metadata && typeof a.metadata === "object"
-          ? (a.metadata as Record<string, unknown>)
-          : {};
-      const pendingCount = Array.isArray(a.pendingPermissions)
-        ? a.pendingPermissions.length
-        : 0;
-      const rawStatus = String(a.status ?? "idle");
-      let status: LiveAgentStatusDto = "idle";
-      if (pendingCount > 0) {
-        status = "awaiting_permission";
-      } else if (
-        rawStatus === "initializing" ||
-        rawStatus === "running" ||
-        rawStatus === "error" ||
-        rawStatus === "closed"
-      ) {
-        status = rawStatus;
-      }
-      const parentAgentId =
-        (typeof a.parentAgentId === "string" && a.parentAgentId) ||
-        (typeof labels["paseo.parent-agent-id"] === "string" &&
-          labels["paseo.parent-agent-id"]) ||
-        null;
-      const createdAt =
-        typeof a.createdAt === "string" && a.createdAt ? a.createdAt : now;
-      const updatedAt =
-        typeof a.updatedAt === "string" && a.updatedAt
-          ? a.updatedAt
-          : createdAt;
-
-      map.set(id, {
-        id,
-        workspaceId: typeof a.workspaceId === "string" ? a.workspaceId : null,
-        parentAgentId,
-        title: typeof a.title === "string" ? a.title.trim() : "",
-        cwd: typeof a.cwd === "string" ? a.cwd : "",
-        status,
-        provider: typeof a.provider === "string" ? a.provider : "agent",
-        model: typeof a.model === "string" ? a.model : null,
-        thinkingOptionId:
-          typeof a.thinkingOptionId === "string" ? a.thinkingOptionId : null,
-        labels,
-        isTeamEnabled: metadata[TEAM_ENABLED_METADATA_KEY] === true,
-        background: Boolean(a.background),
-        archivedAt: typeof a.archivedAt === "string" ? a.archivedAt : null,
-        createdAt,
-        updatedAt,
-      });
-    }
+    return parseAgentEntriesToMap(listed.entries);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!/Daemon client closed/i.test(msg)) {
       console.error("[paseo-team] agents.list failed:", err);
     }
+    return new Map<string, LiveAgentRecord>();
   }
-  return map;
 }
 
 function resolveRootAgentId(
@@ -1072,16 +1087,15 @@ export function buildAgentTree(
   };
 }
 
-export async function buildConversationGraph(
-  paseo: PaseoApi,
+export function buildConversationGraphFromMap(
+  liveMap: Map<string, LiveAgentRecord>,
   input: {
     agentId?: string;
     workspaceId?: string;
     language?: UiLanguage;
   },
-): Promise<ConversationGraphPayloadDto> {
+): ConversationGraphPayloadDto {
   const lang = input.language ?? "en";
-  const liveMap = await fetchLiveAgentMap(paseo);
 
   let rootId: string | null = null;
   if (input.agentId && liveMap.has(input.agentId)) {
@@ -1132,12 +1146,23 @@ export async function buildConversationGraph(
   };
 }
 
-export async function listActiveTrees(
+export async function buildConversationGraph(
   paseo: PaseoApi,
-  options?: { language?: UiLanguage },
-): Promise<AgentTreeSnapshotDto[]> {
-  const lang = options?.language ?? "en";
+  input: {
+    agentId?: string;
+    workspaceId?: string;
+    language?: UiLanguage;
+  },
+): Promise<ConversationGraphPayloadDto> {
   const liveMap = await fetchLiveAgentMap(paseo);
+  return buildConversationGraphFromMap(liveMap, input);
+}
+
+export function listActiveTreesFromMap(
+  liveMap: Map<string, LiveAgentRecord>,
+  options?: { language?: UiLanguage },
+): AgentTreeSnapshotDto[] {
+  const lang = options?.language ?? "en";
   const trees: AgentTreeSnapshotDto[] = [];
 
   for (const agent of liveMap.values()) {
@@ -1158,4 +1183,12 @@ export async function listActiveTrees(
   });
 
   return trees.slice(0, 30);
+}
+
+export async function listActiveTrees(
+  paseo: PaseoApi,
+  options?: { language?: UiLanguage },
+): Promise<AgentTreeSnapshotDto[]> {
+  const liveMap = await fetchLiveAgentMap(paseo);
+  return listActiveTreesFromMap(liveMap, options);
 }

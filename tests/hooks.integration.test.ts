@@ -66,6 +66,19 @@ function createServerHarness(t: test.TestContext) {
   const permissionResponses: Array<{ agentId: string; requestId: string }> = [];
   const agentDirectory = new Map<string, Record<string, unknown>>();
   const subCallbacks: Array<() => void> = [];
+  let streamReleased = 0;
+  let streamListCalls = 0;
+  let streamObserver: {
+    snapshot?: (data: {
+      entries: Array<{ agent: Record<string, unknown> }>;
+    }) => void;
+    update?: (msg: {
+      type: string;
+      payload:
+        | { kind: "upsert"; agent: Record<string, unknown> }
+        | { kind: "remove"; agentId: string };
+    }) => void;
+  } | null = null;
 
   const paseoMock = {
     providers: {
@@ -119,10 +132,28 @@ function createServerHarness(t: test.TestContext) {
       },
     },
     agents: {
-      async list() {
-        return {
-          entries: [...agentDirectory.values()].map((agent) => ({ agent })),
-        };
+      async list(opts?: { subscribe?: unknown }) {
+        const entries = [...agentDirectory.values()].map((agent) => ({
+          agent,
+        }));
+        if (opts?.subscribe) {
+          streamListCalls += 1;
+          return {
+            entries,
+            subscription: {
+              subscribe(obs: NonNullable<typeof streamObserver>) {
+                streamObserver = obs;
+                return () => {
+                  if (streamObserver === obs) streamObserver = null;
+                };
+              },
+              async release() {
+                streamReleased += 1;
+              },
+            },
+          };
+        }
+        return { entries };
       },
       subscribe(cb: () => void) {
         subCallbacks.push(cb);
@@ -184,6 +215,21 @@ function createServerHarness(t: test.TestContext) {
     permissionResponses,
     agentDirectory,
     paseo: paseoMock,
+    getStreamStats: () => ({ streamListCalls, streamReleased }),
+    emitAgentUpsert: (agent: Record<string, unknown>) => {
+      agentDirectory.set(String(agent.id), agent);
+      streamObserver?.update?.({
+        type: "agent_update",
+        payload: { kind: "upsert", agent },
+      });
+    },
+    emitAgentRemove: (agentId: string) => {
+      agentDirectory.delete(agentId);
+      streamObserver?.update?.({
+        type: "agent_update",
+        payload: { kind: "remove", agentId },
+      });
+    },
     invokeHook: (name: string, payload: Record<string, unknown>) =>
       hooks.get(name)!(payload, {
         paseo: paseoMock,
@@ -470,42 +516,112 @@ test("config RPCs, startTeamTaskRpc, and live Paseo graph subscriptions work end
   });
   assert.equal(h.sentMessages.length, 1);
 
-  // Verify live subscriptions push Paseo trees cleanly
-  const convEvents: unknown[] = [];
+  // Verify live subscriptions share ONE daemon agents.list({ subscribe: {} }) stream
+  // and push real-time upsert/remove transitions (e.g. Developer running -> idle + Reviewers added)!
+  const convEvents: Array<{
+    rootAgentId: string;
+    tree: { totalAgents: number; runningCount: number } | null;
+  }> = [];
   const ac = new AbortController();
   h.rpcs.get(watchConversationGraphSubscription.name)!(
     { agentId: "chat-1", workspaceId: "wks_1", language: "zh" },
     {
       paseo: h.paseo,
       push: async (ev: unknown) => {
-        convEvents.push(ev);
+        convEvents.push(ev as (typeof convEvents)[number]);
       },
       signal: ac.signal,
     },
   );
-  const treeEvents: unknown[] = [];
+  const treeEvents: Array<{
+    trees: Array<{
+      rootAgentId: string;
+      totalAgents: number;
+      runningCount: number;
+    }>;
+  }> = [];
   h.rpcs.get(watchActiveTreesSubscription.name)!(
     { language: "zh" },
     {
       paseo: h.paseo,
       push: async (ev: unknown) => {
-        treeEvents.push(ev);
+        treeEvents.push(ev as (typeof treeEvents)[number]);
       },
       signal: ac.signal,
     },
   );
   await new Promise((r) => setTimeout(r, 20));
-  ac.abort();
-
+  assert.equal(h.getStreamStats().streamListCalls, 1);
   assert.equal(convEvents.length, 1);
-  assert.equal(
-    (convEvents[0] as { rootAgentId: string }).rootAgentId,
-    "chat-1",
-  );
+  assert.equal(convEvents[0].rootAgentId, "chat-1");
+  assert.equal(convEvents[0].tree?.totalAgents, 1);
   assert.equal(treeEvents.length, 1);
-  assert.equal(
-    (treeEvents[0] as { trees: Array<{ rootAgentId: string }> }).trees[0]
-      .rootAgentId,
-    "chat-1",
-  );
+
+  // Live upsert: Developer starts running
+  h.emitAgentUpsert({
+    id: "dev-live",
+    workspaceId: "wks_1",
+    cwd: h.workspaceDir,
+    status: "running",
+    provider: "antigravity",
+    model: "gemini-4-neon",
+    title: "Developer: live task",
+    labels: {
+      "paseo.parent-agent-id": "chat-1",
+      [TEAM_ROLE_LABEL_KEY]: "developer",
+    },
+    createdAt: "2026-11-28T01:27:00.000Z",
+    updatedAt: "2026-11-28T01:27:00.000Z",
+  });
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(convEvents.at(-1)?.tree?.totalAgents, 2);
+  assert.equal(convEvents.at(-1)?.tree?.runningCount, 1);
+  assert.equal(treeEvents.at(-1)?.trees[0].runningCount, 1);
+
+  // Live upsert: Developer finishes idle AND Code Reviewer spawns idle -> both views update immediately
+  h.emitAgentUpsert({
+    id: "dev-live",
+    workspaceId: "wks_1",
+    cwd: h.workspaceDir,
+    status: "idle",
+    provider: "antigravity",
+    model: "gemini-4-neon",
+    title: "Developer: live task",
+    labels: {
+      "paseo.parent-agent-id": "chat-1",
+      [TEAM_ROLE_LABEL_KEY]: "developer",
+    },
+    createdAt: "2026-11-28T01:27:00.000Z",
+    updatedAt: "2026-11-28T01:42:00.000Z",
+  });
+  h.emitAgentUpsert({
+    id: "rev-live",
+    workspaceId: "wks_1",
+    cwd: h.workspaceDir,
+    status: "idle",
+    provider: "claude",
+    model: "claude-opus-5-5",
+    title: "Review #1",
+    labels: {
+      "paseo.parent-agent-id": "chat-1",
+      [TEAM_ROLE_LABEL_KEY]: "code-reviewer",
+    },
+    createdAt: "2026-11-28T01:37:00.000Z",
+    updatedAt: "2026-11-28T01:43:00.000Z",
+  });
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(convEvents.at(-1)?.tree?.totalAgents, 3);
+  assert.equal(convEvents.at(-1)?.tree?.runningCount, 0);
+  assert.equal(treeEvents.at(-1)?.trees[0].totalAgents, 3);
+  assert.equal(treeEvents.at(-1)?.trees[0].runningCount, 0);
+
+  // Live remove drops subagent cleanly
+  h.emitAgentRemove("rev-live");
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(convEvents.at(-1)?.tree?.totalAgents, 2);
+
+  // Aborting all subscribers releases the shared daemon subscription cleanly
+  ac.abort();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(h.getStreamStats().streamReleased, 1);
 });
