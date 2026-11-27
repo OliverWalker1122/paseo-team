@@ -1,5 +1,5 @@
 import { useComposer } from "@getpaseo/plugin/client";
-import { Toggle } from "@getpaseo/plugin/client/ui";
+import { Toggle, useToast } from "@getpaseo/plugin/client/ui";
 import {
   addTeamSlashPrefix,
   hasTeamSlashPrefix,
@@ -10,13 +10,17 @@ import {
 import { UI_TEXT } from "../shared/i18n.ts";
 import { useUiLanguage } from "./locale.ts";
 
-function getTaskMetaRole(
-  metadata: Readonly<Record<string, unknown>>,
-): string | null {
+function getTaskMeta(metadata: Readonly<Record<string, unknown>>): {
+  role: string | null;
+  active: boolean;
+} {
   const raw = metadata[TEAM_TASK_METADATA_KEY];
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const role = (raw as Record<string, unknown>).role;
-  return typeof role === "string" && role ? role : null;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { role: null, active: false };
+  }
+  const rec = raw as Record<string, unknown>;
+  const role = typeof rec.role === "string" && rec.role ? rec.role : null;
+  return { role, active: rec.active === true };
 }
 
 /**
@@ -24,16 +28,18 @@ function getTaskMetaRole(
  * - On `new-workspace` / `draft`: stores a one-shot `paseo-team.enabled` flag in
  *   agent metadata so the input stays clean and the new agent auto-starts Team mode
  *   on its first message via `agent.open.before`.
- * - On `agent`: toggles the `/paseo-team ` command prefix so submitting hits the
- *   instant client slash command (or attachment fallback) with zero session reload.
+ * - On `agent`: stays selected while the initial auto-start is pending or while a
+ *   team task is actively running on this chat; otherwise toggles the `/paseo-team `
+ *   command prefix so submitting hits the instant client slash command with zero reload.
  */
 export function TeamComposerToggle() {
   const composer = useComposer();
+  const toast = useToast();
   const lang = useUiLanguage();
   const t = UI_TEXT[lang];
 
-  const taskRole = getTaskMetaRole(composer.agent.metadata);
-  if (taskRole && taskRole !== "coordinator") {
+  const taskMeta = getTaskMeta(composer.agent.metadata);
+  if (taskMeta.role && taskMeta.role !== "coordinator") {
     return null;
   }
 
@@ -41,8 +47,9 @@ export function TeamComposerToggle() {
     composer.context === "new-workspace" || composer.context === "draft";
   const hasMetaFlag =
     composer.agent.metadata[TEAM_ENABLED_METADATA_KEY] === true;
+  const hasActiveTask = taskMeta.role === "coordinator" && taskMeta.active;
   const hasPrefix = hasTeamSlashPrefix(composer.prompt);
-  const active = isNewChat ? hasMetaFlag || hasPrefix : hasPrefix;
+  const active = hasMetaFlag || hasActiveTask || hasPrefix;
 
   return (
     <Toggle
@@ -50,6 +57,11 @@ export function TeamComposerToggle() {
       icon="Users"
       value={active}
       onValueChange={async ({ value }) => {
+        if (hasActiveTask) {
+          toast.show(t.composerTeamActiveHint, { variant: "info" });
+          return;
+        }
+
         if (isNewChat) {
           await composer.setMetadata({
             [TEAM_ENABLED_METADATA_KEY]: value ? true : null,
@@ -57,6 +69,13 @@ export function TeamComposerToggle() {
           if (!value && hasPrefix) {
             composer.setPrompt(stripTeamSlashPrefix(composer.prompt));
           }
+          return;
+        }
+
+        if (!value && hasMetaFlag && !hasPrefix) {
+          await composer
+            .setMetadata({ [TEAM_ENABLED_METADATA_KEY]: null })
+            .catch(() => {});
           return;
         }
 

@@ -190,15 +190,24 @@ export function registerTeamComposerPills(
     id: string;
     workspaceId?: string | null;
     parentAgentId?: string | null;
+    labels?: Record<string, string> | null;
     status?: string;
     pendingPermissions?: unknown[];
     background?: boolean;
   }) => {
     if (!raw.workspaceId) return;
+    const labelParent =
+      raw.labels && typeof raw.labels === "object"
+        ? raw.labels["paseo.parent-agent-id"]
+        : undefined;
+    const parentAgentId =
+      (typeof raw.parentAgentId === "string" && raw.parentAgentId) ||
+      (typeof labelParent === "string" && labelParent) ||
+      null;
     agents.set(raw.id, {
       id: raw.id,
       workspaceId: raw.workspaceId,
-      parentAgentId: raw.parentAgentId ?? null,
+      parentAgentId,
       status: raw.status ?? "idle",
       requiresAttention:
         Array.isArray(raw.pendingPermissions) &&

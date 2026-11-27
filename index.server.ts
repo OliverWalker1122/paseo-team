@@ -18,10 +18,12 @@ import {
   buildConfigBundle,
   buildConversationGraph,
   createCoordinatorTool,
+  isCrossWorkspaceSpawn,
   listPipelineSnapshots,
   notifyTaskChanges,
   startTeamTask,
   subscribeTaskChanges,
+  syncCoordinatorTaskMetadata,
 } from "./server/handlers.ts";
 import {
   assignReviewerPerspective,
@@ -63,8 +65,10 @@ export function isAutoAllowedStartCall(
   parentAgentId: string | null | undefined,
   toolName: string | null,
   requestInput: unknown,
+  allowCrossWorkspaceParent = false,
 ): boolean {
-  if (parentAgentId || !toolName) return false;
+  if (!toolName) return false;
+  if (parentAgentId && !allowCrossWorkspaceParent) return false;
   if (!/(?:^|__|_|\/|:|\.)paseo_team$/.test(toolName)) return false;
   if (!requestInput || typeof requestInput !== "object") return false;
   return (requestInput as Record<string, unknown>).action === "start";
@@ -292,6 +296,7 @@ export default function contribute(server: PluginServerContext) {
         if (record.lifecycleStatus !== "completed") {
           record.lifecycleStatus = "abandoned";
           saveTask(recordPath, record);
+          await syncCoordinatorTaskMetadata(paseo, record, recordPath, false);
           notifyTaskChanges();
         }
         const snap = await listPipelineSnapshots(paseo, {
@@ -350,7 +355,8 @@ export default function contribute(server: PluginServerContext) {
       const rep = inspectQualityGate({ recordPath });
 
       if (action === "complete_task" && rep.status === "READY") {
-        markTaskCompleted(recordPath);
+        const completed = markTaskCompleted(recordPath);
+        await syncCoordinatorTaskMetadata(paseo, completed, recordPath, false);
       }
 
       notifyTaskChanges();
@@ -497,7 +503,7 @@ export default function contribute(server: PluginServerContext) {
   );
 
   cleanups.push(
-    server.addHook("agent.open.before", async ({ request }) => {
+    server.addHook("agent.open.before", async ({ request }, { paseo }) => {
       try {
         if (request.purpose === "history" || request.background) {
           return undefined;
@@ -697,8 +703,18 @@ export default function contribute(server: PluginServerContext) {
             // Non-fatal
           }
         } else if (parentAgentId) {
-          // Non-team subagents should not receive the coordinator tool.
-          return undefined;
+          // Same-workspace non-team subagents should not receive the coordinator tool;
+          // a root agent spawned into a separate worktree workspace (different workspaceId)
+          // is allowed to run `/paseo-team` as its own coordinator.
+          const crossWorkspace = await isCrossWorkspaceSpawn({
+            paseo,
+            parentAgentId,
+            workspaceId: request.workspaceId,
+            cwd: request.cwd,
+          });
+          if (!crossWorkspace) {
+            return undefined;
+          }
         }
 
         // Attach the single compact `paseo_team` coordinator tool and tiny static
@@ -772,12 +788,22 @@ export default function contribute(server: PluginServerContext) {
               }
             }
           }
+          const allowCrossWorkspaceStart =
+            Boolean(agent.parentAgentId) &&
+            !role &&
+            (await isCrossWorkspaceSpawn({
+              paseo,
+              parentAgentId: agent.parentAgentId,
+              workspaceId: agent.workspaceId,
+              cwd: agent.cwd,
+            }));
           if (
             isAutoAllowedTeamTool(role, toolName) ||
             isAutoAllowedStartCall(
               agent.parentAgentId,
               toolName,
               request.input,
+              allowCrossWorkspaceStart,
             ) ||
             isScopedCoordinatorPermissionResponse({
               role,

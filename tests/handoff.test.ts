@@ -992,11 +992,7 @@ test("permission hook auto-allows coordinator read-only checks and scoped child 
 test("toPipelineSnapshot keeps active running Developer/Expert as running even if a delivery exists (regression for bcd00383)", (t) => {
   const tmp = mkdtempSync(path.join(os.tmpdir(), "paseo-team-live-status-"));
   const stateRoot = path.join(tmp, "state");
-  const prevState = process.env.PASEO_TEAM_STATE_DIR;
-  process.env.PASEO_TEAM_STATE_DIR = stateRoot;
   t.after(() => {
-    if (prevState === undefined) delete process.env.PASEO_TEAM_STATE_DIR;
-    else process.env.PASEO_TEAM_STATE_DIR = prevState;
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -1011,6 +1007,7 @@ test("toPipelineSnapshot keeps active running Developer/Expert as running even i
       complexMode: "simple",
     },
     coordinatorAgentId: "coord-live",
+    stateRoot,
   });
   setTaskRoute(recordPath, {
     isComplex: false,

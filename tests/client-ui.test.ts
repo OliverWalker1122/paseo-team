@@ -884,15 +884,17 @@ test("UI regression: registers one workspace-scoped team-graph panel (zero agent
     "方案审查 #1 · 团队状态图",
   );
 
-  // If a standalone chat spawns a native subagent and later removes it, the pill mounts and cleans up.
+  // If a standalone chat spawns a native subagent (including via labels["paseo.parent-agent-id"]
+  // without top-level parentAgentId, as Paseo emits for cross-workspace spawns) and later removes it,
+  // the pill mounts and cleans up cleanly.
   mock.pushAgentUpsert({
     id: "native-child",
-    workspaceId: "wks_test",
-    parentAgentId: "test-standalone-1",
-    status: "idle",
+    workspaceId: "wks_other_worktree",
+    labels: { "paseo.parent-agent-id": "test-standalone-1" },
+    status: "running",
     background: false,
   });
-  assert.equal(mock.pills.get("test-standalone-1")?.label, "团队 · 1 个会话");
+  assert.equal(mock.pills.get("test-standalone-1")?.label, "团队 · 1 运行中");
   mock.pushAgentRemove("native-child");
   assert.equal(mock.pills.has("test-standalone-1"), false);
 
@@ -1747,11 +1749,67 @@ test("UI regression: composer Team toggle handles new-workspace/draft metadata, 
   assert.equal(draft.state.metadata[TEAM_ENABLED_METADATA_KEY], true);
   assert.equal(draft.state.prompt, "");
 
-  // 3. Existing agent chat: toggles `/paseo-team ` prefix so submit triggers client slash command.
+  // 3. Existing agent chat:
+  //    3a. Stays selected while pending auto-start (`paseo-team.enabled: true`) is still set after submit;
+  //        toggling OFF clears the pending flag cleanly.
+  const pendingAgent = makeMockComposer({
+    context: "agent",
+    prompt: "",
+    metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+  });
+  uiSandbox.composer = pendingAgent.composer;
+  uiSandbox.renderer.render({ __vnode: true, type: TeamToggle, props: {} });
+  toggleNode = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Toggle",
+  )[0];
+  assert.equal(
+    toggleNode.props.value,
+    true,
+    "toggle must stay selected on agent composer while auto-start is pending",
+  );
+  await (
+    toggleNode.props.onValueChange as (e: { value: boolean }) => Promise<void>
+  )({ value: false });
+  assert.equal(
+    pendingAgent.state.metadata[TEAM_ENABLED_METADATA_KEY],
+    undefined,
+  );
+  assert.equal(pendingAgent.state.prompt, "");
+
+  //    3b. Stays selected while a coordinator Team task is actively running (`active: true`);
+  //        clicking while active shows an info toast and leaves prompt/metadata untouched.
+  const activeCoord = makeMockComposer({
+    context: "agent",
+    prompt: "",
+    metadata: {
+      [TEAM_TASK_METADATA_KEY]: {
+        taskId: "t1",
+        role: "coordinator",
+        active: true,
+      },
+    },
+  });
+  uiSandbox.toasts.length = 0;
+  uiSandbox.composer = activeCoord.composer;
+  uiSandbox.renderer.render({ __vnode: true, type: TeamToggle, props: {} });
+  toggleNode = findNodes(
+    uiSandbox.renderer.root,
+    (n) => n.type === "Toggle",
+  )[0];
+  assert.equal(toggleNode.props.value, true);
+  await (
+    toggleNode.props.onValueChange as (e: { value: boolean }) => Promise<void>
+  )({ value: false });
+  assert.equal(uiSandbox.toasts.length, 1);
+  assert.equal(uiSandbox.toasts[0].variant, "info");
+  assert.equal(activeCoord.state.prompt, "");
+
+  //    3c. On an ordinary existing chat without active task, toggles `/paseo-team ` prefix.
   const existing = makeMockComposer({
     context: "agent",
     prompt: "修复登录超时",
-    metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+    metadata: {},
     rejectFocus: true,
   });
   uiSandbox.composer = existing.composer;
@@ -1779,7 +1837,6 @@ test("UI regression: composer Team toggle handles new-workspace/draft metadata, 
     toggleNode.props.onValueChange as (e: { value: boolean }) => Promise<void>
   )({ value: false });
   assert.equal(existing.state.prompt, "修复登录超时");
-  assert.equal(existing.state.metadata[TEAM_ENABLED_METADATA_KEY], undefined);
 
   // Empty prompt in existing chat inserts "/paseo-team " and moves cursor to end.
   const emptyAgent = makeMockComposer({ context: "agent", prompt: "" });

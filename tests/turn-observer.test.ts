@@ -266,11 +266,7 @@ test("observeMemberTurn passively drives full native pipeline from Expert -> Dev
 test("observeMemberTurn auto-upgrades codeReview from not-required to required and unhides reviewers when diff exceeds thresholds (regression for bcd00383)", (t) => {
   const tmp = mkdtempSync(path.join(os.tmpdir(), "paseo-team-upgrade-"));
   const stateRoot = path.join(tmp, "state");
-  const prevState = process.env.PASEO_TEAM_STATE_DIR;
-  process.env.PASEO_TEAM_STATE_DIR = stateRoot;
   t.after(() => {
-    if (prevState === undefined) delete process.env.PASEO_TEAM_STATE_DIR;
-    else process.env.PASEO_TEAM_STATE_DIR = prevState;
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -281,6 +277,7 @@ test("observeMemberTurn auto-upgrades codeReview from not-required to required a
     teamName: "标准",
     preset: samplePreset,
     coordinatorAgentId: "coord-u1",
+    stateRoot,
   });
   setTaskRoute(recordPath, {
     isComplex: false,
@@ -332,6 +329,7 @@ test("observeMemberTurn auto-upgrades codeReview from not-required to required a
     preset: samplePreset,
     skipReviewReason: "user explicitly waived review",
     coordinatorAgentId: "coord-u2",
+    stateRoot,
   });
   registerTaskAgent(waivedTask.recordPath, {
     role: "developer",
@@ -356,6 +354,7 @@ test("observeMemberTurn auto-upgrades codeReview from not-required to required a
     teamName: "标准",
     preset: samplePreset,
     coordinatorAgentId: "coord-u3",
+    stateRoot,
   });
   setTaskRoute(archTask.recordPath, {
     isComplex: false,

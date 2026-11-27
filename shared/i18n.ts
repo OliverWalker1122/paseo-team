@@ -378,6 +378,8 @@ export const UI_TEXT = {
     kickoffDetails: "Details",
     kickoffHide: "Hide",
     composerTeamToggle: "Team mode",
+    composerTeamActiveHint:
+      "Team mode is already running on this chat. Use the Team pill above to open the graph.",
   },
   zh: {
     // Navigation
@@ -547,5 +549,7 @@ export const UI_TEXT = {
     kickoffDetails: "展开参数",
     kickoffHide: "收起",
     composerTeamToggle: "团队模式",
+    composerTeamActiveHint:
+      "当前对话正在团队模式运行，可点击上方「团队」胶囊打开状态图。",
   },
 } as const;

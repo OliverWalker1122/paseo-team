@@ -590,7 +590,9 @@ function normalizeLifecycleStatus(
   raw: Record<string, unknown>,
 ): TaskRecord["lifecycleStatus"] {
   const s =
-    asNonEmptyString(raw.lifecycleStatus) ?? asNonEmptyString(raw.status);
+    asNonEmptyString(raw.lifecycleStatus) ??
+    asNonEmptyString(raw.status) ??
+    asNonEmptyString(raw.phase);
   if (raw.merged === true || (raw.merged && typeof raw.merged === "object")) {
     return "completed";
   }
@@ -601,7 +603,8 @@ function normalizeLifecycleStatus(
       low.startsWith("merged-") ||
       low === "deployed" ||
       low === "done" ||
-      low === "completed"
+      low === "completed" ||
+      low.startsWith("completed-")
     ) {
       return "completed";
     }

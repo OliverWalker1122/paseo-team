@@ -2166,4 +2166,220 @@ test("composer Team toggle metadata auto-starts on first open, clears flag on st
     ],
     null,
   );
+  assert.equal(
+    (taskMeta as { active?: boolean }).active,
+    true,
+    "started coordinator task metadata must mark active=true",
+  );
+
+  // 7. Abandoning task marks coordinator task metadata active=false so composer toggle turns off.
+  await h.invokeRpc(controlTaskRpc.name, {
+    recordPath: taskMeta.recordPath,
+    action: "abandon_task",
+    language: "zh",
+  });
+  const afterAbandonMeta = (
+    h.agentDirectory.get(nwAgentId)?.metadata as Record<string, unknown>
+  )[TEAM_TASK_METADATA_KEY] as { active?: boolean };
+  assert.equal(afterAbandonMeta?.active, false);
+});
+
+test("regression for 47c1f1b8: legacy pre-plugin task without coordinator never bricks start, cross-worktree spawn gets paseo_team, and label-only parent builds native DAG", async (t) => {
+  const h = createPluginHarness(t);
+  const { getConversationGraphRpc } = await import("../shared/contracts.ts");
+  saveConfig({
+    schemaVersion: 5,
+    default: "标准",
+    teams: { 标准: samplePreset },
+    projects: {},
+  });
+
+  // 1. Write two historical/orphaned tasks in the same workspace:
+  //    a) pre-plugin task with phase="completed-candidate" & no coordinatorAgentId
+  //    b) orphaned task with no coordinatorAgentId and no phase/status
+  const legacyDir1 = path.join(h.stateRoot, "todo", "legacy-completed");
+  mkdirSync(legacyDir1, { recursive: true });
+  writeFileSync(
+    path.join(legacyDir1, "task.json"),
+    JSON.stringify({
+      taskId: "todo-whimsical-examples-2026-10-24",
+      repo: h.workspaceDir,
+      request: "legacy completed task",
+      phase: "completed-candidate",
+    }),
+  );
+  const legacyDir2 = path.join(h.stateRoot, "todo", "legacy-orphan");
+  mkdirSync(legacyDir2, { recursive: true });
+  writeFileSync(
+    path.join(legacyDir2, "task.json"),
+    JSON.stringify({
+      taskId: "legacy-orphan-no-coord",
+      repo: h.workspaceDir,
+      request: "orphan without coordinator",
+    }),
+  );
+  assert.equal(
+    loadTask(path.join(legacyDir1, "task.json")).lifecycleStatus,
+    "completed",
+  );
+
+  // 2. Starting a team task in h.workspaceDir auto-abandons the orphan and succeeds.
+  const mainChatId = "chat-47c1f1b8";
+  h.agentDirectory.set(mainChatId, {
+    id: mainChatId,
+    workspaceId: "wks_main_todo",
+    cwd: h.workspaceDir,
+    provider: "claude",
+    model: "claude-opus-5-5",
+    status: "running",
+    parentAgentId: null,
+    metadata: {},
+  });
+  const mainOpen = (await h.invokeHook("agent.open.before", {
+    request: {
+      agentId: mainChatId,
+      workspaceId: "wks_main_todo",
+      provider: "claude",
+      cwd: h.workspaceDir,
+      reason: "create",
+      purpose: "interactive",
+      title: "设置组件透明度",
+      background: false,
+      labels: {},
+      metadata: {},
+      appendSystemPrompt: [],
+      tools: [],
+      env: {},
+      mcpServers: {},
+    },
+  })) as {
+    tools?: Array<{
+      name: string;
+      execute: (
+        args: Record<string, unknown>,
+        ctx: Record<string, unknown>,
+      ) => Promise<{ text: string; isError?: boolean }>;
+    }>;
+  };
+  const mainTool = mainOpen.tools?.find((x) => x.name === "paseo_team")!;
+  const startedMain = await mainTool.execute(
+    { action: "start", rawArgs: "设置组件透明度" },
+    {
+      agent: {
+        id: mainChatId,
+        workspaceId: "wks_main_todo",
+        parentAgentId: null,
+        provider: "claude",
+        cwd: h.workspaceDir,
+        metadata: {},
+      },
+      paseo: h.paseo,
+    },
+  );
+  assert.notEqual(startedMain.isError, true);
+  assert.equal(
+    loadTask(path.join(legacyDir2, "task.json")).lifecycleStatus,
+    "abandoned",
+  );
+
+  // 3. Cross-worktree coordinator spawned via create_agent (different workspaceId & worktree cwd)
+  //    receives paseo_team + activation hint and can start its own team task!
+  const worktreeDir = path.join(h.baseDir, "worktree-panel-opacity");
+  mkdirSync(worktreeDir, { recursive: true });
+  const wtCoordId = "chat-060e18fe";
+  h.agentDirectory.set(wtCoordId, {
+    id: wtCoordId,
+    workspaceId: "wks_worktree_opacity",
+    cwd: worktreeDir,
+    provider: "claude",
+    model: "claude-opus-5-5",
+    status: "running",
+    labels: { "paseo.parent-agent-id": mainChatId },
+    title: "团队协调：自定义组件透明度",
+    metadata: {},
+  });
+  const wtOpen = (await h.invokeHook("agent.open.before", {
+    request: {
+      agentId: wtCoordId,
+      workspaceId: "wks_worktree_opacity",
+      provider: "claude",
+      cwd: worktreeDir,
+      reason: "create",
+      purpose: "interactive",
+      title: "团队协调：自定义组件透明度",
+      background: false,
+      labels: { "paseo.parent-agent-id": mainChatId },
+      metadata: {},
+      appendSystemPrompt: [],
+      tools: [],
+      env: {},
+      mcpServers: {},
+    },
+  })) as {
+    appendSystemPrompt?: string[];
+    tools?: Array<{
+      name: string;
+      execute: (
+        args: Record<string, unknown>,
+        ctx: Record<string, unknown>,
+      ) => Promise<{ text: string; isError?: boolean }>;
+    }>;
+  };
+  assert.ok(wtOpen, "cross-worktree coordinator must receive team open hook");
+  const wtTool = wtOpen.tools?.find((x) => x.name === "paseo_team");
+  assert.ok(wtTool, "cross-worktree coordinator must receive paseo_team tool");
+  const wtStart = await wtTool.execute(
+    { action: "start", rawArgs: "自定义组件透明度" },
+    {
+      agent: {
+        id: wtCoordId,
+        workspaceId: "wks_worktree_opacity",
+        parentAgentId: mainChatId,
+        provider: "claude",
+        cwd: worktreeDir,
+        metadata: {},
+      },
+      paseo: h.paseo,
+    },
+  );
+  assert.notEqual(wtStart.isError, true);
+  assert.match(wtStart.text, /自定义组件透明度/);
+
+  // 4. Native subagent discovery resolves labels["paseo.parent-agent-id"] even when top-level parentAgentId is omitted.
+  const nativeParentId = "native-parent-1";
+  const nativeChildId = "native-child-1";
+  h.agentDirectory.set(nativeParentId, {
+    id: nativeParentId,
+    workspaceId: "wks_native",
+    cwd: worktreeDir,
+    provider: "claude",
+    status: "idle",
+    title: "父对话",
+    metadata: {},
+  });
+  h.agentDirectory.set(nativeChildId, {
+    id: nativeChildId,
+    workspaceId: "wks_native_child",
+    cwd: worktreeDir,
+    provider: "claude",
+    status: "running",
+    title: "子对话",
+    labels: { "paseo.parent-agent-id": nativeParentId },
+    metadata: {},
+  });
+  const graph = (await h.invokeRpc(getConversationGraphRpc.name, {
+    agentId: nativeParentId,
+    workspaceId: "wks_native",
+    language: "zh",
+  })) as {
+    mode: string;
+    task: { stages: Array<{ nodes: Array<{ agentId?: string }> }> } | null;
+  };
+  assert.equal(graph.mode, "native_subagents");
+  assert.ok(
+    graph.task?.stages.some((st) =>
+      st.nodes.some((n) => n.agentId === nativeChildId),
+    ),
+    "native subagent DAG must include child linked via labels['paseo.parent-agent-id']",
+  );
 });

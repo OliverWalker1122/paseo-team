@@ -60,6 +60,7 @@ import {
   recordPlanSubmission,
   recordReviewVerdict,
   resolveCircuitBreaker,
+  resolveWorkspaceDirectory,
   saveTask,
   setTaskRoute,
   type TaskRecord,
@@ -298,12 +299,20 @@ async function fetchLiveAgentMap(
         statusRaw === "closed"
           ? statusRaw
           : "idle";
+      const rawLabels =
+        a.labels && typeof a.labels === "object"
+          ? (a.labels as Record<string, string>)
+          : {};
+      const resolvedParentAgentId =
+        (typeof a.parentAgentId === "string" && a.parentAgentId) ||
+        (typeof rawLabels["paseo.parent-agent-id"] === "string" &&
+          rawLabels["paseo.parent-agent-id"]) ||
+        null;
       map.set(id, {
         id,
         workspaceId:
           typeof a.workspaceId === "string" ? a.workspaceId : undefined,
-        parentAgentId:
-          typeof a.parentAgentId === "string" ? a.parentAgentId : null,
+        parentAgentId: resolvedParentAgentId,
         title: typeof a.title === "string" ? a.title : null,
         cwd: typeof a.cwd === "string" ? a.cwd : "",
         status,
@@ -312,10 +321,7 @@ async function fetchLiveAgentMap(
         model: typeof a.model === "string" ? a.model : null,
         thinkingOptionId:
           typeof a.thinkingOptionId === "string" ? a.thinkingOptionId : null,
-        labels:
-          a.labels && typeof a.labels === "object"
-            ? (a.labels as Record<string, string>)
-            : {},
+        labels: rawLabels,
         createdAt: typeof a.createdAt === "string" ? a.createdAt : undefined,
         updatedAt: typeof a.updatedAt === "string" ? a.updatedAt : undefined,
       });
@@ -1713,6 +1719,69 @@ function resolveRoleLaunchSpec(options: {
   };
 }
 
+export async function isCrossWorkspaceSpawn(options: {
+  paseo?: PaseoApi;
+  parentAgentId?: string | null;
+  workspaceId?: string | null;
+  cwd?: string;
+}): Promise<boolean> {
+  const pid = options.parentAgentId?.trim();
+  const wsId = options.workspaceId?.trim();
+  if (!pid || !wsId || !options.paseo?.agents?.ref) return false;
+  if (isActiveSameProjectTeamParent(pid, options.cwd)) return false;
+  const parentSnap = await options.paseo.agents
+    .ref(pid)
+    .refresh()
+    .catch(() => null);
+  const parentWs = (parentSnap?.agent as { workspaceId?: string } | undefined)
+    ?.workspaceId;
+  return Boolean(parentWs && parentWs !== wsId);
+}
+
+export function isActiveSameProjectTeamParent(
+  parentAgentId: string | null | undefined,
+  cwd?: string,
+): boolean {
+  const pid = parentAgentId?.trim();
+  if (!pid) return false;
+  const parentTask = findTaskByAgentId(pid);
+  if (
+    !parentTask ||
+    parentTask.record.lifecycleStatus === "completed" ||
+    parentTask.record.lifecycleStatus === "abandoned"
+  ) {
+    return false;
+  }
+  if (!cwd?.trim()) return true;
+  return (
+    resolveWorkspaceDirectory(parentTask.record.projectRoot) ===
+    resolveWorkspaceDirectory(cwd)
+  );
+}
+
+export async function syncCoordinatorTaskMetadata(
+  paseo: PaseoApi | undefined,
+  record: TaskRecord,
+  recordPath: string,
+  active: boolean,
+): Promise<void> {
+  const coordId = record.coordinatorAgentId?.trim();
+  if (!coordId || !paseo?.agents?.ref) return;
+  const handle = paseo.agents.ref(coordId);
+  if (typeof handle.setMetadata !== "function") return;
+  await handle
+    .setMetadata({
+      [TEAM_TASK_METADATA_KEY]: {
+        taskId: record.taskId,
+        recordPath,
+        role: "coordinator",
+        active,
+      },
+      [TEAM_ENABLED_METADATA_KEY]: null,
+    })
+    .catch(() => {});
+}
+
 async function prepareTeamTaskKickoff(
   paseo: PaseoApi,
   input: {
@@ -1808,18 +1877,45 @@ async function prepareTeamTaskKickoff(
   );
   for (const openItem of openProjectTasks) {
     const otherCoordId = openItem.record.coordinatorAgentId?.trim();
-    const sameChat = otherCoordId === coordinatorAgentId;
-    if (!sameChat && otherCoordId) {
-      const otherSnap = await paseo.agents
-        .ref(otherCoordId)
-        .refresh()
-        .catch(() => null);
-      const otherAgent = otherSnap?.agent as
-        { archivedAt?: string | null } | undefined;
-      if (otherAgent?.archivedAt) {
-        // Orphaned task whose coordinator chat was already archived in Paseo: auto-abandon so it never bricks the workspace.
+    const sameChat = Boolean(
+      otherCoordId && otherCoordId === coordinatorAgentId,
+    );
+    if (!sameChat) {
+      let shouldAutoAbandon = !otherCoordId;
+      if (otherCoordId) {
+        let refreshFailed = false;
+        let notFound = false;
+        const otherSnap = await paseo.agents
+          .ref(otherCoordId)
+          .refresh()
+          .catch((err: unknown) => {
+            refreshFailed = true;
+            const msg = err instanceof Error ? err.message : String(err);
+            if (/not.?found|unknown agent|no such agent/i.test(msg)) {
+              notFound = true;
+            }
+            return null;
+          });
+        const otherAgent = otherSnap?.agent as
+          { archivedAt?: string | null } | undefined;
+        if (
+          otherAgent?.archivedAt ||
+          notFound ||
+          (!otherSnap && !refreshFailed)
+        ) {
+          shouldAutoAbandon = true;
+        }
+      }
+      if (shouldAutoAbandon) {
+        // Orphaned/legacy task with no live coordinator in Paseo: auto-abandon so it never bricks the workspace.
         openItem.record.lifecycleStatus = "abandoned";
         saveTask(openItem.recordPath, openItem.record);
+        await syncCoordinatorTaskMetadata(
+          paseo,
+          openItem.record,
+          openItem.recordPath,
+          false,
+        );
         notifyTaskChanges();
         continue;
       }
@@ -2015,6 +2111,7 @@ async function prepareTeamTaskKickoff(
           taskId: created.record.taskId,
           recordPath: created.recordPath,
           role: "coordinator",
+          active: true,
         },
         [TEAM_ENABLED_METADATA_KEY]: null,
       })
@@ -2177,11 +2274,27 @@ export function createCoordinatorTool(
     input: coordinatorToolInputSchema,
     async execute(args, context) {
       if (args.action === "start") {
-        if (context?.agent?.parentAgentId) {
+        const callerId = context?.agent?.id?.trim();
+        const callerMatch = callerId ? findTaskByAgentId(callerId) : null;
+        if (callerMatch && callerMatch.matchedRole !== "coordinator") {
           return {
-            text: 'action="start" can only be called from a top-level chat, not a subagent.',
+            text: 'action="start" cannot be called from a team subagent.',
             isError: true,
           };
+        }
+        if (context?.agent?.parentAgentId) {
+          const crossWs = await isCrossWorkspaceSpawn({
+            paseo: context?.paseo,
+            parentAgentId: context.agent.parentAgentId,
+            workspaceId: context.agent.workspaceId,
+            cwd: context.agent.cwd,
+          });
+          if (!crossWs) {
+            return {
+              text: 'action="start" can only be called from a top-level chat or a coordinator spawned in its own workspace, not a subagent.',
+              isError: true,
+            };
+          }
         }
         const rawArgs = args.rawArgs?.trim() ?? "";
         if (!rawArgs) {
@@ -2503,14 +2616,26 @@ export function createCoordinatorTool(
             isError: true,
           };
         }
-        markTaskCompleted(recordPath);
+        const completed = markTaskCompleted(recordPath);
+        await syncCoordinatorTaskMetadata(
+          context?.paseo,
+          completed,
+          recordPath,
+          false,
+        );
         notifyTaskChanges();
         return {
           text: `Task completed per user ruling (${args.reason.trim()}).`,
         };
       }
       if (rep.status === "READY" && !args.inspectOnly) {
-        markTaskCompleted(recordPath);
+        const completed = markTaskCompleted(recordPath);
+        await syncCoordinatorTaskMetadata(
+          context?.paseo,
+          completed,
+          recordPath,
+          false,
+        );
       }
       notifyTaskChanges();
       return {
