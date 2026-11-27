@@ -1178,10 +1178,10 @@ test("UI components: WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, and
   assert.match(singleText, /为 todo\.mjs 新增 clear 子命令并补充测试/);
   assert.match(singleText, /主控 Coordinator/);
   assert.match(singleText, /方案审查 #1/);
-  assert.doesNotMatch(
+  assert.match(
     singleText,
     /返回主对话/,
-    "current chat acting directly as coordinator must not show redundant Back to main chat button",
+    "Team Graph workspace tab should offer a one-click Back to main chat button",
   );
 
   // Click reviewer node tile to open NodeInspector and verify findings + Open chat action.
@@ -1360,6 +1360,38 @@ test("UI components: WorkspaceConversationGraphPanel, GlobalTeamGraphScreen, and
   assert.match(decidedText, /方案审查 #1/);
   assert.match(decidedText, /验收门禁/);
   assert.doesNotMatch(decidedText, /评估复杂度中/);
+
+  // 6. "返回主对话" button appears in the Team Graph header even when main chat IS coordinator
+  // (no legacy launcherAgentId) and navigates straight back to the coordinator conversation.
+  const backToMainBtn = findNodes(
+    uiSandbox.renderer.root,
+    (n) =>
+      n.type === "Pressable" &&
+      String(n.props.accessibilityLabel ?? "") === "返回主对话",
+  )[0];
+  assert.ok(backToMainBtn, 'header must render "返回主对话" button');
+  const openCountBefore = openedAgents.length;
+  (backToMainBtn.props.onPress as () => void)();
+  assert.equal(openedAgents.length, openCountBefore + 1);
+  assert.equal(openedAgents.at(-1)?.agentId, "todo-coord-1");
+
+  // Also works in empty state when viewerAgentId is known.
+  uiSandbox.emitSubscription("paseo_team.conversation.watch", {
+    mode: "empty",
+    viewerAgentId: "todo-coord-1",
+    rootAgentId: "todo-coord-1",
+    task: null,
+  });
+  uiSandbox.renderer.rerender();
+  const emptyBackBtn = findNodes(
+    uiSandbox.renderer.root,
+    (n) =>
+      n.type === "Pressable" &&
+      String(n.props.accessibilityLabel ?? "") === "返回主对话",
+  )[0];
+  assert.ok(emptyBackBtn, 'empty state must render "返回主对话" button');
+  (emptyBackBtn.props.onPress as () => void)();
+  assert.equal(openedAgents.at(-1)?.agentId, "todo-coord-1");
 });
 
 test("UI timeline renderer: collapses /paseo-team kickoff prompts into compact goal bubbles with expand toggle while leaving normal messages untouched", async () => {

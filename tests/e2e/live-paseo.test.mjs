@@ -650,10 +650,12 @@ async function runLiveScenario({
       } catch {
         // Best effort
       }
+      // Remove ephemeral E2E task state directory so user's Team Graph & History stay clean.
+      rmSync(path.dirname(recordPath), { recursive: true, force: true });
     }
     stopSessions([...ownedSessionIds]);
-    if (launcherInfo?.ephemeral && launcherInfo.agentId) {
-      await client.archiveAgent(launcherInfo.agentId).catch(() => {});
+    for (const sid of ownedSessionIds) {
+      await client.archiveAgent(sid).catch(() => {});
     }
     await client.close();
   }

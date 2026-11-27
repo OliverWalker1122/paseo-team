@@ -1026,6 +1026,12 @@ function TaskFlowCanvas({
 
   const isNativeTree = task.sourceKind === "native_subagents";
   const isRoutingPending = !isNativeTree && task.routeDecided === false;
+  const mainChatAgentId =
+    task.launcherAgentId ||
+    task.coordinatorAgentId ||
+    task.stages.find((s) => s.stageId === "coordinator")?.nodes[0]?.agentId ||
+    viewerAgentId ||
+    undefined;
   const status = taskStatusInfo(lang, task);
   const metaParts = [
     isNativeTree
@@ -1069,12 +1075,17 @@ function TaskFlowCanvas({
       {/* Header: goal + quiet meta line */}
       <View style={{ gap: 6 }}>
         <View
-          style={{ flexDirection: "row", alignItems: "flex-start", gap: 12 }}
+          style={{
+            flexDirection: "row",
+            flexWrap: compact ? "wrap" : "nowrap",
+            alignItems: "flex-start",
+            gap: 12,
+          }}
         >
           <Pressable
             accessibilityRole="button"
             onPress={() => setGoalExpanded((prev) => !prev)}
-            style={{ flex: 1, minWidth: 0 }}
+            style={{ flex: 1, minWidth: compact ? "100%" : 0 }}
           >
             {showGoal ? (
               <Text
@@ -1111,72 +1122,118 @@ function TaskFlowCanvas({
               </Text>
             )}
           </Pressable>
-          {task.recordPath &&
-          !isNativeTree &&
-          task.lifecycleStatus !== "completed" &&
-          task.lifecycleStatus !== "abandoned" ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t.abandonTask}
-              disabled={controlling}
-              onPress={() => {
-                if (!confirmAbandon) {
-                  setConfirmAbandon(true);
-                  return;
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 6,
+              flexShrink: 0,
+            }}
+          >
+            {showGoal && mainChatAgentId && onOpenAgent ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t.backToMainChat}
+                onPress={() =>
+                  onOpenAgent(mainChatAgentId, task.coordinatorServerId)
                 }
-                setConfirmAbandon(false);
-                void handleControl("abandon_task");
-              }}
-              style={({ hovered }: HoverState) => ({
-                paddingHorizontal: 9,
-                paddingVertical: 5,
-                borderRadius: 6,
-                backgroundColor: hovered
-                  ? theme.colors.surface2
-                  : "transparent",
-              })}
-            >
-              <Text
-                style={{
-                  color: confirmAbandon
-                    ? theme.colors.statusDanger
-                    : theme.colors.foregroundMuted,
-                  fontSize: 12,
+                style={({ hovered }: HoverState) => ({
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 5,
+                  paddingHorizontal: 10,
+                  paddingVertical: 5,
+                  borderRadius: 6,
+                  borderWidth: 1,
+                  borderColor: theme.colors.border,
+                  backgroundColor: hovered
+                    ? theme.colors.surface2
+                    : theme.colors.surface1,
+                })}
+              >
+                <Icon
+                  name="ArrowLeft"
+                  size={13}
+                  color={theme.colors.foreground}
+                />
+                <Text
+                  style={{
+                    color: theme.colors.foreground,
+                    fontSize: 12,
+                    fontWeight: "500",
+                  }}
+                >
+                  {t.backToMainChat}
+                </Text>
+              </Pressable>
+            ) : null}
+            {task.recordPath &&
+            !isNativeTree &&
+            task.lifecycleStatus !== "completed" &&
+            task.lifecycleStatus !== "abandoned" ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t.abandonTask}
+                disabled={controlling}
+                onPress={() => {
+                  if (!confirmAbandon) {
+                    setConfirmAbandon(true);
+                    return;
+                  }
+                  setConfirmAbandon(false);
+                  void handleControl("abandon_task");
                 }}
+                style={({ hovered }: HoverState) => ({
+                  paddingHorizontal: 9,
+                  paddingVertical: 5,
+                  borderRadius: 6,
+                  backgroundColor: hovered
+                    ? theme.colors.surface2
+                    : "transparent",
+                })}
               >
-                {confirmAbandon ? t.abandonConfirm : t.abandonTask}
-              </Text>
-            </Pressable>
-          ) : null}
-          {onOpenConfig ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t.configureTeam}
-              onPress={onOpenConfig}
-              style={({ hovered }: HoverState) => ({
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 5,
-                paddingHorizontal: 9,
-                paddingVertical: 5,
-                borderRadius: 6,
-                backgroundColor: hovered
-                  ? theme.colors.surface2
-                  : "transparent",
-              })}
-            >
-              <Icon
-                name="Settings2"
-                size={13}
-                color={theme.colors.foregroundMuted}
-              />
-              <Text
-                style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}
+                <Text
+                  style={{
+                    color: confirmAbandon
+                      ? theme.colors.statusDanger
+                      : theme.colors.foregroundMuted,
+                    fontSize: 12,
+                  }}
+                >
+                  {confirmAbandon ? t.abandonConfirm : t.abandonTask}
+                </Text>
+              </Pressable>
+            ) : null}
+            {onOpenConfig ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t.configureTeam}
+                onPress={onOpenConfig}
+                style={({ hovered }: HoverState) => ({
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 5,
+                  paddingHorizontal: 9,
+                  paddingVertical: 5,
+                  borderRadius: 6,
+                  backgroundColor: hovered
+                    ? theme.colors.surface2
+                    : "transparent",
+                })}
               >
-                {t.configureTeam}
-              </Text>
-            </Pressable>
-          ) : null}
+                <Icon
+                  name="Settings2"
+                  size={13}
+                  color={theme.colors.foregroundMuted}
+                />
+                <Text
+                  style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}
+                >
+                  {t.configureTeam}
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
         </View>
 
         {showGoal ? (
@@ -1475,35 +1532,6 @@ function SingleConversationGraphView({
         gap: 14,
       }}
     >
-      {payload.mode === "team_task" &&
-      payload.task?.launcherAgentId &&
-      payload.task.launcherAgentId !== payload.viewerAgentId &&
-      onOpenAgent ? (
-        <Pressable
-          accessibilityRole="button"
-          onPress={() =>
-            onOpenAgent(
-              payload.task!.launcherAgentId!,
-              payload.task!.coordinatorServerId,
-            )
-          }
-          style={{
-            alignSelf: "flex-start",
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 4,
-            paddingHorizontal: 10,
-            paddingVertical: 5,
-            borderRadius: 999,
-            backgroundColor: theme.colors.surface2,
-          }}
-        >
-          <Icon name="ChevronLeft" size={14} color={theme.colors.foreground} />
-          <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>
-            {t.backToMainChat}
-          </Text>
-        </Pressable>
-      ) : null}
       {payload.task ? (
         <TaskFlowCanvas
           theme={theme}
@@ -1530,7 +1558,9 @@ function SingleConversationGraphView({
               onOpenConfig={onOpenConfig}
             />
           ) : (
-            <View style={{ gap: 6, paddingVertical: 24, alignItems: "center" }}>
+            <View
+              style={{ gap: 10, paddingVertical: 24, alignItems: "center" }}
+            >
               <Text
                 style={{
                   color: theme.colors.foreground,
@@ -1550,6 +1580,42 @@ function SingleConversationGraphView({
               >
                 {t.emptyDesc}
               </Text>
+              {payload.viewerAgentId && onOpenAgent ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={t.backToMainChat}
+                  onPress={() => onOpenAgent(payload.viewerAgentId!)}
+                  style={({ hovered }: HoverState) => ({
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 5,
+                    marginTop: 4,
+                    paddingHorizontal: 12,
+                    paddingVertical: 6,
+                    borderRadius: 6,
+                    borderWidth: 1,
+                    borderColor: theme.colors.border,
+                    backgroundColor: hovered
+                      ? theme.colors.surface2
+                      : theme.colors.surface1,
+                  })}
+                >
+                  <Icon
+                    name="ArrowLeft"
+                    size={13}
+                    color={theme.colors.foreground}
+                  />
+                  <Text
+                    style={{
+                      color: theme.colors.foreground,
+                      fontSize: 12,
+                      fontWeight: "500",
+                    }}
+                  >
+                    {t.backToMainChat}
+                  </Text>
+                </Pressable>
+              ) : null}
             </View>
           )}
         </>
@@ -1592,17 +1658,63 @@ function LauncherTaskTree({
 
   return (
     <View style={{ gap: 10 }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Icon name="MessageSquare" size={14} color={theme.colors.foreground} />
-        <Text
-          style={{
-            color: theme.colors.foreground,
-            fontSize: 14,
-            fontWeight: "700",
-          }}
-        >
-          {t.launcherRoot(tasks.length)}
-        </Text>
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Icon
+            name="MessageSquare"
+            size={14}
+            color={theme.colors.foreground}
+          />
+          <Text
+            style={{
+              color: theme.colors.foreground,
+              fontSize: 14,
+              fontWeight: "700",
+            }}
+          >
+            {t.launcherRoot(tasks.length)}
+          </Text>
+        </View>
+        {viewerAgentId && onOpenAgent ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t.backToMainChat}
+            onPress={() =>
+              onOpenAgent(viewerAgentId, tasks[0]?.coordinatorServerId)
+            }
+            style={({ hovered }: HoverState) => ({
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 5,
+              paddingHorizontal: 10,
+              paddingVertical: 5,
+              borderRadius: 6,
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              backgroundColor: hovered
+                ? theme.colors.surface2
+                : theme.colors.surface1,
+            })}
+          >
+            <Icon name="ArrowLeft" size={13} color={theme.colors.foreground} />
+            <Text
+              style={{
+                color: theme.colors.foreground,
+                fontSize: 12,
+                fontWeight: "500",
+              }}
+            >
+              {t.backToMainChat}
+            </Text>
+          </Pressable>
+        ) : null}
       </View>
       {shown.map((task) => {
         const open = expanded === task.taskId;
