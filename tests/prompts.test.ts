@@ -54,6 +54,8 @@ test("coordinator guide and kickoff prompt use zero state-machine tools and embe
       assert.match(guide, /send_agent_prompt/);
       assert.match(guide, /\.worktrees/);
       assert.match(guide, /git commit/);
+      assert.match(guide, /get_agent_activity/);
+      assert.match(guide, /git diff --stat/);
       assert.ok(guide.includes(getSafetyRulesText(lang)));
       // Must NOT mention deleted v6 state-machine tools or actions.
       assert.doesNotMatch(guide, /set_route|task\.json|paseo_team\(/);

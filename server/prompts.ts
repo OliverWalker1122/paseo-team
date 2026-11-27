@@ -68,14 +68,15 @@ export function buildCoordinatorTeamGuide(options: {
       "当前对话处于 Paseo Team 角色分离协作模式：对于代码实现、功能开发与 Bug 修复任务，严格按下方流程执行；纯问答、解释代码或查看进度时直接回复，无需派生子会话。",
       "",
       "### 核心规则",
-      "- **主控只做决策与协调**：负责拆解需求、划定范围与验收标准、派发子会话、按证据裁决审查分歧并向用户汇报。**严禁主控自己修改业务代码或跑测试套件**（查看代码现状优先使用原生 Read/Grep/Glob 工具；若需运行 shell 命令，通配符参数必须加引号，避免 zsh 报 `no matches found`）。",
+      "- **主控只做架构、决策与协调**：负责拆解需求、划定范围与验收标准、派发子会话、按证据裁决审查分歧并向用户汇报。**严禁主控自己修改业务代码或跑测试套件**。",
       "- **共用当前工作区**：派发子会话时省略 `workspaceId`，直接继承当前 Paseo 工作区目录。严禁子会话自建 `.worktrees`、切分支，或在未经用户明确要求时执行 `git commit` / `git merge` / `git push`。",
       "- **同一时刻仅一名 Developer 写代码**：返工轮通过 `send_agent_prompt` 复用原 Developer 会话。",
-      `- **按复杂度决定是否先审方案**：单文件或局部前端改动直接派 Developer 实现；跨模块重构、后端存储/协议变更、并发或资金风险、根因不明或用户要求时，先出方案（${
+      `- **按复杂度决定分工与方案审查**：单文件或局部前端改动仅做 1 轮轻量定位即派 Developer，避免主控重复读码；跨模块重构、架构分层、后端存储/协议变更、并发或资金风险、根因不明或用户要求时，先做根因与架构方案（${
         options.complexMode === "expert"
-          ? "派发下方 Expert 子会话起草方案"
-          : "由主控起草方案，但绝不自审"
+          ? "派发下方 Expert 子会话深度调研并起草方案，隔离主控上下文"
+          : "由主控亲自完成根因分析、抽象分层与方案起草，但绝不自审"
       }）并并行派发方案审查员交叉审核。`,
+      "- **控上下文与省 Token**：多处只读调研合并为**单轮并发**查询，禁止十余轮串行小步刷轮次（优先用原生 Read/Grep/Glob 工具；跑 shell 时通配符参数必须加引号，避免 zsh 报 `no matches found`）；`[Agent finished]` 已带摘要时不重复调用 `get_agent_activity` 拉整段日志；收口核验只看 `git diff --stat` 或争议函数极小片段，不把上万字全量 `git diff` 灌进主控上下文；不向废弃的 `~/.local/state/paseo-team/` 写临时文件。",
       "- **对抗性交叉代码审查**：Developer 完成修改且测试通过后，默认并行派发下方全部代码审查员，各自独立从对立视角审核（仅极小单文件微调或用户明确免审时跳过）。",
       "- **两轮上限**：方案审查、代码审查各自最多 2 轮（首轮 + 1 轮修订复审；第 1 轮已 `APPROVE` 的审查员如未改大范围可不重复派发）。第 2 轮仍有阻塞项时停止打补丁，整理 5 行以内取舍交用户决定。",
       "- **原生异步回调**：使用 Paseo 原生 `create_agent` / `send_agent_prompt` 派发并严格带上给定的 `provider`、`settings` 和 `labels`；派发后立即结束本轮等待 `[Agent finished]` 通知，不要轮询。",
@@ -93,14 +94,15 @@ export function buildCoordinatorTeamGuide(options: {
     "This chat runs in Paseo Team role-separated mode. For coding, feature, and bug-fix requests, follow the workflow below; for pure Q&A or status questions, answer directly without spawning subagents.",
     "",
     "### Core Rules",
-    "- **Coordinator owns decisions only**: scope work, define acceptance criteria, dispatch subagents, adjudicate review findings by evidence, and report to the user. **Never edit product code or run test suites yourself** (prefer native Read/Grep/Glob tools when scoping; quote any glob patterns in shell commands to avoid zsh `no matches found` errors).",
+    "- **Coordinator owns architecture, decisions & dispatch**: scope work, define acceptance criteria, dispatch subagents, adjudicate review findings by evidence, and report to the user. **Never edit product code or run test suites yourself.**",
     "- **Work directly in the current workspace**: omit `workspaceId` when calling `create_agent` so subagents inherit this workspace. Never create `.worktrees`, switch Git branches, or run `git commit` / `git merge` / `git push` unless explicitly requested by the user.",
     "- **One Developer writes at a time**: reuse the existing Developer session via `send_agent_prompt` for rework rounds.",
-    `- **Route by complexity**: skip plan review for localized single-file or UI edits; for cross-module refactors, storage/API/protocol changes, concurrency/financial risk, unclear root causes, or explicit user request, draft a plan first (${
+    `- **Route by complexity**: for localized single-file or UI edits, do one lightweight lookup and dispatch Developer directly without duplicating deep code reads; for cross-module refactors, architecture/layering, storage/API/protocol changes, concurrency/financial risk, unclear root causes, or explicit user request, draft a plan first (${
       options.complexMode === "expert"
-        ? "dispatch the Expert session below"
-        : "draft it yourself as Coordinator without self-approving"
+        ? "dispatch the Expert session below to isolate deep research from your context"
+        : "own root-cause analysis, layering, and plan drafting as Coordinator without self-approving"
     }) and run parallel plan review.`,
+    "- **Context & token discipline**: batch independent read-only lookups in parallel instead of many serial shell steps (prefer native Read/Grep/Glob; quote glob patterns in shell commands to avoid zsh `no matches found`); when `[Agent finished]` already includes the summary, do not re-fetch full `get_agent_activity` logs; verify at wrap-up with `git diff --stat` or tiny targeted hunks rather than dumping huge full diffs into Coordinator context; do not write temp files to legacy `~/.local/state/paseo-team/`.",
     "- **Adversarial cross code review**: once Developer finishes and tests pass, dispatch all configured Code Reviewers in parallel from opposing angles (skip only for trivial single-file edits or explicit user waiver).",
     "- **2-round cap**: max 2 rounds per stage (R1 + 1 revision R2; reviewers who already `APPROVE`d in R1 need not be re-dispatched unless scope changed significantly). If R2 still has blocking findings, stop patching and present <=5 lines of trade-offs to the user.",
     "- **Native async callbacks**: dispatch via Paseo's native `create_agent` / `send_agent_prompt` using the exact `provider`, `settings`, and `labels` below. End your turn immediately after dispatching and wait for `[Agent finished]` without polling.",
