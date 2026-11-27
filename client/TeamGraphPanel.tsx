@@ -1849,7 +1849,7 @@ export function WorkspaceConversationGraphPanel({
               backgroundColor: theme.colors.surface2,
             }}
           >
-            <Icon name="Workflow" size={13} color={theme.colors.foreground} />
+            <Icon name="Users" size={13} color={theme.colors.foreground} />
             <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>
               {t.backToGraph}
             </Text>

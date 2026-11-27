@@ -102,7 +102,7 @@ export function registerTeamComposerPills(
             agentId,
             button: {
               title: label,
-              icon: "Workflow",
+              icon: "Users",
               label,
               behavior: {
                 kind: "action",

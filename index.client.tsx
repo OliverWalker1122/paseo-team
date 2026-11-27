@@ -34,7 +34,7 @@ function TeamSidebarHeaderItem({
 }: PluginSidebarItemProps) {
   return (
     <SidebarRow
-      icon="Workflow"
+      icon="Users"
       active={currentScreen?.screenId === "team-center"}
       onPress={() => openScreen({ screenId: "team-center" })}
     />
@@ -75,7 +75,7 @@ function TeamWorkspaceBadge({ workspaceId }: PluginWorkspaceRowBadgeItemProps) {
   if (matchedTask.runningCount > 0) {
     return (
       <WorkspaceRowBadge
-        icon="Workflow"
+        icon="Users"
         label={t.badgeRunning(matchedTask.runningCount)}
         tone="info"
       />
@@ -107,7 +107,7 @@ export default function contribute(client: PluginClientContext) {
     client.addSettingsScreen({
       id: "team-settings",
       title: titles.message("team"),
-      icon: "Workflow",
+      icon: "Users",
       Component: SettingsTeamConfigSurface,
     }),
   );
@@ -116,7 +116,7 @@ export default function contribute(client: PluginClientContext) {
     client.addWorkspacePanel({
       id: "team-graph",
       title: titles.message("teamGraph"),
-      icon: "Workflow",
+      icon: "Users",
       Component: WorkspaceConversationGraphPanel,
     }),
   );
@@ -125,7 +125,7 @@ export default function contribute(client: PluginClientContext) {
     client.addWorkspaceRowBadgeItem({
       id: "team-badge",
       title: titles.message("teamStatus"),
-      icon: "Workflow",
+      icon: "Users",
       Component: TeamWorkspaceBadge,
     }),
   );
@@ -179,7 +179,7 @@ export default function contribute(client: PluginClientContext) {
     client.addCommandCenterItem({
       id: "open-team-agent-graph",
       title: titles.message("openGraph"),
-      icon: "Workflow",
+      icon: "Users",
       keywords: ["team", "graph", "pipeline", "agents", "subagents", "状态图"],
       context: "agent",
       onSelect({ workspace, agent, openPanel }) {

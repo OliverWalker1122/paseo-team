@@ -1698,7 +1698,7 @@ test("UI regression: composer Team toggle handles new-workspace/draft metadata, 
   )[0];
   assert.ok(toggleNode, "expected Toggle rendered on new-workspace");
   assert.equal(toggleNode.props.title, "团队模式");
-  assert.equal(toggleNode.props.icon, "Workflow");
+  assert.equal(toggleNode.props.icon, "Users");
   assert.equal(toggleNode.props.value, false);
 
   await (

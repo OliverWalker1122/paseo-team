@@ -109,7 +109,7 @@ export function TeamKickoffBubble({
               flexShrink: 1,
             }}
           >
-            <Icon name="Workflow" size={13} color={theme.colors.accent} />
+            <Icon name="Users" size={13} color={theme.colors.accent} />
             <Text
               style={{
                 color: theme.colors.accent,

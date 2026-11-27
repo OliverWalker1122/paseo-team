@@ -47,7 +47,7 @@ export function TeamComposerToggle() {
   return (
     <Toggle
       title={t.composerTeamToggle}
-      icon="Workflow"
+      icon="Users"
       value={active}
       onValueChange={async ({ value }) => {
         if (isNewChat) {
