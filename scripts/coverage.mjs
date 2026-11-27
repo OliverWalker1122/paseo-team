@@ -8,11 +8,9 @@ const BADGE_PATH = path.join(REPO_ROOT, ".github", "badges", "coverage.svg");
 
 const TEST_FILES = [
   "tests/check.test.ts",
-  "tests/task-store.test.ts",
-  "tests/quality-gate.test.ts",
-  "tests/turn-observer.test.ts",
-  "tests/handoff.test.ts",
+  "tests/config-store.test.ts",
   "tests/prompts.test.ts",
+  "tests/handlers.test.ts",
   "tests/client-ui.test.ts",
   "tests/hooks.integration.test.ts",
 ];

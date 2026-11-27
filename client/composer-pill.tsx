@@ -2,7 +2,7 @@ import type {
   PluginButtonRegistration,
   PluginClientContext,
 } from "@getpaseo/plugin/client";
-import { watchTasksSubscription } from "../shared/contracts.ts";
+import { TEAM_ENABLED_METADATA_KEY } from "../shared/contracts.ts";
 import { UI_TEXT } from "../shared/i18n.ts";
 import { toUiLanguage } from "./locale.ts";
 import { focusWorkspaceGraphAgent } from "./TeamGraphPanel.tsx";
@@ -13,15 +13,20 @@ interface TrackedAgent {
   parentAgentId: string | null;
   status: string;
   requiresAttention: boolean;
+  isTeamEnabled: boolean;
   background: boolean;
 }
 
+/**
+ * Pure Paseo live-state composer pill: derives status solely from Paseo's
+ * real-time agent stream (supporting both `parentAgentId` and
+ * `labels["paseo.parent-agent-id"]`), with zero secondary state machine.
+ */
 export function registerTeamComposerPills(
   client: PluginClientContext,
 ): () => void {
   const pills = new Map<string, PluginButtonRegistration>();
   const agents = new Map<string, TrackedAgent>();
-  const teamLabelByAgent = new Map<string, string>();
   const currentLang = () => toUiLanguage(client.i18n.locale);
   const lifetime = new AbortController();
 
@@ -31,7 +36,7 @@ export function registerTeamComposerPills(
     while (cur && !seen.has(cur)) {
       seen.add(cur);
       const a = agents.get(cur);
-      if (!a?.parentAgentId) break;
+      if (!a?.parentAgentId || !agents.has(a.parentAgentId)) break;
       cur = a.parentAgentId;
     }
     return cur;
@@ -40,9 +45,7 @@ export function registerTeamComposerPills(
   const computeLabelForAgent = (agentId: string): string | null => {
     const t = UI_TEXT[currentLang()];
     const rootId = findRootId(agentId);
-    const teamDirect =
-      teamLabelByAgent.get(agentId) ?? teamLabelByAgent.get(rootId);
-    if (teamDirect) return teamDirect;
+    const root = agents.get(rootId);
 
     let childCount = 0;
     let runningChildren = 0;
@@ -63,16 +66,10 @@ export function registerTeamComposerPills(
       }
     }
 
-    if (attentionChildren > 0) {
-      return t.pillAttention(attentionChildren);
-    }
-    if (runningChildren > 0) {
-      return t.pillRunning(runningChildren);
-    }
-    if (childCount > 0) {
-      return t.pillSubagents(childCount);
-    }
-    // Hide the pill on standalone chats with neither a team task nor subagents.
+    if (attentionChildren > 0) return t.pillAttention(attentionChildren);
+    if (runningChildren > 0) return t.pillRunning(runningChildren);
+    if (childCount > 0) return t.pillSubagents(childCount);
+    if (root?.isTeamEnabled) return t.pillDefault;
     return null;
   };
 
@@ -89,10 +86,7 @@ export function registerTeamComposerPills(
         continue;
       }
       if (existing) {
-        existing.update({
-          label,
-          title: label,
-        });
+        existing.update({ label, title: label });
       } else {
         pills.set(
           agentId,
@@ -126,71 +120,12 @@ export function registerTeamComposerPills(
     agents.clear();
   };
 
-  const subHandle = client.subscribe(
-    watchTasksSubscription,
-    { includeAllProjects: true, language: currentLang() },
-    (event) => {
-      const t = UI_TEXT[currentLang()];
-      teamLabelByAgent.clear();
-      const ordered = [...event.tasks].sort((a, b) => {
-        const aOpen =
-          a.lifecycleStatus !== "completed" && a.lifecycleStatus !== "abandoned"
-            ? 1
-            : 0;
-        const bOpen =
-          b.lifecycleStatus !== "completed" && b.lifecycleStatus !== "abandoned"
-            ? 1
-            : 0;
-        return bOpen - aOpen;
-      });
-      for (const task of ordered) {
-        let badge = `Team · ${task.teamName}`;
-        if (task.lifecycleStatus === "abandoned") {
-          badge = t.pillDefault;
-        } else if (task.circuitBroken) {
-          badge = t.pillBreaker;
-        } else if (task.attentionCount > 0) {
-          badge = t.pillAttention(task.attentionCount);
-        } else if (task.runningCount > 0) {
-          badge = t.pillRunning(task.runningCount);
-        } else if (task.lifecycleStatus === "completed") {
-          badge = t.pillDone;
-        } else if (task.codeReviewRound > 0) {
-          badge = `Team · R${task.codeReviewRound}/2`;
-        } else if (task.planReviewRound > 0) {
-          badge = `Team · Plan R${task.planReviewRound}/2`;
-        }
-
-        if (
-          task.coordinatorAgentId &&
-          !teamLabelByAgent.has(task.coordinatorAgentId)
-        ) {
-          teamLabelByAgent.set(task.coordinatorAgentId, badge);
-        }
-        if (
-          task.launcherAgentId &&
-          !teamLabelByAgent.has(task.launcherAgentId)
-        ) {
-          teamLabelByAgent.set(task.launcherAgentId, badge);
-        }
-        for (const st of task.stages) {
-          for (const n of st.nodes) {
-            if (n.agentId && !teamLabelByAgent.has(n.agentId)) {
-              teamLabelByAgent.set(n.agentId, `${n.label} · ${t.pillDefault}`);
-            }
-          }
-        }
-      }
-      syncAllPills();
-    },
-    { signal: lifetime.signal },
-  );
-
   const recordAgent = (raw: {
     id: string;
     workspaceId?: string | null;
     parentAgentId?: string | null;
     labels?: Record<string, string> | null;
+    metadata?: Record<string, unknown> | null;
     status?: string;
     pendingPermissions?: unknown[];
     background?: boolean;
@@ -204,6 +139,11 @@ export function registerTeamComposerPills(
       (typeof raw.parentAgentId === "string" && raw.parentAgentId) ||
       (typeof labelParent === "string" && labelParent) ||
       null;
+    const isTeamEnabled = Boolean(
+      raw.metadata &&
+      typeof raw.metadata === "object" &&
+      raw.metadata[TEAM_ENABLED_METADATA_KEY] === true,
+    );
     agents.set(raw.id, {
       id: raw.id,
       workspaceId: raw.workspaceId,
@@ -212,6 +152,7 @@ export function registerTeamComposerPills(
       requiresAttention:
         Array.isArray(raw.pendingPermissions) &&
         raw.pendingPermissions.length > 0,
+      isTeamEnabled,
       background: Boolean(raw.background),
     });
   };
@@ -249,7 +190,6 @@ export function registerTeamComposerPills(
 
   return () => {
     lifetime.abort();
-    void subHandle.release();
     removeAll();
   };
 }

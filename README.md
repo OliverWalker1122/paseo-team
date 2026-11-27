@@ -8,29 +8,30 @@ English | [简体中文](./README.zh-CN.md)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg)](./package.json)
 [![Paseo](https://img.shields.io/badge/paseo-%3E%3D0.17.3-informational)](https://paseo.sh)
 
-A [Paseo](https://paseo.sh) plugin that turns one chat into a small engineering team. Your open chat acts as the coordinator that scopes the work and makes the calls, a developer writes the code, and two code reviewers check it from opposing angles before a quality gate signs off.
+A lightweight [Paseo](https://paseo.sh) plugin for role-separated multi-agent coding: pick models per role once, toggle **Team mode** in any composer (including New Workspace), and inspect the live agent graph powered directly by Paseo's native sessions.
 
 ## Why
 
-When one agent writes code and then judges its own work, it tends to approve its own blind spots. Paseo Team splits those jobs across separate agent sessions, gives each one only the permissions it needs, and records every verdict as evidence you can inspect later.
+When one agent writes code and judges its own work, it often misses its own blind spots. At the same time, heavy plugin-side state machines drift out of sync with the host app. Paseo Team keeps things simple:
+
+- **Single source of truth**: Paseo's live agent tree is the only state. There is no local `task.json` state machine, no stale workspace lock, and no regex parsing of model replies.
+- **Native Paseo orchestration**: Your open chat acts as Coordinator and dispatches Developer and Reviewers strictly through Paseo's native `create_agent` / `send_agent_prompt` callbacks.
+- **Direct model setup**: Configure provider, model, and reasoning effort per role once in **Team → Setup**.
 
 ## Features
 
-- **Separated roles.** Your current chat acts directly as the coordinator (keeping all prior discussion context) and dispatches one Developer at a time. Reviewers do not edit product code, while remaining free to run tests or reproduction checks to verify edge cases.
-- **Native Paseo single-channel communication.** Subagents work and report strictly through Paseo's native `create_agent` / `send_agent_prompt` / `notifyOnFinish` replies with zero custom member handoff tools. The plugin passively observes completed turns via Paseo's timeline API to update the live graph and review history, eliminating permission-popup loops and reminder deadlocks.
-- **Cross review.** Two reviewers examine each change independently from opposing angles (requirements and real edge cases vs. architecture and simpler alternatives). Neither sees the other's verdict.
-- **Two-round limit.** If review still fails after two rounds, the team stops and asks you instead of patching endlessly.
-- **Quality gate.** A task completes only when four evidence checks pass, and a blocked gate lists exactly what is missing and from whom (see [Quality gate](#quality-gate)).
-- **Your workspace, your commits.** Agents work in the Paseo workspace you opened: a project folder or a Paseo-managed worktree. The plugin never creates hidden worktrees and never commits or merges, so every edit shows up in Paseo's Changes panel and you decide when to commit.
-- **Pick models per role.** Choose provider, model and reasoning effort for each role. A task will not start while a role it needs has no model; a reviewer can be turned off instead.
-- **Single live graph tab per workspace.** Running `/paseo-team` or clicking the status pill reuses one Team graph tab in the workspace instead of opening duplicate tabs, and hides the pill on chats without team tasks or subagents. History keeps every task, including each review round and its findings.
-- **English and Chinese.** The UI follows the Paseo app language. Agent prompts follow the language of your task goal.
+- **Composer Team toggle everywhere**: Click the **Users** (`Team mode`) toggle in the composer toolbar on **New Workspace**, **draft chats**, or **existing chats** — or run `/paseo-team <goal>` directly.
+- **Separated roles**: Coordinator owns scope, acceptance criteria, dispatch, and adjudication. Only Developer edits product files; Reviewers run tests or reproduction checks without modifying code.
+- **Adversarial cross review**: Two reviewers check each change independently from opposing angles (spec & edge cases vs. architecture & simplicity), capped at 2 rounds before handing trade-offs back to you.
+- **Your workspace, your commits**: Subagents inherit your open Paseo workspace (local checkout or Paseo worktree) without hidden `.worktrees` or unsolicited commits.
+- **Live agent graph**: One shared **Team graph** tab per workspace shows every live subagent wave directly from Paseo, with one-click session jump and a **Back to main chat** button.
+- **English and Chinese**: UI follows the Paseo app language; agent instructions follow the language of your prompt.
 
 ## Requirements
 
 - Paseo 0.17.3 or later
 - At least one connected agent provider, such as Claude, Codex, Antigravity or Pi
-- Node.js 22.18 or later, only if you want to develop the plugin
+- Node.js 22.18 or later (for plugin development only)
 
 ## Installation
 
@@ -40,7 +41,7 @@ Install from GitHub:
 paseo plugin add git:OliverWalker1122/paseo-team
 ```
 
-Or install from a local clone, which is handy for development:
+Or install from a local clone:
 
 ```bash
 git clone https://github.com/OliverWalker1122/paseo-team.git
@@ -53,73 +54,53 @@ After editing a local clone, run `paseo plugin reload paseo-team`.
 
 ## Usage
 
-1. Open **Team** in the Paseo sidebar and pick a model for each role.
-2. In any chat, describe the task:
-
-   ```text
-   /paseo-team Add a clear command to todo.mjs that removes finished items, with review
-   ```
-
-3. Follow progress from the **Team graph** button on the chat composer. Finished tasks stay under **Team → History**.
+1. Open **Team → Setup** in the Paseo sidebar and pick a model for each role.
+2. Start a team session in either way:
+   - On **New Workspace** or a **draft chat**: turn on the **Team mode** (`Users`) toggle in the composer toolbar and send your task directly.
+   - In an **existing chat**: run `/paseo-team <task goal>` (or click the **Team mode** toggle).
+3. Click the **Team** pill above the composer to inspect the live agent graph and jump between sessions.
 
 ### Commands
 
 | Command                   | What it does                                         |
 | ------------------------- | ---------------------------------------------------- |
-| `/paseo-team <task goal>` | Starts a team task with this chat as the coordinator |
-| `/paseo-team setup`       | Opens model and preset setup                         |
-| `/paseo-team status`      | Opens the workspace team graph                       |
+| `/paseo-team <task goal>` | Starts a team workflow with this chat as coordinator |
+| `/paseo-team setup`       | Opens role model and preset setup                    |
+| `/paseo-team status`      | Opens the workspace live team graph                  |
 
-### Phrases you can add to the goal
+### Optional phrases in the goal
 
-| Phrase              | Effect                                     |
-| ------------------- | ------------------------------------------ |
-| `with review`       | Always run code review                     |
-| `plan review`       | Review the plan before any code is written |
-| `no review`         | Skip code review and record the reason     |
-| `expert mode`       | A dedicated expert session writes the plan |
-| `simple mode`       | The coordinator writes the plan itself     |
-| `use preset <name>` | Use a preset other than the default        |
+| Phrase              | Effect                                    |
+| ------------------- | ----------------------------------------- |
+| `with review`       | Require code review                       |
+| `plan review`       | Require plan review before implementation |
+| `no review`         | Skip review for this request              |
+| `expert mode`       | Dispatch a dedicated Expert for planning  |
+| `simple mode`       | Coordinator drafts the plan itself        |
+| `use preset <name>` | Use a preset other than the default       |
 
-Chinese equivalents are recognized too; see the [Chinese README](./README.zh-CN.md).
+Chinese equivalents are supported too; see [README.zh-CN.md](./README.zh-CN.md).
 
-Without `with review`, the coordinator decides whether code review is needed; it is told to start one when a change touches more than 5 files, exceeds 200 lines, or affects the architecture.
-
-## How it works
+## Architecture
 
 ```mermaid
 flowchart LR
-  C["Coordinator (current chat)"] --> E["Expert plan (complex tasks only)"]
-  E --> P["Plan review (optional)"]
-  C --> D["Developer"]
+  C["Coordinator (current chat)"] --> E["Expert (complex tasks)"]
+  E --> P["Plan Reviewers (parallel)"]
+  C --> D["Developer (edits workspace + runs tests)"]
   P --> D
-  D --> R1["Code Reviewer #1: requirements and edge cases"]
-  D --> R2["Code Reviewer #2: architecture and simplicity"]
-  R1 --> G["Quality gate"]
-  R2 --> G
+  D --> R1["Code Reviewer #1: spec & edge cases"]
+  D --> R2["Code Reviewer #2: architecture & simplicity"]
 ```
 
-| Role                  | Can edit files  | Job                                                                                  |
-| --------------------- | --------------- | ------------------------------------------------------------------------------------ |
-| Coordinator           | No              | Sets scope and acceptance criteria, dispatches agents, rules on findings, signs off  |
-| Expert (optional)     | Task notes only | Writes the design and root-cause analysis for complex work                           |
-| Developer             | Yes             | Implements changes, runs the full test suite and submits the delivery                |
-| Code Reviewer #1 / #2 | No              | Review from opposing angles; can run tests or reproduction checks to verify findings |
-
-### Quality gate
-
-| Check             | Passes when                                                                         |
-| ----------------- | ----------------------------------------------------------------------------------- |
-| Delivery recorded | The Developer's change summary is on file                                           |
-| CI passed         | The latest full test run passed, and ran after the previous rework round's delivery |
-| Plan review       | Every plan reviewer in the latest round approved, or plan review was not needed     |
-| Code review       | Every reviewer in the latest round approved, or code review was not needed          |
-
-Reviewers that were dispatched but never submitted also block the gate. The gate checks recorded evidence only; it never hashes the workspace, so your own edits or commits do not block it. When a review fails its second round, the task is flagged and the coordinator asks you to decide; **Allow one more round** in the graph grants one more.
+- **Server hooks (2 total)**:
+  - `agent.open.before`: injects role guides for team subagents (zero custom tools), directly injects the resolved role roster + team protocol when Team mode is enabled on a new chat, and provides a tiny read-only `paseo_team_roster` fallback tool on normal chats.
+  - `agent.permission.before`: auto-allows read-only `paseo_team_roster` and native Paseo orchestration calls on team-enabled coordinators.
+- **Graph & pills**: derived 100% live from Paseo's native agent tree (`parentAgentId` and `labels["paseo.parent-agent-id"]`).
 
 ## Configuration
 
-Settings are edited in **Team → Setup** and saved to `~/.config/paseo-team/config.json` (or `$XDG_CONFIG_HOME/paseo-team/config.json`).
+Settings are saved to `~/.config/paseo-team/config.json` (or `$XDG_CONFIG_HOME/paseo-team/config.json`) in schema v5:
 
 ```json
 {
@@ -141,17 +122,10 @@ Settings are edited in **Team → Setup** and saved to `~/.config/paseo-team/con
 }
 ```
 
-- A **preset** is a named set of role models. New tasks use `default` unless the goal names another preset.
-- `"model": "auto"` marks a role with no model yet; a task that needs it refuses to start and names the role. Remove the second code reviewer to run with one.
-- `complexMode` decides who writes the plan for complex tasks: `simple` (the coordinator) or `expert` (a dedicated session).
-
-Task records, CI logs and review records are kept per project under `~/.local/state/paseo-team/` (or `$XDG_STATE_HOME/paseo-team/`).
-
 ## Security and privacy
 
-- Everything stays on your machine. The plugin has no telemetry and makes no network calls of its own.
-- Agents are told never to read `.env` files or dump environment variables. The CI runner sets `SKIP_DOTENV=true` and `DOTENV_CONFIG_PATH=/dev/null` and never writes command arguments to its logs.
-- Having credentials available never authorizes deploying, trading, messaging or changing remote data.
+- Everything stays local on your machine. The plugin has no telemetry and makes no external network calls.
+- All role instructions enforce credential redlines (never read `.env*` or dump environment variables; run checks with `SKIP_DOTENV=true DOTENV_CONFIG_PATH=/dev/null`).
 
 To report a vulnerability, see [SECURITY.md](./SECURITY.md).
 
@@ -160,29 +134,19 @@ To report a vulnerability, see [SECURITY.md](./SECURITY.md).
 ```bash
 npm ci
 npm run ci               # format check, Markdown lint, typecheck, plugin audit, L1 + L2 tests
-npm run test:unit        # L1: unit & prompt contract tests (offline, <1s)
-npm run test:integration # L2: full 5-hook & tool pipeline integration tests (mock Paseo, <1s)
+npm run test:unit        # L1: unit, prompt, handler & client UI tests (offline, <1s)
+npm run test:integration # L2: server hooks, RPCs & subscriptions integration tests (offline, <1s)
 npm run test:coverage    # L1 + L2 with Node native coverage report and 80% line gate
-npm run coverage:badge   # regenerate .github/badges/coverage.svg from measured coverage
-npm run test:e2e         # L3: live Paseo daemon E2E acceptance (opt-in, real providers/models)
+npm run coverage:badge   # regenerate .github/badges/coverage.svg
+npm run test:e2e         # L3: live Paseo daemon E2E smoke test (opt-in)
 npm run format           # apply Prettier
 ```
 
-| Path                                     | Contents                                               |
-| ---------------------------------------- | ------------------------------------------------------ |
-| [paseo-plugin.json](./paseo-plugin.json) | Plugin manifest                                        |
-| [index.client.tsx](./index.client.tsx)   | Client entry: sidebar, screens, panels, commands       |
-| [index.server.ts](./index.server.ts)     | Server entry: RPC handlers, agent hooks, agent tools   |
-| [client/](./client)                      | Setup screen, team graph, history, composer button     |
-| [server/](./server)                      | Task records, quality gate, CI runner, prompts, config |
-| [shared/](./shared)                      | Typed RPC contracts and English/Chinese strings        |
-| [tests/](./tests)                        | Node test runner suites                                |
-
-Client code must stay cross-platform: React Native primitives only, no DOM and no `node:` imports. `npm run check:plugin` enforces this.
+Client code must stay cross-platform (React Native primitives + `@getpaseo/plugin/client/ui` only, no DOM or `node:` imports). `npm run check:plugin` enforces this.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) and our [Code of Conduct](./CODE_OF_CONDUCT.md) first.
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) first.
 
 ## License
 

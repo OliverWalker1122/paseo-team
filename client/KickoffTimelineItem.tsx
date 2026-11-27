@@ -9,7 +9,6 @@ import { useUiLanguage } from "./locale.ts";
 export const KICKOFF_TIMELINE_KIND = "team-kickoff";
 
 export const kickoffTimelineDataSchema = z.object({
-  taskId: z.string(),
   goal: z.string(),
   teamName: z.string(),
   complexMode: z.string(),
@@ -18,12 +17,12 @@ export const kickoffTimelineDataSchema = z.object({
 
 export type KickoffTimelineData = z.output<typeof kickoffTimelineDataSchema>;
 
-const ZH_HEADER = /^\[Team 任务启动\]\s+task_id=`([^`]+)`\r?\n/;
-const EN_HEADER = /^\[Team Kickoff\]\s+task_id=`([^`]+)`\r?\n/;
+const ZH_HEADER = /^\[Team 任务启动\](?:\s+task_id=`[^`]+`)?\r?\n/;
+const EN_HEADER = /^\[Team Kickoff\](?:\s+task_id=`[^`]+`)?\r?\n/;
 
 /**
- * Recognizes plugin-generated `/paseo-team` kickoff user messages so the
- * timeline can render a compact user-goal bubble instead of the full prompt.
+ * Recognizes plugin-generated `/paseo-team` kickoff user messages (both v7 and legacy v6)
+ * so the timeline renders a compact goal bubble instead of the full prompt text.
  */
 export function parseKickoffMessage(text: string): KickoffTimelineData | null {
   if (
@@ -42,7 +41,6 @@ export function parseKickoffMessage(text: string): KickoffTimelineData | null {
       );
     if (!body) return null;
     return {
-      taskId: zhMatch[1],
       goal: body[1].trim(),
       teamName: body[2],
       complexMode: body[3],
@@ -59,7 +57,6 @@ export function parseKickoffMessage(text: string): KickoffTimelineData | null {
       );
     if (!body) return null;
     return {
-      taskId: enMatch[1],
       goal: body[1].trim(),
       teamName: body[2],
       complexMode: body[3],

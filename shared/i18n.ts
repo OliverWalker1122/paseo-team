@@ -13,87 +13,6 @@ export function detectPromptLanguage(
   return fallback;
 }
 
-export const STAGE_LABELS: Record<
-  UiLanguage,
-  Record<
-    | "coordinator"
-    | "expert"
-    | "plan-review"
-    | "development"
-    | "code-review"
-    | "merge-gate",
-    { title: string; subtitle: string }
-  >
-> = {
-  en: {
-    coordinator: {
-      title: "Coordinator",
-      subtitle: "Scope, dispatch & evidence ruling",
-    },
-    expert: {
-      title: "Expert Plan",
-      subtitle: "Architecture & root-cause analysis",
-    },
-    "plan-review": {
-      title: "Plan Review",
-      subtitle: "Cross review before coding",
-    },
-    development: {
-      title: "Development",
-      subtitle: "Implements & runs full CI",
-    },
-    "code-review": {
-      title: "Code Review",
-      subtitle: "Adversarial cross review",
-    },
-    "merge-gate": {
-      title: "Quality Gate",
-      subtitle: "CI, review & round limit",
-    },
-  },
-  zh: {
-    coordinator: {
-      title: "主控协调",
-      subtitle: "目标拆解与证据裁决",
-    },
-    expert: {
-      title: "专家方案",
-      subtitle: "架构设计与根因分析",
-    },
-    "plan-review": {
-      title: "方案审查",
-      subtitle: "实现前交叉审核",
-    },
-    development: {
-      title: "开发实现",
-      subtitle: "实现代码与运行完整测试",
-    },
-    "code-review": {
-      title: "代码审查",
-      subtitle: "对抗性交叉审核",
-    },
-    "merge-gate": {
-      title: "验收门禁",
-      subtitle: "CI、审查与轮次门禁",
-    },
-  },
-};
-
-export const GATE_CHECK_LABELS: Record<UiLanguage, Record<string, string>> = {
-  en: {
-    deliveryRecorded: "Developer delivery recorded",
-    ciPassed: "Latest CI run passed",
-    planReviewSatisfied: "Plan review satisfied",
-    codeReviewSatisfied: "Code review approved (latest round)",
-  },
-  zh: {
-    deliveryRecorded: "已登记开发交付摘要",
-    ciPassed: "最近一次完整测试/CI 通过",
-    planReviewSatisfied: "方案审查已通过或无需开启",
-    codeReviewSatisfied: "代码审查最新一轮已批准",
-  },
-};
-
 export const PERSPECTIVE_LABELS: Record<
   UiLanguage,
   Record<"spec-boundary" | "arch-simplicity" | "comprehensive", string>
@@ -110,105 +29,11 @@ export const PERSPECTIVE_LABELS: Record<
   },
 };
 
-export function localizeNodeRoleLabel(
-  lang: UiLanguage,
-  role:
-    | "coordinator"
-    | "expert"
-    | "plan-reviewer"
-    | "developer"
-    | "code-reviewer"
-    | "gate",
-  slotIndex: number,
-  fallbackLabel: string,
-  isNativeTree?: boolean,
-  totalSameRole?: number,
-  round?: number,
-  multiRound?: boolean,
-): string {
-  if (isNativeTree) {
-    if (role === "coordinator") {
-      return lang === "en" ? "Main Chat" : "主对话";
-    }
-    return fallbackLabel;
-  }
-  const showRound = Boolean(round && (multiRound || round > 1));
-  const roundSuffix = showRound
-    ? lang === "en"
-      ? ` · Round ${round}`
-      : role === "developer" || role === "expert"
-        ? round! > 1
-          ? ` · 第 ${round} 轮修订`
-          : ` · 第 1 轮`
-        : ` · 第 ${round} 轮`
-    : "";
-
-  switch (role) {
-    case "coordinator":
-      return lang === "en" ? "Coordinator" : "主控 Coordinator";
-    case "expert":
-      return (lang === "en" ? "Expert" : "专家 Expert") + roundSuffix;
-    case "developer": {
-      const base =
-        (totalSameRole ?? 1) > 1 ? `Developer #${slotIndex + 1}` : "Developer";
-      return base + roundSuffix;
-    }
-    case "plan-reviewer":
-      return (
-        (lang === "en"
-          ? `Plan Reviewer #${slotIndex + 1}`
-          : `方案审查 #${slotIndex + 1}`) + roundSuffix
-      );
-    case "code-reviewer":
-      return (
-        (lang === "en"
-          ? `Code Reviewer #${slotIndex + 1}`
-          : `代码审查 #${slotIndex + 1}`) + roundSuffix
-      );
-    case "gate":
-      return lang === "en" ? "Quality Gate" : "验收门禁";
-  }
-}
-
-export function localizeStepTitle(
-  lang: UiLanguage,
-  stageId:
-    | "coordinator"
-    | "expert"
-    | "plan-review"
-    | "development"
-    | "code-review"
-    | "merge-gate",
-  round?: number,
-  multiRound?: boolean,
-): string {
-  const base = STAGE_LABELS[lang][stageId].title;
-  if (!round || (!multiRound && round <= 1)) {
-    return base;
-  }
-  if (lang === "en") {
-    if (stageId === "development" && round > 1) {
-      return `Development · Round ${round}`;
-    }
-    if (stageId === "expert" && round > 1) {
-      return `Plan Revision · Round ${round}`;
-    }
-    return `${base} · Round ${round}`;
-  }
-  if (stageId === "development") {
-    return round > 1 ? `开发修订 · 第 ${round} 轮` : `开发实现 · 第 1 轮`;
-  }
-  if (stageId === "expert") {
-    return round > 1 ? `方案修订 · 第 ${round} 轮` : `专家方案 · 第 1 轮`;
-  }
-  return `${base} · 第 ${round} 轮`;
-}
-
 export const UI_TEXT = {
   en: {
     // Navigation
     tabConfig: "Setup",
-    tabHistory: "History",
+    tabTrees: "Sessions",
     backToGraph: "Back to graph",
     backToMainChat: "Back to main chat",
     configureTeam: "Setup",
@@ -219,13 +44,13 @@ export const UI_TEXT = {
     savingStatus: "Saving…",
     sectionPresets: "Preset",
     sectionPresetsInfo:
-      "A preset is a saved set of role models. New tasks use the default preset.",
+      "A preset is a saved set of role models. New team sessions use the default preset.",
     presetEditing: "Editing",
     defaultSuffix: " (default)",
     presetDefaultRow: "Default preset",
-    presetDefaultHintIs: "New tasks use this preset.",
+    presetDefaultHintIs: "New team sessions use this preset.",
     presetDefaultHintNot: (name: string) =>
-      `New tasks currently use "${name}".`,
+      `New team sessions currently use "${name}".`,
     setGlobalDefault: "Set as default",
     isGlobalDefault: "Default",
     presetDeleteRow: (name: string) => `Delete "${name}"`,
@@ -235,7 +60,7 @@ export const UI_TEXT = {
       wasDefault: boolean,
     ) =>
       wasDefault
-        ? `"${name}" is the default. After deleting it, new tasks and its projects use "${fallback}".`
+        ? `"${name}" is the default. After deleting it, new sessions and its projects use "${fallback}".`
         : `Projects bound to "${name}" go back to the default "${fallback}".`,
     deletePresetBtn: "Delete",
     newPresetBtn: "New preset",
@@ -287,104 +112,42 @@ export const UI_TEXT = {
     errPresetExists: (n: string) => `A preset named "${n}" already exists.`,
     errKeepOnePreset: "At least one preset must remain.",
 
-    // History
+    // Sessions & Graph
     filterAll: "All",
-    filterActive: "Active",
-    filterDone: "Done",
-    noHistoryYet: "No team tasks yet. Run /paseo-team in a chat to start one.",
-    noHistoryForFilter: "No tasks match this filter.",
-    pickNodeHint: "Select an agent above to see its details.",
-    showMore: "Show more",
-    showLess: "Show less",
+    filterRunning: "Running",
+    noTreesYet:
+      "No active team sessions yet. Turn on the Team toggle or run /paseo-team in a chat.",
+    noTreesForFilter: "No running team sessions right now.",
+    pickNodeHint: "Select an agent above to inspect or jump into its chat.",
     statusRunningCount: (n: number) => `${n} running`,
     statusAttentionCount: (n: number) => `${n} need you`,
-    statusMerged: "Done",
-    statusActive: "Active",
-    statusHalted: "Halted",
-    statusAbandoned: "Abandoned",
-    abandonTask: "Abandon",
-    abandonConfirm: "Tap again to abandon",
-    reviewRoundsTitle: "Review rounds",
-    verdictApprove: "Approved",
-    verdictChanges: "Changes requested",
-    verdictBlocked: "Blocked",
-    findingBlocking: "Must fix",
-    findingAdvice: "Advice",
-    findingsDigest: (blocking: number, advice: number) =>
-      [
-        blocking > 0 ? `${blocking} must-fix` : "",
-        advice > 0 ? `${advice} advice` : "",
-      ]
-        .filter(Boolean)
-        .join(" · "),
-
-    // Graph
-    nativeTreeBadge: "Subagents of this chat",
-    routingPending: "Assessing complexity",
-    presetBadge: (name: string, mode: string) =>
-      `${name} · ${mode === "expert" ? "Expert plan" : "Chat plan"}`,
-    ciLabel: "CI",
-    ciPass: "passed",
-    ciWaived: "waived",
-    ciPending: "pending",
-    circuitBrokenTitle: (stage: string) =>
-      `Stopped after 2 review rounds (${stage === "plan" ? "plan review" : "code review"})`,
-    authorizeNextRound: "Allow one more round",
-    hiddenStagesHint: (n: number) =>
-      `${n} unused stage${n > 1 ? "s" : ""} hidden`,
+    statusIdle: "Idle",
+    statusError: "Error",
+    statusRunning: "Running",
+    statusInit: "Starting",
+    statusPerm: "Needs approval",
+    statusClosed: "Closed",
+    agentCountLabel: (n: number) => `${n} agent${n === 1 ? "" : "s"}`,
     focusPrefix: "Focus:",
-    gateCompleted: "Verified",
-    gateReady: "Ready",
     openSubagentBtn: "Open chat",
-    recheckGateBtn: "Recheck",
-    completeTaskBtn: "Mark complete",
-    responsibilityTitle: "Assignment",
-    outcomeTitle: "Result",
-    gateChecklistTitle: "Quality checks",
-    emptyTitle: "No subagents in this chat yet",
+    responsibilityTitle: "Session",
+    emptyTitle: "No team session or subagents in this chat yet",
     emptyDesc:
-      "Each chat has its own workflow graph. Run /paseo-team or spawn subagents here and every step grows downward as work progresses.",
-    launcherRoot: (n: number) =>
-      `This chat · ${n} team task${n === 1 ? "" : "s"}`,
-    showEarlierTasks: (n: number) => `Show ${n} earlier tasks`,
-    hideEarlierTasks: "Hide earlier tasks",
-    visRunning: "Running",
-    visAuth: "Needs approval",
-    visApproved: "Approved",
-    visCompleted: "Done",
-    visChanges: "Changes requested",
-    visBlocked: "Blocked",
-    visSkipped: "Skipped",
-    visPending: "Pending",
-    liveRunning: "Running",
-    liveInit: "Starting",
-    livePerm: "Awaiting permission",
-    liveError: "Error",
-    liveClosed: "Closed",
-    liveIdleApproved: "Approved",
-    liveIdleChanges: "Requested changes",
-    liveIdleDone: "Turn finished",
-    liveDone: "Done",
-    liveSkipped: "Skipped",
-    liveWaiting: "Waiting for upstream",
+      "Turn on the Team icon in the composer or run /paseo-team to start. Every subagent dispatched by this chat appears live here.",
     pillDefault: "Team graph",
     pillSubagents: (n: number) => `Team · ${n} agents`,
     pillRunning: (n: number) => `Team · ${n} running`,
     pillAttention: (n: number) => `Team · ${n} need you`,
-    pillBreaker: "Team · Halted",
-    pillDone: "Team · Done",
-    badgeHalted: "Team halted",
     badgeRunning: (n: number) => `Team · ${n} running`,
+    badgeAttention: (n: number) => `Team · ${n} need you`,
     kickoffDetails: "Details",
     kickoffHide: "Hide",
     composerTeamToggle: "Team mode",
-    composerTeamActiveHint:
-      "Team mode is already running on this chat. Use the Team pill above to open the graph.",
   },
   zh: {
     // Navigation
     tabConfig: "配置",
-    tabHistory: "历史",
+    tabTrees: "协作会话",
     backToGraph: "返回状态图",
     backToMainChat: "返回主对话",
     configureTeam: "配置",
@@ -460,96 +223,36 @@ export const UI_TEXT = {
     errPresetExists: (n: string) => `已存在名为「${n}」的预设。`,
     errKeepOnePreset: "至少需要保留一个预设。",
 
-    // History
+    // Sessions & Graph
     filterAll: "全部",
-    filterActive: "进行中",
-    filterDone: "已完成",
-    noHistoryYet: "还没有团队任务。在对话里运行 /paseo-team 即可开始。",
-    noHistoryForFilter: "没有符合条件的任务。",
-    pickNodeHint: "点击上方节点查看详情。",
-    showMore: "展开",
-    showLess: "收起",
+    filterRunning: "运行中",
+    noTreesYet:
+      "还没有团队协作会话。在输入框点亮双人团队图标，或输入 /paseo-team 即可开始。",
+    noTreesForFilter: "当前没有运行中的协作会话。",
+    pickNodeHint: "点击上方节点查看详情或进入对应对话。",
     statusRunningCount: (n: number) => `${n} 运行中`,
     statusAttentionCount: (n: number) => `${n} 待你处理`,
-    statusMerged: "已完成",
-    statusActive: "进行中",
-    statusHalted: "已熔断",
-    statusAbandoned: "已放弃",
-    abandonTask: "放弃任务",
-    abandonConfirm: "再点一次确认放弃",
-    reviewRoundsTitle: "审查记录",
-    verdictApprove: "通过",
-    verdictChanges: "需修改",
-    verdictBlocked: "阻断",
-    findingBlocking: "必改",
-    findingAdvice: "建议",
-    findingsDigest: (blocking: number, advice: number) =>
-      [
-        blocking > 0 ? `${blocking} 条必改` : "",
-        advice > 0 ? `${advice} 条建议` : "",
-      ]
-        .filter(Boolean)
-        .join(" · "),
-
-    // Graph
-    nativeTreeBadge: "当前对话的子 Agent",
-    routingPending: "评估复杂度中",
-    presetBadge: (name: string, mode: string) =>
-      `${name} · ${mode === "expert" ? "专家起草方案" : "主控起草方案"}`,
-    ciLabel: "CI",
-    ciPass: "已通过",
-    ciWaived: "已豁免",
-    ciPending: "待执行",
-    circuitBrokenTitle: (stage: string) =>
-      `两轮审查未通过，已暂停（${stage === "plan" ? "方案审查" : "代码审查"}）`,
-    authorizeNextRound: "允许再审一轮",
-    hiddenStagesHint: (n: number) => `已隐藏 ${n} 个未启用阶段`,
+    statusIdle: "已空闲",
+    statusError: "异常",
+    statusRunning: "运行中",
+    statusInit: "启动中",
+    statusPerm: "待授权",
+    statusClosed: "已关闭",
+    agentCountLabel: (n: number) => `${n} 个会话`,
     focusPrefix: "侧重：",
-    gateCompleted: "已验收",
-    gateReady: "可验收",
     openSubagentBtn: "进入对话",
-    recheckGateBtn: "重新核验",
-    completeTaskBtn: "确认完成",
-    responsibilityTitle: "分配任务",
-    outcomeTitle: "产出结论",
-    gateChecklistTitle: "验收检查项",
-    emptyTitle: "当前对话还没有子 Agent",
+    responsibilityTitle: "会话标题",
+    emptyTitle: "当前对话还没有团队会话或子 Agent",
     emptyDesc:
-      "每个对话有自己的工作流状态图。在这里运行 /paseo-team 或派生子 Agent，各执行与审查轮次会按工作流节点向下动态展开。",
-    launcherRoot: (n: number) => `本对话 · ${n} 个团队任务`,
-    showEarlierTasks: (n: number) => `显示更早的 ${n} 个任务`,
-    hideEarlierTasks: "收起更早的任务",
-    visRunning: "运行中",
-    visAuth: "待授权",
-    visApproved: "已通过",
-    visCompleted: "已完成",
-    visChanges: "需修改",
-    visBlocked: "已阻断",
-    visSkipped: "跳过",
-    visPending: "待启动",
-    liveRunning: "正在执行",
-    liveInit: "正在启动",
-    livePerm: "等待权限确认",
-    liveError: "执行异常",
-    liveClosed: "会话已关闭",
-    liveIdleApproved: "已审查通过",
-    liveIdleChanges: "已提修改意见",
-    liveIdleDone: "本轮已完成",
-    liveDone: "已完成",
-    liveSkipped: "未启用",
-    liveWaiting: "等待前置阶段",
+      "点亮输入框底部的双人团队图标或运行 /paseo-team 启动协作；主控派出的所有子会话都会实时展示在这里。",
     pillDefault: "团队状态图",
     pillSubagents: (n: number) => `团队 · ${n} 个会话`,
     pillRunning: (n: number) => `团队 · ${n} 运行中`,
     pillAttention: (n: number) => `团队 · ${n} 待处理`,
-    pillBreaker: "团队 · 已熔断",
-    pillDone: "团队 · 已完成",
-    badgeHalted: "团队已熔断",
     badgeRunning: (n: number) => `团队 · ${n} 运行中`,
+    badgeAttention: (n: number) => `团队 · ${n} 待处理`,
     kickoffDetails: "展开参数",
     kickoffHide: "收起",
     composerTeamToggle: "团队模式",
-    composerTeamActiveHint:
-      "当前对话正在团队模式运行，可点击上方「团队」胶囊打开状态图。",
   },
 } as const;

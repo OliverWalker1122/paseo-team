@@ -14,6 +14,7 @@ import {
   parseKickoffMessage,
   TeamKickoffBubble,
 } from "./client/KickoffTimelineItem.tsx";
+import { hostTitles as titles, useUiLanguage } from "./client/locale.ts";
 import { SettingsTeamConfigSurface } from "./client/TeamConfigScreen.tsx";
 import {
   focusWorkspaceGraphAgent,
@@ -21,12 +22,11 @@ import {
   WorkspaceConversationGraphPanel,
 } from "./client/TeamGraphPanel.tsx";
 import {
-  type PipelineTaskSnapshotDto,
+  type AgentTreeSnapshotDto,
   startTeamTaskRpc,
   watchConversationGraphSubscription,
 } from "./shared/contracts.ts";
 import { UI_TEXT } from "./shared/i18n.ts";
-import { hostTitles as titles, useUiLanguage } from "./client/locale.ts";
 
 function TeamSidebarHeaderItem({
   currentScreen,
@@ -42,8 +42,7 @@ function TeamSidebarHeaderItem({
 }
 
 function TeamWorkspaceBadge({ workspaceId }: PluginWorkspaceRowBadgeItemProps) {
-  const [matchedTask, setMatchedTask] =
-    useState<PipelineTaskSnapshotDto | null>(null);
+  const [tree, setTree] = useState<AgentTreeSnapshotDto | null>(null);
   const lang = useUiLanguage();
   const graphInput = useMemo(
     () => ({ workspaceId, language: lang }),
@@ -51,32 +50,26 @@ function TeamWorkspaceBadge({ workspaceId }: PluginWorkspaceRowBadgeItemProps) {
   );
 
   useSubscription(watchConversationGraphSubscription, graphInput, (event) => {
-    setMatchedTask(event.mode === "team_task" ? event.task : null);
+    setTree(event.tree);
   });
 
-  if (
-    !matchedTask ||
-    matchedTask.lifecycleStatus === "abandoned" ||
-    matchedTask.lifecycleStatus === "completed"
-  ) {
-    return null;
-  }
+  if (!tree) return null;
   const t = UI_TEXT[lang];
 
-  if (matchedTask.circuitBroken) {
+  if (tree.attentionCount > 0) {
     return (
       <WorkspaceRowBadge
         icon="AlertTriangle"
-        label={t.badgeHalted}
-        tone="danger"
+        label={t.badgeAttention(tree.attentionCount)}
+        tone="warning"
       />
     );
   }
-  if (matchedTask.runningCount > 0) {
+  if (tree.runningCount > 0) {
     return (
       <WorkspaceRowBadge
         icon="Users"
-        label={t.badgeRunning(matchedTask.runningCount)}
+        label={t.badgeRunning(tree.runningCount)}
         tone="info"
       />
     );
@@ -206,7 +199,7 @@ export default function contribute(client: PluginClientContext) {
     client.addSlashCommand({
       name: "paseo-team",
       description:
-        "Start a team task with this chat as coordinator, or open setup (setup) / the team graph (status)",
+        "Start a team session with this chat as coordinator, or open setup (setup) / the team graph (status)",
       argumentHint: '[setup | status | task goal (e.g. "with review")]',
       context: "agent",
       async onSubmit({ args, workspace, agent, rpc, openPanel, openScreen }) {

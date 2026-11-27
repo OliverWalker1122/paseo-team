@@ -1,19 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import contribute from "../index.server.ts";
-import { controlTaskRpc, startTeamTaskRpc } from "../shared/contracts.ts";
+import contribute, {
+  extractToolName,
+  isAutoAllowedTeamPermission,
+} from "../index.server.ts";
 import { saveConfig } from "../server/config-store.ts";
-import { subscribeTaskChanges } from "../server/handlers.ts";
+import { COORDINATOR_ROSTER_HINT } from "../server/prompts.ts";
 import {
-  initTask,
-  loadTask,
-  recordCandidateDelivery,
-  recordReviewVerdict,
-  registerTaskAgent,
-} from "../server/task-store.ts";
+  getConfigBundleRpc,
+  saveConfigRpc,
+  startTeamTaskRpc,
+  TEAM_ENABLED_METADATA_KEY,
+  TEAM_PERSPECTIVE_LABEL_KEY,
+  TEAM_ROLE_LABEL_KEY,
+  TEAM_SUBAGENT_METADATA_KEY,
+  watchActiveTreesSubscription,
+  watchConversationGraphSubscription,
+} from "../shared/contracts.ts";
 
 process.env.SKIP_DOTENV = "true";
 process.env.DOTENV_CONFIG_PATH = "/dev/null";
@@ -25,51 +31,80 @@ type HookHandler = (
 
 type RpcHandler = (
   input: unknown,
-  context: { paseo: unknown },
+  context: {
+    paseo: unknown;
+    push?: (ev: unknown) => Promise<void>;
+    signal?: AbortSignal;
+  },
 ) => Promise<unknown> | unknown;
 
-function createPluginHarness(t: test.TestContext) {
-  const baseDir = mkdtempSync(path.join(os.tmpdir(), "paseo-team-hooks-"));
-  const prevState = process.env.XDG_STATE_HOME;
-  const prevConfig = process.env.XDG_CONFIG_HOME;
-  const stateHome = path.join(baseDir, "state");
-  const configHome = path.join(baseDir, "config");
+const samplePreset = {
+  developer: { model: "antigravity/gemini-4-neon", thinking: "xhigh" },
+  codeReviewers: [
+    { model: "claude/claude-opus-5-5", thinking: "high" },
+    { model: "codex/gpt-6.2-astra", thinking: "high" },
+  ],
+  separatePlanReviewers: false,
+  planReviewers: [
+    { model: "claude/claude-opus-5-5", thinking: "high" },
+    { model: "codex/gpt-6.2-astra", thinking: "high" },
+  ],
+  expert: { model: "claude/claude-opus-5-5", thinking: "high" },
+  complexMode: "simple" as const,
+};
+
+function createServerHarness(t: test.TestContext) {
+  const baseDir = mkdtempSync(path.join(os.tmpdir(), "paseo-team-v7-int-"));
+  const prevCfg = process.env.XDG_CONFIG_HOME;
   const workspaceDir = path.join(baseDir, "workspace");
-  mkdirSync(stateHome, { recursive: true });
-  mkdirSync(configHome, { recursive: true });
   mkdirSync(workspaceDir, { recursive: true });
-  process.env.XDG_STATE_HOME = stateHome;
-  process.env.XDG_CONFIG_HOME = configHome;
+  process.env.XDG_CONFIG_HOME = path.join(baseDir, "config");
 
   const hooks = new Map<string, HookHandler>();
-  const hookEvents: Array<{ action: "add" | "remove"; name: string }> = [];
   const rpcs = new Map<string, RpcHandler>();
   const sentMessages: Array<{ agentId: string; text: string }> = [];
-  const permissionResponses: Array<{
-    agentId: string;
-    requestId: string;
-    response: Record<string, unknown>;
-  }> = [];
-  const createdAgents: Array<Record<string, unknown>> = [];
-  const reloadedAgents: Array<{ agentId: string; requestId?: string }> = [];
-  const metadataUpdates: Array<{
-    agentId: string;
-    patch: Record<string, unknown>;
-  }> = [];
+  const permissionResponses: Array<{ agentId: string; requestId: string }> = [];
   const agentDirectory = new Map<string, Record<string, unknown>>();
-  const timelines = new Map<string, unknown[]>();
+  const subCallbacks: Array<() => void> = [];
 
-  let createdSeq = 0;
   const paseoMock = {
     providers: {
       async snapshot() {
         return {
           entries: [
             {
+              provider: "antigravity",
+              label: "Antigravity",
+              status: "ready",
+              modes: [{ id: "auto" }],
+              models: [
+                {
+                  id: "gemini-4-neon",
+                  label: "Gemini 4 Neon",
+                  thinkingOptions: [{ id: "xhigh", label: "Extra" }],
+                  defaultThinkingOptionId: "xhigh",
+                },
+              ],
+            },
+            {
+              provider: "claude",
+              label: "Claude",
+              status: "ready",
+              modes: [{ id: "auto" }],
+              models: [
+                {
+                  id: "claude-opus-5-5",
+                  label: "Opus 5.5",
+                  thinkingOptions: [{ id: "high", label: "High" }],
+                  defaultThinkingOptionId: "high",
+                },
+              ],
+            },
+            {
               provider: "codex",
               label: "Codex",
               status: "ready",
-              modes: [{ id: "auto-review" }, { id: "auto" }],
+              modes: [{ id: "auto-review" }],
               models: [
                 {
                   id: "gpt-6.2-astra",
@@ -79,109 +114,7 @@ function createPluginHarness(t: test.TestContext) {
                 },
               ],
             },
-            {
-              provider: "claude",
-              label: "Claude",
-              status: "ready",
-              modes: [{ id: "auto" }, { id: "default" }],
-              models: [
-                {
-                  id: "claude-sonnet-5-5",
-                  label: "Sonnet 5.5",
-                  thinkingOptions: [{ id: "medium", label: "Medium" }],
-                  defaultThinkingOptionId: "medium",
-                },
-              ],
-            },
-            {
-              provider: "antigravity",
-              label: "Antigravity",
-              status: "ready",
-              modes: [{ id: "default" }, { id: "auto" }, { id: "full-access" }],
-              models: [
-                {
-                  id: "gemini-4-neon",
-                  label: "Gemini 4 Neon",
-                  thinkingOptions: [{ id: "xhigh", label: "Extra" }],
-                  defaultThinkingOptionId: "high",
-                },
-              ],
-            },
           ],
-        };
-      },
-      async list() {
-        return {
-          providers: [
-            {
-              id: "codex",
-              label: "Codex",
-              availability: "available",
-              availableModes: [{ id: "auto-review" }, { id: "auto" }],
-              defaultModeId: "auto-review",
-            },
-            {
-              id: "claude",
-              label: "Claude",
-              availability: "available",
-              availableModes: [{ id: "auto" }, { id: "default" }],
-              defaultModeId: "auto",
-            },
-            {
-              id: "antigravity",
-              label: "Antigravity",
-              availability: "available",
-              availableModes: [
-                { id: "default" },
-                { id: "auto" },
-                { id: "full-access" },
-              ],
-              defaultModeId: "full-access",
-            },
-          ],
-        };
-      },
-      async models(provider: string) {
-        const byProvider: Record<string, Array<Record<string, unknown>>> = {
-          codex: [
-            {
-              id: "gpt-6.2-astra",
-              label: "GPT-6.2-Astra",
-              thinkingOptions: [{ id: "high", label: "High" }],
-              defaultThinkingOptionId: "high",
-            },
-          ],
-          claude: [
-            {
-              id: "claude-sonnet-5-5",
-              label: "Sonnet 5.5",
-              thinkingOptions: [{ id: "medium", label: "Medium" }],
-              defaultThinkingOptionId: "medium",
-            },
-          ],
-          antigravity: [
-            {
-              id: "gemini-4-neon",
-              label: "Gemini 4 Neon",
-              thinkingOptions: [{ id: "xhigh", label: "Extra" }],
-              defaultThinkingOptionId: "high",
-            },
-          ],
-        };
-        return { models: byProvider[provider] ?? [] };
-      },
-    },
-    workspaces: {
-      ref(workspaceId: string) {
-        return {
-          agents: {
-            async create(payload: Record<string, unknown>) {
-              createdSeq += 1;
-              const id = `created-agent-${createdSeq}`;
-              createdAgents.push({ workspaceId, id, ...payload });
-              return { id };
-            },
-          },
         };
       },
     },
@@ -191,8 +124,12 @@ function createPluginHarness(t: test.TestContext) {
           entries: [...agentDirectory.values()].map((agent) => ({ agent })),
         };
       },
-      subscribe() {
-        return () => {};
+      subscribe(cb: () => void) {
+        subCallbacks.push(cb);
+        return () => {
+          const i = subCallbacks.indexOf(cb);
+          if (i >= 0) subCallbacks.splice(i, 1);
+        };
       },
       ref(agentId: string) {
         return {
@@ -201,7 +138,6 @@ function createPluginHarness(t: test.TestContext) {
             return agent ? { agent } : null;
           },
           async setMetadata(patch: Record<string, unknown>) {
-            metadataUpdates.push({ agentId, patch });
             const existing = agentDirectory.get(agentId);
             if (existing) {
               existing.metadata = {
@@ -210,33 +146,11 @@ function createPluginHarness(t: test.TestContext) {
               };
             }
           },
-          async reload(opts?: { requestId?: string }) {
-            reloadedAgents.push({ agentId, requestId: opts?.requestId });
-            const agent = agentDirectory.get(agentId);
-            if (agent?.provider === "codex") {
-              throw new Error(
-                "thread/items/list is not supported yet requestType=refresh_agent_request code=agent_refresh_failed",
-              );
-            }
-            return agent ? { agent } : null;
-          },
           async send(text: string) {
             sentMessages.push({ agentId, text });
           },
-          async respondToPermission(opts: {
-            requestId: string;
-            response: Record<string, unknown>;
-          }) {
-            permissionResponses.push({
-              agentId,
-              requestId: opts.requestId,
-              response: opts.response,
-            });
-          },
-          timeline: {
-            async refetch() {
-              return { entries: timelines.get(agentId) ?? [] };
-            },
+          async respondToPermission(opts: { requestId: string }) {
+            permissionResponses.push({ agentId, requestId: opts.requestId });
           },
         };
       },
@@ -249,238 +163,85 @@ function createPluginHarness(t: test.TestContext) {
     },
     addHook(name: string, handler: HookHandler) {
       hooks.set(name, handler);
-      hookEvents.push({ action: "add", name });
-      return () => {
-        hooks.delete(name);
-        hookEvents.push({ action: "remove", name });
-      };
+      return () => hooks.delete(name);
     },
   };
 
   const dispose = contribute(serverMock as never);
   t.after(() => {
     dispose();
-    if (prevState === undefined) delete process.env.XDG_STATE_HOME;
-    else process.env.XDG_STATE_HOME = prevState;
-    if (prevConfig === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = prevConfig;
+    if (prevCfg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevCfg;
     rmSync(baseDir, { recursive: true, force: true });
   });
 
   const controller = new AbortController();
-  const hookCtx = { paseo: paseoMock, signal: controller.signal };
-
   return {
-    baseDir,
-    stateRoot: path.join(stateHome, "paseo-team"),
     workspaceDir,
     hooks,
-    hookEvents,
     rpcs,
     sentMessages,
     permissionResponses,
-    createdAgents,
-    reloadedAgents,
-    metadataUpdates,
     agentDirectory,
-    timelines,
     paseo: paseoMock,
-    async invokeHook(name: string, payload: Record<string, unknown>) {
-      const fn = hooks.get(name);
-      assert.ok(fn, `expected hook ${name} to be registered`);
-      return await fn(payload, hookCtx);
-    },
-    async invokeRpc(name: string, input: unknown) {
-      const fn = rpcs.get(name);
-      assert.ok(fn, `expected RPC ${name} to be registered`);
-      return await fn(input, { paseo: paseoMock });
-    },
+    invokeHook: (name: string, payload: Record<string, unknown>) =>
+      hooks.get(name)!(payload, {
+        paseo: paseoMock,
+        signal: controller.signal,
+      }),
+    invokeRpc: (name: string, input: unknown) =>
+      rpcs.get(name)!(input, { paseo: paseoMock }),
   };
 }
 
-const samplePreset = {
-  developer: { model: "antigravity/gemini-4-neon", thinking: "xhigh" },
-  planReviewers: [
-    { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-    { model: "codex/gpt-6.2-astra", thinking: "high" },
-  ],
-  codeReviewers: [
-    { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-    { model: "codex/gpt-6.2-astra", thinking: "high" },
-  ],
-  expert: { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-  complexMode: "expert" as const,
-};
-
-test("contribute registers all five lifecycle hooks", (t) => {
-  const h = createPluginHarness(t);
+test("v7 server registers only 2 minimal hooks (zero state-machine observers)", (t) => {
+  const h = createServerHarness(t);
   assert.deepEqual([...h.hooks.keys()].sort(), [
-    "agent.create.after",
     "agent.open.before",
     "agent.permission.before",
-    "agent.turn.after",
-    "agent.turn.before",
   ]);
+  assert.equal(
+    extractToolName({ toolName: "paseo_team_roster" }),
+    "paseo_team_roster",
+  );
+  assert.equal(
+    extractToolName({ tool: { name: "create_agent" } }),
+    "create_agent",
+  );
+  assert.equal(extractToolName(null), null);
 });
 
-test("agent.create.after registers children from metadata and title prefixes and ignores unrelated agents", async (t) => {
-  const h = createPluginHarness(t);
-  const { recordPath, record } = initTask({
-    cwd: h.workspaceDir,
-    goal: "实现复杂迁移并需要方案审查和代码审查",
-    teamName: "标准",
-    preset: samplePreset,
-    isComplex: true,
-    requirePlanReview: true,
-    requireReview: true,
-  });
-  record.coordinatorAgentId = "coord-1";
-  const coordNode = record.nodes.find((n) => n.nodeId === "coordinator");
-  if (coordNode) coordNode.agentId = "coord-1";
-  const { saveTask } = await import("../server/task-store.ts");
-  saveTask(recordPath, record);
-
-  // 1. Metadata role registers immediately even without bracketed title.
-  await h.invokeHook("agent.create.after", {
-    agent: {
-      id: "exp-1",
-      parentAgentId: "coord-1",
-      provider: "claude",
-      cwd: h.workspaceDir,
-      title: "Draft migration architecture",
-      background: false,
-      metadata: { "paseo-team.task": { role: "expert" } },
-    },
-  });
-
-  // 2. Generic [Reviewer] before delivery maps to plan-reviewer when planReview=required.
-  await h.invokeHook("agent.create.after", {
-    agent: {
-      id: "plan-rev-1",
-      parentAgentId: "coord-1",
-      provider: "codex",
-      cwd: h.workspaceDir,
-      title: "[Reviewer #1] Review plan",
-      background: false,
-      metadata: {},
-    },
-  });
-
-  // 3. [Developer] prefix registers developer.
-  await h.invokeHook("agent.create.after", {
-    agent: {
-      id: "dev-1",
-      parentAgentId: "coord-1",
-      provider: "antigravity",
-      cwd: h.workspaceDir,
-      title: "[Developer] Implement migration",
-      background: false,
-      metadata: {},
-    },
-  });
-
-  // 4. Unrelated agent (no parent / non-coordinator parent / no role signal) is ignored.
-  await h.invokeHook("agent.create.after", {
-    agent: {
-      id: "stranger-1",
-      parentAgentId: null,
-      provider: "codex",
-      cwd: h.workspaceDir,
-      title: "[Developer] Unrelated chat",
-      background: false,
-      metadata: {},
-    },
-  });
-  await h.invokeHook("agent.create.after", {
-    agent: {
-      id: "child-of-dev",
-      parentAgentId: "dev-1",
-      provider: "codex",
-      cwd: h.workspaceDir,
-      title: "[Developer] Nested child",
-      background: false,
-      metadata: {},
-    },
-  });
-
-  // 5. After delivery exists, generic [Reviewer] maps to code-reviewer.
-  recordCandidateDelivery(recordPath, {
-    agentId: "dev-1",
-    summary: "d1",
-    architectureImpact: "None",
-    ciWaivedUserQuote: "waived for hook test",
-  });
-  await h.invokeHook("agent.create.after", {
-    agent: {
-      id: "code-rev-1",
-      parentAgentId: "coord-1",
-      provider: "claude",
-      cwd: h.workspaceDir,
-      title: "[Reviewer #1] Review code",
-      background: false,
-      metadata: {},
-    },
-  });
-
-  const saved = loadTask(recordPath);
-  assert.equal(saved.nodes.find((n) => n.agentId === "exp-1")?.role, "expert");
-  assert.equal(
-    saved.nodes.find((n) => n.agentId === "plan-rev-1")?.role,
-    "plan-reviewer",
-  );
-  assert.equal(
-    saved.nodes.find((n) => n.agentId === "dev-1")?.role,
-    "developer",
-  );
-  assert.equal(
-    saved.nodes.find((n) => n.agentId === "code-rev-1")?.role,
-    "code-reviewer",
-  );
-  assert.equal(
-    saved.nodes.some((n) => n.agentId === "stranger-1"),
-    false,
-  );
-  assert.equal(
-    saved.nodes.some((n) => n.agentId === "child-of-dev"),
-    false,
-  );
-});
-
-test("agent.open.before injects role-specific prompts & tools, distinguishes plan vs code reviewers, and skips history/background", async (t) => {
-  const h = createPluginHarness(t);
-  const { recordPath, record } = initTask({
-    cwd: h.workspaceDir,
-    goal: "实现新功能并完成方案审查与代码审查",
-    teamName: "标准",
-    preset: samplePreset,
-    isComplex: true,
-    requirePlanReview: true,
-    requireReview: true,
+test("agent.open.before directly injects full team roster on Turn 1 when Team toggle or /paseo-team is active, and handles subagents & cross-worktree spawns", async (t) => {
+  const h = createServerHarness(t);
+  saveConfig({
+    schemaVersion: 5,
+    default: "标准",
+    teams: { 标准: samplePreset },
+    projects: {},
   });
 
   const baseReq = {
-    workspaceId: "wks_test",
+    workspaceId: "wks_main",
     cwd: h.workspaceDir,
     reason: "create",
     purpose: "interactive",
     background: false,
     labels: {},
     metadata: {},
-    appendSystemPrompt: ["EXISTING_SYS_PROMPT"],
-    tools: [{ name: "existing_tool" }],
+    appendSystemPrompt: [],
+    tools: [],
     env: {},
     mcpServers: {},
   };
 
-  // Skips history and background opens.
+  // 1. Skips history & background opens
   assert.equal(
     await h.invokeHook("agent.open.before", {
       request: {
         ...baseReq,
-        agentId: "hist-1",
+        agentId: "h1",
         provider: "claude",
         purpose: "history",
-        labels: { task: record.taskId, role: "developer" },
       },
     }),
     undefined,
@@ -489,1897 +250,262 @@ test("agent.open.before injects role-specific prompts & tools, distinguishes pla
     await h.invokeHook("agent.open.before", {
       request: {
         ...baseReq,
-        agentId: "bg-1",
-        provider: "antigravity",
-        background: true,
-        labels: { task: record.taskId, role: "developer" },
-      },
-    }),
-    undefined,
-  );
-
-  // 0a. Normal non-team interactive top-level chat gets the single persistent `paseo_team`
-  // tool + tiny static activation hint (fixed from initial open so future /paseo-team needs zero reload).
-  const normalChatOut = (await h.invokeHook("agent.open.before", {
-    request: {
-      ...baseReq,
-      agentId: "normal-chat-1",
-      provider: "codex",
-      title: "Casual question",
-    },
-  })) as {
-    appendSystemPrompt: string[];
-    tools: Array<{
-      name: string;
-      execute: (
-        args: Record<string, unknown>,
-        ctx: Record<string, unknown>,
-      ) => Promise<{ text: string; isError?: boolean }>;
-    }>;
-  };
-  assert.equal(normalChatOut.appendSystemPrompt.length, 2);
-  assert.equal(normalChatOut.appendSystemPrompt[0], "EXISTING_SYS_PROMPT");
-  assert.match(normalChatOut.appendSystemPrompt[1], /\/paseo-team/);
-  assert.deepEqual(
-    normalChatOut.tools.map((tool) => tool.name),
-    ["existing_tool", "paseo_team"],
-  );
-  const noTaskRes = await normalChatOut.tools[1].execute(
-    { action: "summary" },
-    { agent: { id: "normal-chat-1", metadata: {} } },
-  );
-  assert.equal(noTaskRes.isError, true);
-  assert.match(noTaskRes.text, /No active Paseo Team task/);
-
-  // 0b. Non-team subagent (with parent-agent-id not matching a team role) gets undefined.
-  assert.equal(
-    await h.invokeHook("agent.open.before", {
-      request: {
-        ...baseReq,
-        agentId: "unrelated-sub-1",
+        agentId: "b1",
         provider: "claude",
-        title: "Random helper",
-        labels: { "paseo.parent-agent-id": "normal-chat-1" },
+        background: true,
       },
     }),
     undefined,
   );
 
-  // 1. Coordinator via metadata (identical static appendSystemPrompt prefix as initial open).
-  const coordOut = (await h.invokeHook("agent.open.before", {
+  // 2. Normal top-level chat gets tiny 1-line hint + read-only `paseo_team_roster` fallback
+  const normalOut = (await h.invokeHook("agent.open.before", {
     request: {
       ...baseReq,
-      agentId: "coord-open",
-      provider: "antigravity",
-      title: "[Team] Test",
-      metadata: {
-        "paseo-team.task": {
-          taskId: record.taskId,
-          recordPath,
-          role: "coordinator",
-        },
-      },
-    },
-  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.deepEqual(
-    coordOut.appendSystemPrompt,
-    normalChatOut.appendSystemPrompt,
-  );
-  assert.deepEqual(
-    coordOut.tools.map((tool) => tool.name),
-    ["existing_tool", "paseo_team"],
-  );
-  assert.equal(loadTask(recordPath).coordinatorAgentId, "coord-open");
-
-  // 2. Expert via labels -> dedicated prompt, ZERO custom plugin tools.
-  const expOut = (await h.invokeHook("agent.open.before", {
-    request: {
-      ...baseReq,
-      agentId: "exp-open",
+      agentId: "normal-1",
       provider: "claude",
-      title: "Architect draft",
-      labels: { task: record.taskId, role: "expert" },
+      title: "普通问题",
     },
   })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.match(expOut.appendSystemPrompt[1], /独立专家指引/);
+  assert.deepEqual(normalOut.appendSystemPrompt, [COORDINATOR_ROSTER_HINT]);
   assert.deepEqual(
-    expOut.tools.map((tool) => tool.name),
-    ["existing_tool"],
+    normalOut.tools.map((x) => x.name),
+    ["paseo_team_roster"],
   );
 
-  // 3. Developer via single-active-task title fallback -> dedicated prompt, ZERO custom plugin tools.
+  // 3. New Workspace chat with composer Team toggle ON gets FULL protocol + exact role models immediately on Turn 1!
+  const toggleOut = (await h.invokeHook("agent.open.before", {
+    request: {
+      ...baseReq,
+      agentId: "nw-team-1",
+      provider: "claude",
+      title: "设置里可以改变组件的透明度",
+      metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+    },
+  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
+  assert.match(toggleOut.appendSystemPrompt[0], /Paseo Team 团队模式协议/);
+  assert.match(toggleOut.appendSystemPrompt[0], /antigravity\/gemini-4-neon/);
+  assert.match(toggleOut.appendSystemPrompt[0], /claude\/claude-opus-5-5/);
+  assert.match(toggleOut.appendSystemPrompt[0], /codex\/gpt-6\.2-astra/);
+
+  // 4. Same-workspace non-team subagent gets undefined; cross-workspace root spawn gets roster tool!
+  h.agentDirectory.set("normal-1", {
+    id: "normal-1",
+    workspaceId: "wks_main",
+    cwd: h.workspaceDir,
+  });
+  assert.equal(
+    await h.invokeHook("agent.open.before", {
+      request: {
+        ...baseReq,
+        agentId: "same-ws-helper",
+        provider: "claude",
+        title: "Helper",
+        labels: { "paseo.parent-agent-id": "normal-1" },
+      },
+    }),
+    undefined,
+  );
+  const crossWsOut = (await h.invokeHook("agent.open.before", {
+    request: {
+      ...baseReq,
+      agentId: "worktree-coord",
+      workspaceId: "wks_worktree_new",
+      provider: "claude",
+      title: "团队协调：自定义透明度",
+      labels: { "paseo.parent-agent-id": "normal-1" },
+    },
+  })) as { tools: Array<{ name: string }> };
+  assert.ok(crossWsOut);
+  assert.deepEqual(
+    crossWsOut.tools.map((x) => x.name),
+    ["paseo_team_roster"],
+  );
+
+  // 5. Team subagents (Developer, Expert, Plan/Code Reviewer) get concise role guides, ZERO custom tools,
+  //    and non-blocking `paseo-team.subagent: true` metadata.
+  h.agentDirectory.set("sub-dev", { id: "sub-dev", metadata: {} });
   const devOut = (await h.invokeHook("agent.open.before", {
     request: {
       ...baseReq,
-      agentId: "dev-open",
+      agentId: "sub-dev",
       provider: "antigravity",
-      title: "[Developer] Build feature",
-    },
-  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.match(devOut.appendSystemPrompt[1], /Developer 指引/);
-  assert.deepEqual(
-    devOut.tools.map((tool) => tool.name),
-    ["existing_tool"],
-  );
-
-  // 4. Plan reviewers get plan-review guide, split perspectives, and ZERO custom plugin tools.
-  const planRev0 = (await h.invokeHook("agent.open.before", {
-    request: {
-      ...baseReq,
-      agentId: "plan-r0",
-      provider: "claude",
-      title: "方案审查一",
-      labels: { task: record.taskId, role: "plan-reviewer" },
-    },
-  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  const planRev1 = (await h.invokeHook("agent.open.before", {
-    request: {
-      ...baseReq,
-      agentId: "plan-r1",
-      provider: "codex",
-      title: "方案审查二",
-      labels: { task: record.taskId, role: "plan-reviewer" },
-    },
-  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.match(planRev0.appendSystemPrompt[1], /独立方案审查指引/);
-  assert.match(planRev0.appendSystemPrompt[1], /需求规格与真实边界/);
-  assert.match(planRev1.appendSystemPrompt[1], /独立方案审查指引/);
-  assert.match(planRev1.appendSystemPrompt[1], /架构一致性与复杂度删减/);
-  assert.deepEqual(
-    planRev0.tools.map((tool) => tool.name),
-    ["existing_tool"],
-  );
-
-  // 5. Code reviewers get code-review guide and ZERO custom plugin tools.
-  const codeRev0 = (await h.invokeHook("agent.open.before", {
-    request: {
-      ...baseReq,
-      agentId: "code-r0",
-      provider: "antigravity",
-      title: "代码审查一",
-      labels: { task: record.taskId, role: "code-reviewer" },
-    },
-  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.match(codeRev0.appendSystemPrompt[1], /独立代码审查指引/);
-  assert.deepEqual(
-    codeRev0.tools.map((tool) => tool.name),
-    ["existing_tool"],
-  );
-
-  // 6. Resume path via findTaskByAgentId (labels omitted on resume).
-  const resumedDev = (await h.invokeHook("agent.open.before", {
-    request: {
-      ...baseReq,
-      reason: "resume",
-      agentId: "dev-open",
-      provider: "antigravity",
-      title: "No prefix on resume",
-    },
-  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.match(resumedDev.appendSystemPrompt[1], /Developer 指引/);
-
-  // 7. Regression: even when a second active task exists in the same workspace and
-  // create_agent omits labels.task/labels.role, `paseo.parent-agent-id` + colon-prefixed titles
-  // ("Developer: ...", "Code Review #1: ...", "Plan Review #1: ...") bind cleanly with zero custom tools.
-  initTask({
-    cwd: h.workspaceDir,
-    goal: "另一个陈旧的未结项任务（验证多活跃任务下按 parent-agent-id 精准绑定）",
-    teamName: "标准",
-    preset: samplePreset,
-  });
-  const colonDev = (await h.invokeHook("agent.open.before", {
-    request: {
-      ...baseReq,
-      agentId: "dev-colon",
-      provider: "antigravity",
-      title: "Developer: edit temp file",
-      labels: { "paseo.parent-agent-id": "coord-open" },
-    },
-  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.match(colonDev.appendSystemPrompt[1], /Developer 指引/);
-  assert.deepEqual(
-    colonDev.tools.map((tool) => tool.name),
-    ["existing_tool"],
-  );
-  recordCandidateDelivery(recordPath, {
-    agentId: "dev-colon",
-    summary: "done",
-    architectureImpact: "无",
-    ciWaivedUserQuote: "waived for colon title test",
-  });
-  const colonRev = (await h.invokeHook("agent.open.before", {
-    request: {
-      ...baseReq,
-      agentId: "rev-colon-1",
-      provider: "claude",
-      title: "Code Review #1: spec & edge cases",
-      labels: { "paseo.parent-agent-id": "coord-open" },
-    },
-  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.match(colonRev.appendSystemPrompt[1], /独立代码审查指引/);
-  assert.deepEqual(
-    colonRev.tools.map((tool) => tool.name),
-    ["existing_tool"],
-  );
-  assert.equal(
-    loadTask(recordPath).nodes.find((n) => n.agentId === "rev-colon-1")
-      ?.briefSummary,
-    "spec & edge cases",
-  );
-  const planReviewNoEr = (await h.invokeHook("agent.open.before", {
-    request: {
-      ...baseReq,
-      agentId: "plan-rev-no-er",
-      provider: "claude",
-      title: "Plan Review #1: 需求规格与边界",
-      labels: { "paseo.parent-agent-id": "coord-open" },
-    },
-  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
-  assert.match(planReviewNoEr.appendSystemPrompt[1], /独立方案审查指引/);
-  assert.equal(
-    loadTask(recordPath).nodes.find((n) => n.agentId === "plan-rev-no-er")
-      ?.briefSummary,
-    "需求规格与边界",
-  );
-});
-
-test("agent.permission.before handles multi-provider prefixes, prevents Antigravity coord+child deadlock, and blocks foreign/dangerous approvals", async (t) => {
-  const h = createPluginHarness(t);
-  const { recordPath, record } = initTask({
-    cwd: h.workspaceDir,
-    goal: "Test permissions across Codex, Claude, Antigravity",
-    teamName: "标准",
-    preset: samplePreset,
-    requireReview: true,
-  });
-  record.coordinatorAgentId = "coord-ag";
-  const coordNode = record.nodes.find((n) => n.nodeId === "coordinator");
-  if (coordNode) coordNode.agentId = "coord-ag";
-  const { saveTask } = await import("../server/task-store.ts");
-  saveTask(recordPath, record);
-  registerTaskAgent(recordPath, {
-    role: "developer",
-    agentId: "dev-claude",
-    profile: "claude/claude-sonnet-5-5",
-    briefSummary: "Dev",
-  });
-  registerTaskAgent(recordPath, {
-    role: "code-reviewer",
-    agentId: "rev-ag",
-    profile: "antigravity/gemini-3.8-flash",
-    briefSummary: "Reviewer",
-  });
-
-  const allowActions = [
-    { id: "allow-once", label: "Allow", behavior: "allow" },
-    { id: "deny", label: "Deny", behavior: "deny" },
-  ];
-
-  // 1. Non-tool permission kinds (e.g. request_user_input question) must NEVER be auto-approved.
-  await h.invokeHook("agent.permission.before", {
-    agent: {
-      id: "coord-ag",
-      parentAgentId: null,
-      provider: "antigravity",
-      cwd: h.workspaceDir,
-      title: "[Team] Test",
-      background: false,
-      metadata: {},
-    },
-    request: {
-      id: "perm-question",
-      provider: "antigravity",
-      name: "mcp_paseo_create_agent",
-      kind: "question",
-      actions: allowActions,
-    },
-  });
-  assert.equal(h.permissionResponses.length, 0);
-
-  // 2. Coordinator calls `paseo_team`, `list_pending_permissions`, scoped `respond_to_permission`, and `create_agent`.
-  await h.invokeHook("agent.permission.before", {
-    agent: {
-      id: "coord-ag",
-      parentAgentId: null,
-      provider: "antigravity",
-      cwd: h.workspaceDir,
-      title: "[Team] Test",
-      background: false,
-      metadata: {},
-    },
-    request: {
-      id: "perm-coord-team",
-      provider: "antigravity",
-      name: "mcp_paseo_paseo_team",
-      kind: "tool",
-      actions: allowActions,
-    },
-  });
-  await h.invokeHook("agent.permission.before", {
-    agent: {
-      id: "coord-ag",
-      parentAgentId: null,
-      provider: "antigravity",
-      cwd: h.workspaceDir,
-      title: "[Team] Test",
-      background: false,
-      metadata: {},
-    },
-    request: {
-      id: "perm-list-pending",
-      provider: "antigravity",
-      name: "mcp_paseo_list_pending_permissions",
-      kind: "tool",
-      actions: allowActions,
-    },
-  });
-  await h.invokeHook("agent.permission.before", {
-    agent: {
-      id: "coord-ag",
-      parentAgentId: null,
-      provider: "antigravity",
-      cwd: h.workspaceDir,
-      title: "[Team] Test",
-      background: false,
-      metadata: {},
-    },
-    request: {
-      id: "perm-resp-child",
-      provider: "antigravity",
-      name: "mcp_paseo_respond_to_permission",
-      kind: "tool",
-      input: { agentId: "rev-ag", requestId: "perm-child-action" },
-      actions: allowActions,
-    },
-  });
-  await h.invokeHook("agent.permission.before", {
-    agent: {
-      id: "coord-ag",
-      parentAgentId: null,
-      provider: "codex",
-      cwd: h.workspaceDir,
-      title: "[Team] Test",
-      background: false,
-      metadata: {},
-    },
-    request: {
-      id: "perm-codex-dot",
-      provider: "codex",
-      name: "paseo.create_agent",
-      kind: "tool",
-      actions: allowActions,
-    },
-  });
-
-  // 3. Blocked: foreign agent permission response, dangerous kill_agent, shell, and developer calling coordinator tool.
-  for (const blocked of [
-    {
-      agentId: "coord-ag",
-      id: "perm-foreign-resp",
-      name: "mcp_paseo_respond_to_permission",
-      input: { agentId: "user-personal-chat", requestId: "perm-other" },
-    },
-    {
-      agentId: "coord-ag",
-      id: "perm-kill",
-      name: "mcp_paseo_kill_agent",
-      input: { agentId: "dev-claude" },
-    },
-    {
-      agentId: "coord-ag",
-      id: "perm-shell",
-      name: "run_command",
-      input: { CommandLine: "rm -rf /" },
-    },
-    {
-      agentId: "dev-claude",
-      id: "perm-dev-escalate",
-      name: "mcp_paseo_create_agent",
-      input: {},
-    },
-  ]) {
-    await h.invokeHook("agent.permission.before", {
-      agent: {
-        id: blocked.agentId,
-        parentAgentId: blocked.agentId === "coord-ag" ? null : "coord-ag",
-        provider: "antigravity",
-        cwd: h.workspaceDir,
-        title: "Agent",
-        background: false,
-        metadata: {},
+      title: "实现透明度滑块",
+      labels: {
+        "paseo.parent-agent-id": "nw-team-1",
+        [TEAM_ROLE_LABEL_KEY]: "developer",
       },
-      request: {
-        id: blocked.id,
-        provider: "antigravity",
-        name: blocked.name,
-        kind: "tool",
-        input: blocked.input,
-        actions: allowActions,
-      },
-    });
-  }
-
-  assert.deepEqual(
-    h.permissionResponses.map((r) => [r.agentId, r.requestId, r.response]),
-    [
-      [
-        "coord-ag",
-        "perm-coord-team",
-        { behavior: "allow", selectedActionId: "allow-once" },
-      ],
-      [
-        "coord-ag",
-        "perm-list-pending",
-        { behavior: "allow", selectedActionId: "allow-once" },
-      ],
-      [
-        "coord-ag",
-        "perm-resp-child",
-        { behavior: "allow", selectedActionId: "allow-once" },
-      ],
-      [
-        "coord-ag",
-        "perm-codex-dot",
-        { behavior: "allow", selectedActionId: "allow-once" },
-      ],
+    },
+  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
+  assert.match(devOut.appendSystemPrompt[0], /Developer 指引/);
+  assert.deepEqual(devOut.tools, []);
+  assert.equal(
+    (h.agentDirectory.get("sub-dev")?.metadata as Record<string, unknown>)[
+      TEAM_SUBAGENT_METADATA_KEY
     ],
+    true,
   );
+
+  const revOut = (await h.invokeHook("agent.open.before", {
+    request: {
+      ...baseReq,
+      agentId: "sub-rev",
+      provider: "codex",
+      title: "Review opacity slider",
+      labels: {
+        "paseo.parent-agent-id": "nw-team-1",
+        [TEAM_ROLE_LABEL_KEY]: "code-reviewer",
+        [TEAM_PERSPECTIVE_LABEL_KEY]: "arch-simplicity",
+      },
+    },
+  })) as { appendSystemPrompt: string[]; tools: Array<{ name: string }> };
+  assert.match(revOut.appendSystemPrompt[0], /Architecture & Simplicity/);
+  assert.deepEqual(revOut.tools, []);
 });
 
-test("agent.turn.before notifies subscribers and agent.turn.after passively parses native member replies without sending plugin reminders", async (t) => {
-  const h = createPluginHarness(t);
-  const { recordPath, record } = initTask({
-    cwd: h.workspaceDir,
-    goal: "测试单轨原生回合观测钩子",
-    teamName: "标准",
-    preset: samplePreset,
-    requireReview: true,
-  });
-  record.coordinatorAgentId = "coord-turn";
-  const coordNode = record.nodes.find((n) => n.nodeId === "coordinator");
-  if (coordNode) coordNode.agentId = "coord-turn";
-  const { saveTask } = await import("../server/task-store.ts");
-  saveTask(recordPath, record);
-  registerTaskAgent(recordPath, {
-    role: "developer",
-    agentId: "dev-turn",
-    profile: "antigravity/gemini-4-neon",
-    briefSummary: "Dev",
-  });
-  registerTaskAgent(recordPath, {
-    role: "code-reviewer",
-    agentId: "rev-turn",
-    profile: "claude/claude-opus-5-5",
-    briefSummary: "Rev",
-  });
+test("agent.permission.before auto-allows roster and native coordinator tools without opening dangerous permissions", async (t) => {
+  const h = createServerHarness(t);
 
-  let notifications = 0;
-  const unsub = subscribeTaskChanges(() => {
-    notifications += 1;
-  });
-  t.after(unsub);
-
-  // turn.before notifies for task agent.
-  await h.invokeHook("agent.turn.before", {
-    agent: { id: "dev-turn" },
-    turnId: "t1",
-  });
-  await new Promise((r) => setTimeout(r, 160));
-  assert.ok(notifications >= 1, "agent.turn.before should notify task changes");
-
-  // Failed turn -> never parsed or recorded, zero plugin messages.
-  h.timelines.set("dev-turn", [
-    {
-      turnId: "t-d0",
-      item: { type: "assistant_message", text: "Checks: PASS" },
-    },
-  ]);
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "dev-turn" },
-    turnId: "t-d0",
-    outcome: { kind: "failed", error: { message: "boom" } },
-  });
-  assert.equal(loadTask(recordPath).delivery, null);
-  assert.equal(h.sentMessages.length, 0);
-
-  // Completed Developer turn -> delivery & CI pass parsed passively from native reply.
-  h.timelines.set("dev-turn", [
-    {
-      turnId: "t-d1",
-      item: {
-        type: "assistant_message",
-        text: "摘要：完成改动\n检查：通过（npm test 12/12）\n架构影响：无",
-      },
-    },
-  ]);
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "dev-turn" },
-    turnId: "t-d1",
-    outcome: { kind: "completed" },
-  });
-  assert.equal(loadTask(recordPath).candidate, "delivery-r1");
-  assert.equal(loadTask(recordPath).ci?.status, "pass");
-  assert.equal(h.sentMessages.length, 0);
-
-  // Reviewer asking a clarifying question (no verdict) -> updates summary passively, NEVER sends a reminder!
-  h.timelines.set("rev-turn", [
-    {
-      turnId: "t-r-q",
-      item: {
-        type: "assistant_message",
-        text: "先确认一下：需要兼容旧格式吗？",
-      },
-    },
-  ]);
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-turn" },
-    turnId: "t-r-q",
-    outcome: { kind: "completed" },
-  });
-  assert.equal(loadTask(recordPath).codeReviewers.length, 0);
-  assert.equal(h.sentMessages.length, 0);
-
-  // Reviewer finishing review with native verdict -> passively recorded with findings!
-  h.timelines.set("rev-turn", [
-    {
-      turnId: "t-r1",
-      item: {
-        type: "assistant_message",
-        text: "结论：REQUEST_CHANGES\n摘要：缺少空值判断\n- 阻断：app.ts:10 未处理空值",
-      },
-    },
-  ]);
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-turn" },
-    turnId: "t-r1",
-    outcome: { kind: "completed" },
-  });
-  const afterRev = loadTask(recordPath);
-  assert.equal(afterRev.codeReviewers.length, 1);
-  assert.equal(afterRev.codeReviewers[0].status, "REQUEST_CHANGES");
-  assert.deepEqual(afterRev.codeReviewers[0].findings, [
-    "blocking: app.ts:10 未处理空值",
-  ]);
-  assert.equal(h.sentMessages.length, 0);
-
-  // Abandoned task -> turn.after ignores further replies cleanly.
-  await h.invokeRpc(controlTaskRpc.name, {
-    recordPath,
-    action: "abandon_task",
-    language: "zh",
-  });
-  h.timelines.set("rev-turn", [
-    {
-      turnId: "t-r2",
-      item: { type: "assistant_message", text: "结论：APPROVE" },
-    },
-  ]);
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-turn" },
-    turnId: "t-r2",
-    outcome: { kind: "completed" },
-  });
-  assert.equal(loadTask(recordPath).codeReviewers[0].status, "REQUEST_CHANGES");
-  assert.equal(h.sentMessages.length, 0);
-});
-
-test("full L2 plugin pipeline: tasks.start -> open.before tools -> run_check -> R1 rework -> R2 dual approve -> complete", async (t) => {
-  const h = createPluginHarness(t);
-  saveConfig({
-    schemaVersion: 5,
-    default: "标准",
-    projects: {},
-    teams: {
-      标准: {
-        developer: { model: "antigravity/gemini-4-neon", thinking: "xhigh" },
-        codeReviewers: [
-          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-          { model: "codex/gpt-6.2-astra", thinking: "high" },
-        ],
-        separatePlanReviewers: false,
-        planReviewers: [
-          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-          { model: "codex/gpt-6.2-astra", thinking: "high" },
-        ],
-        expert: { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-        complexMode: "simple",
-      },
-    },
-  });
-  // Use Codex as the open chat provider to guard against refresh_agent_request /
-  // hydrateTimelineFromProvider (`thread/items/list is not supported yet`).
-  h.agentDirectory.set("launcher-1", {
-    id: "launcher-1",
-    status: "idle",
-    provider: "codex",
-    model: "gpt-6.2-astra",
-    thinkingOptionId: "high",
-  });
-
-  // Guard: starting /paseo-team while the chat is mid-turn is rejected cleanly.
-  h.agentDirectory.set("busy-chat", {
-    id: "busy-chat",
-    status: "running",
-    provider: "claude",
-    model: "claude-sonnet-5-5",
-  });
-  await assert.rejects(
-    () =>
-      h.invokeRpc(startTeamTaskRpc.name, {
-        cwd: h.workspaceDir,
-        workspaceId: "wks_l2",
-        agentId: "busy-chat",
-        rawArgs: "Should not interrupt running chat",
-      }),
-    /currently running/,
-  );
-
-  const openToolMap = async (req: Record<string, unknown>) => {
-    const out = (await h.invokeHook("agent.open.before", {
-      request: {
-        workspaceId: "wks_l2",
-        cwd: h.workspaceDir,
-        reason: "create",
-        purpose: "interactive",
-        background: false,
-        labels: {},
-        metadata: {},
-        appendSystemPrompt: [],
-        tools: [],
-        env: {},
-        mcpServers: {},
-        ...req,
-      },
-    })) as {
-      tools: Array<{
-        name: string;
-        execute: (
-          args: Record<string, unknown>,
-          context?: Record<string, unknown>,
-        ) => Promise<{
-          text: string;
-          isError?: boolean;
-        }>;
-      }>;
-    };
-    return new Map(out.tools.map((tool) => [tool.name, tool]));
-  };
-
-  // Simulate opening the user's normal chat BEFORE `/paseo-team` is ever invoked.
-  // Its persistent `paseo_team` tool is registered once at initial open and never reloaded!
-  const coordTools = await openToolMap({
-    agentId: "launcher-1",
-    provider: "codex",
-    title: "Existing user chat",
-  });
-  assert.ok(coordTools.has("paseo_team"));
-
-  const hookEventsBeforeStart = h.hookEvents.length;
-  const started = (await h.invokeRpc(startTeamTaskRpc.name, {
-    cwd: h.workspaceDir,
-    workspaceId: "wks_l2",
-    agentId: "launcher-1",
-    rawArgs: "Update label in app.txt, with code review",
-  })) as { taskId: string; recordPath: string; coordinatorAgentId: string };
-
-  // Current chat becomes the coordinator directly with ZERO reloads and ZERO hook invalidations,
-  // keeping prompt prefix caches 100% intact across all providers.
-  assert.equal(h.createdAgents.length, 0);
-  assert.equal(started.coordinatorAgentId, "launcher-1");
-  assert.equal(h.metadataUpdates.length, 1);
-  assert.equal(h.metadataUpdates[0].agentId, "launcher-1");
-  assert.equal(h.reloadedAgents.length, 0);
-  assert.deepEqual(h.hookEvents.slice(hookEventsBeforeStart), []);
-  assert.equal(h.hooks.has("agent.open.before"), true);
-  assert.equal(h.sentMessages.length, 1);
-  assert.equal(h.sentMessages[0].agentId, "launcher-1");
-  assert.match(h.sentMessages[0].text, /\[Team Kickoff\]/);
-  assert.match(h.sentMessages[0].text, /`paseo_team`/);
-  assert.match(h.sentMessages[0].text, /action: "set_route"/);
-  assert.match(h.sentMessages[0].text, /Plan Reviewer #1/);
-  assert.match(h.sentMessages[0].text, /antigravity\/gemini-4-neon/);
-  // Task starts in pending-route state until coordinator declares complexity & route.
-  assert.equal(loadTask(started.recordPath).routeDecided, false);
-  h.sentMessages.length = 0;
-
-  const coordCtx = () => ({
-    agent: {
-      id: "launcher-1",
-      metadata: h.agentDirectory.get("launcher-1")?.metadata ?? {},
-    },
-  });
-  const teamTool = coordTools.get("paseo_team")!;
-
-  // Validation guards on missing fields return clean errors without mutating task state.
   assert.equal(
-    (await teamTool.execute({ action: "set_route" }, coordCtx())).isError,
+    isAutoAllowedTeamPermission({
+      toolName: "mcp__paseo__paseo_team_roster",
+      isTeamCoordinator: false,
+      isTeamSubagent: false,
+    }),
     true,
   );
   assert.equal(
-    (await teamTool.execute({ action: "update" }, coordCtx())).isError,
-    true,
-  );
-
-  // Summary works immediately via dynamic context resolution without any reload.
-  const sumRes = await teamTool.execute({ action: "summary" }, coordCtx());
-  assert.notEqual(sumRes.isError, true);
-  assert.match(sumRes.text, new RegExp(started.taskId));
-
-  // Coordinator assesses complexity & locks route via paseo_team(set_route) before dispatching members.
-  const routeRes = await teamTool.execute(
-    {
-      action: "set_route",
-      isComplex: false,
-      planReview: false,
-      codeReview: true,
-      reason:
-        "Localized single-file label update with user-requested code review",
-    },
-    coordCtx(),
-  );
-  assert.notEqual(routeRes.isError, true);
-  assert.equal(loadTask(started.recordPath).routeDecided, true);
-  assert.equal(loadTask(started.recordPath).planReview, "not-required");
-  assert.equal(loadTask(started.recordPath).codeReview, "required");
-
-  // Subagents open with ZERO custom plugin tools (100% native Paseo messaging).
-  const devTools = await openToolMap({
-    agentId: "dev-l2",
-    provider: "antigravity",
-    title: "Developer",
-    labels: { task: started.taskId, role: "developer" },
-  });
-  const rev0Tools = await openToolMap({
-    agentId: "rev-l2-0",
-    provider: "claude",
-    title: "CR #1",
-    labels: { task: started.taskId, role: "code-reviewer" },
-  });
-  const rev1Tools = await openToolMap({
-    agentId: "rev-l2-1",
-    provider: "codex",
-    title: "CR #2",
-    labels: { task: started.taskId, role: "code-reviewer" },
-  });
-  assert.equal(devTools.size, 0);
-  assert.equal(rev0Tools.size, 0);
-  assert.equal(rev1Tools.size, 0);
-
-  // R1: Developer replies natively after running tests -> agent.turn.after passively records delivery & CI pass.
-  writeFileSync(path.join(h.workspaceDir, "app.txt"), "v1\n");
-  h.timelines.set("dev-l2", [
-    {
-      turnId: "dev-r1",
-      item: {
-        type: "assistant_message",
-        text: "Summary: Implemented v1 in app.txt\nChecks: PASS (tests ok r1)\nArchitecture impact: None",
-      },
-    },
-  ]);
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "dev-l2" },
-    turnId: "dev-r1",
-    outcome: { kind: "completed" },
-  });
-  assert.equal(loadTask(started.recordPath).candidate, "delivery-r1");
-  assert.equal(loadTask(started.recordPath).ci?.status, "pass");
-
-  // R1 review: rev0 replies APPROVE, rev1 replies REQUEST_CHANGES -> passively recorded; gate still blocked.
-  h.timelines.set("rev-l2-0", [
-    {
-      turnId: "r1-0",
-      item: {
-        type: "assistant_message",
-        text: "Verdict: APPROVE\nSummary: Looks good",
-      },
-    },
-  ]);
-  h.timelines.set("rev-l2-1", [
-    {
-      turnId: "r1-1",
-      item: {
-        type: "assistant_message",
-        text: "Verdict: REQUEST_CHANGES\nSummary: Needs edge fix\n- blocking: app.txt:1 missing newline check",
-      },
-    },
-  ]);
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-l2-0" },
-    turnId: "r1-0",
-    outcome: { kind: "completed" },
-  });
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-l2-1" },
-    turnId: "r1-1",
-    outcome: { kind: "completed" },
-  });
-
-  const blockedComplete = await teamTool.execute(
-    { action: "complete" },
-    coordCtx(),
-  );
-  assert.equal(blockedComplete.isError, true);
-  assert.match(blockedComplete.text, /Quality gate BLOCKED/);
-
-  // R2 rework: Developer replies natively with fresh passing check -> selective R2 re-review by rev1 only!
-  await new Promise((r) => setTimeout(r, 15));
-  writeFileSync(path.join(h.workspaceDir, "app.txt"), "v2\n");
-  h.timelines.set("dev-l2", [
-    {
-      turnId: "dev-r2",
-      item: {
-        type: "assistant_message",
-        text: "Summary: Fixed blocking finding in v2\nChecks: PASS (tests ok r2)\nArchitecture impact: None",
-      },
-    },
-  ]);
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "dev-l2" },
-    turnId: "dev-r2",
-    outcome: { kind: "completed" },
-  });
-  assert.equal(loadTask(started.recordPath).candidate, "delivery-r2");
-
-  // Selective R2: rev1 approves (rev0 already approved in R1).
-  h.timelines.set("rev-l2-1", [
-    {
-      turnId: "r2-1",
-      item: {
-        type: "assistant_message",
-        text: "Verdict: APPROVE\nSummary: Fix confirmed",
-      },
-    },
-  ]);
-  await h.invokeHook("agent.turn.after", {
-    agent: { id: "rev-l2-1" },
-    turnId: "r2-1",
-    outcome: { kind: "completed" },
-  });
-
-  // Final quality gate passes and marks task completed.
-  const done = await teamTool.execute({ action: "complete" }, coordCtx());
-  assert.equal(done.isError, false);
-  assert.match(done.text, /Quality gate READY; task completed/);
-  assert.equal(loadTask(started.recordPath).lifecycleStatus, "completed");
-
-  // Mutating an already-completed task is rejected cleanly until a new task starts.
-  const mutateCompleted = await teamTool.execute(
-    {
-      action: "set_route",
-      isComplex: false,
-      planReview: false,
-      codeReview: false,
-      reason: "late edit",
-    },
-    coordCtx(),
-  );
-  assert.equal(mutateCompleted.isError, true);
-  assert.match(mutateCompleted.text, /already completed/);
-
-  // Starting a 2nd task on the SAME chat automatically routes the same persistent `paseo_team`
-  // tool to task #2 with ZERO reload, and supports `force: true` with user ruling reason.
-  const started2 = (await h.invokeRpc(startTeamTaskRpc.name, {
-    cwd: h.workspaceDir,
-    workspaceId: "wks_l2",
-    agentId: "launcher-1",
-    rawArgs: "Second follow-up task, no review",
-  })) as { taskId: string; recordPath: string };
-  assert.notEqual(started2.taskId, started.taskId);
-  const sum2 = await teamTool.execute({ action: "summary" }, coordCtx());
-  assert.match(sum2.text, new RegExp(started2.taskId));
-  assert.equal(
-    (await teamTool.execute({ action: "complete", force: true }, coordCtx()))
-      .isError,
-    true,
-  );
-  const forced = await teamTool.execute(
-    { action: "complete", force: true, reason: "User accepted as-is in chat" },
-    coordCtx(),
-  );
-  assert.notEqual(forced.isError, true);
-  assert.equal(loadTask(started2.recordPath).lifecycleStatus, "completed");
-  h.sentMessages.length = 0;
-
-  // Zero spurious plugin messages after task completion.
-  for (const memberId of ["dev-l2", "rev-l2-0", "rev-l2-1"]) {
-    await h.invokeHook("agent.turn.after", {
-      agent: { id: memberId },
-      turnId: `final-${memberId}`,
-      outcome: { kind: "completed" },
-    });
-  }
-  assert.equal(h.sentMessages.length, 0);
-});
-
-test("regression: task started without plan review dynamically upgrades to planReview=required when user requests plan review mid-chat", async (t) => {
-  const h = createPluginHarness(t);
-  saveConfig({
-    schemaVersion: 5,
-    default: "标准",
-    projects: {},
-    teams: {
-      标准: {
-        developer: { model: "antigravity/gemini-4-neon", thinking: "xhigh" },
-        codeReviewers: [
-          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-          { model: "codex/gpt-6.2-astra", thinking: "high" },
-        ],
-        separatePlanReviewers: true,
-        planReviewers: [
-          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-          { model: "codex/gpt-6.2-astra", thinking: "high" },
-        ],
-        expert: { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-        complexMode: "simple",
-      },
-    },
-  });
-  h.agentDirectory.set("main-chat-7e7bc091", {
-    id: "main-chat-7e7bc091",
-    status: "idle",
-    provider: "claude",
-    model: "claude-sonnet-5-5",
-    thinkingOptionId: "medium",
-  });
-
-  // 1. User runs `/paseo-team 开始开发，但是先别部署。` without mentioning plan review.
-  const started = (await h.invokeRpc(startTeamTaskRpc.name, {
-    cwd: h.workspaceDir,
-    workspaceId: "wks_pm",
-    agentId: "main-chat-7e7bc091",
-    rawArgs: "开始开发，但是先别部署。",
-  })) as { taskId: string; recordPath: string; coordinatorAgentId: string };
-
-  assert.equal(h.createdAgents.length, 0);
-  assert.equal(started.coordinatorAgentId, "main-chat-7e7bc091");
-  assert.equal(loadTask(started.recordPath).planReview, "not-required");
-
-  // 2. User later sends "需要方案评审" in the chat -> Coordinator writes plan.md, calls update(planFile), and spawns plan reviewers.
-  const openOut = (await h.invokeHook("agent.open.before", {
-    request: {
-      workspaceId: "wks_pm",
-      cwd: h.workspaceDir,
-      reason: "create",
-      purpose: "interactive",
-      background: false,
-      agentId: "main-chat-7e7bc091",
-      provider: "claude",
-      title: "搭建套利系统分层 Loss 回测",
-      labels: {},
-      metadata: h.agentDirectory.get("main-chat-7e7bc091")?.metadata ?? {},
-      appendSystemPrompt: [],
-      tools: [],
-      env: {},
-      mcpServers: {},
-    },
-  })) as {
-    tools: Array<{
-      name: string;
-      execute: (
-        args: Record<string, unknown>,
-        context?: Record<string, unknown>,
-      ) => Promise<{
-        text: string;
-        isError?: boolean;
-      }>;
-    }>;
-  };
-  const coordTools = new Map(openOut.tools.map((tool) => [tool.name, tool]));
-  const coordCtx = {
-    agent: {
-      id: "main-chat-7e7bc091",
-      metadata: h.agentDirectory.get("main-chat-7e7bc091")?.metadata ?? {},
-    },
-  };
-  const taskDir = path.dirname(started.recordPath);
-  writeFileSync(path.join(taskDir, "plan.md"), "# 方案 v1\n");
-  const planRes = await coordTools.get("paseo_team")!.execute(
-    {
-      action: "update",
-      planFile: "plan.md",
-      summary: "方案 v1",
-    },
-    coordCtx,
-  );
-  assert.notEqual(planRes.isError, true);
-
-  await h.invokeHook("agent.create.after", {
-    agent: {
-      id: "plan-rev-1",
-      parentAgentId: "main-chat-7e7bc091",
-      provider: "claude",
-      cwd: h.workspaceDir,
-      title: "[Plan Reviewer #1] 需求规格与边界",
-      background: false,
-      metadata: {},
-    },
-  });
-
-  const upgraded = loadTask(started.recordPath);
-  assert.equal(upgraded.planReview, "required");
-  const blockedGate = await coordTools.get("paseo_team")!.execute(
-    {
-      action: "complete",
-      inspectOnly: true,
-    },
-    coordCtx,
-  );
-  assert.equal(blockedGate.isError, true);
-  assert.match(blockedGate.text, /plan-rev-1/);
-
-  // Regression (a37abfe6): when Plan Review hits R2 circuit breaker and the user chooses
-  // to waive remaining plan review in chat, coordinator calls `paseo_team(update)` with decision="waive_stage"
-  // to unlock the task and let the Quality Gate pass after development!
-  recordReviewVerdict(started.recordPath, {
-    stage: "plan",
-    agentId: "plan-rev-1",
-    round: 1,
-    verdict: "REQUEST_CHANGES",
-    summary: "Fix R1",
-    findings: ["blocking: plan.md:1 fix R1"],
-  });
-  const broken = recordReviewVerdict(started.recordPath, {
-    stage: "plan",
-    agentId: "plan-rev-1",
-    round: 2,
-    verdict: "REQUEST_CHANGES",
-    summary: "Fix R2",
-    findings: ["blocking: plan.md:2 fix R2"],
-  });
-  assert.equal(broken.status, "CIRCUIT_BROKEN");
-  assert.equal(loadTask(started.recordPath).lifecycleStatus, "blocked");
-
-  // Validation error if reason is missing when decision is given.
-  assert.equal(
-    (
-      await coordTools
-        .get("paseo_team")!
-        .execute({ action: "update", decision: "waive_stage" }, coordCtx)
-    ).isError,
-    true,
-  );
-
-  const waived = await coordTools.get("paseo_team")!.execute(
-    {
-      action: "update",
-      decision: "waive_stage",
-      stage: "plan",
-      reason: "用户选择写前拦截后跳过第3轮方案评审直接开发",
-    },
-    coordCtx,
-  );
-  assert.notEqual(waived.isError, true);
-  assert.equal(loadTask(started.recordPath).lifecycleStatus, "active");
-  assert.equal(loadTask(started.recordPath).planReview, "waived");
-  assert.equal(loadTask(started.recordPath).circuitBroken, null);
-
-  // Summary includes the latest review findings directly so coordinator doesn't shell out.
-  const sum = await coordTools
-    .get("paseo_team")!
-    .execute({ action: "summary" }, coordCtx);
-  assert.match(sum.text, /blocking: plan\.md:2 fix R2/);
-
-  // After Developer delivers with passing CI (and codeReview not-required), `complete` succeeds!
-  recordCandidateDelivery(started.recordPath, {
-    summary: "Implemented per user-approved v3",
-    architectureImpact: "无",
-    ciWaivedUserQuote: "CI waived for regression test",
-  });
-  const completed = await coordTools
-    .get("paseo_team")!
-    .execute({ action: "complete" }, coordCtx);
-  assert.equal(completed.isError, false);
-  assert.equal(loadTask(started.recordPath).lifecycleStatus, "completed");
-});
-
-test("L2 integration: draft-chat /paseo-team fallback via paseo_team(action='start') initializes task inline", async (t) => {
-  const h = createPluginHarness(t);
-  const { saveConfig } = await import("../server/config-store.ts");
-  saveConfig({
-    schemaVersion: 5,
-    default: "标准",
-    projects: {},
-    teams: {
-      标准: {
-        developer: { model: "antigravity/gemini-4-neon", thinking: "xhigh" },
-        planReviewers: [
-          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-          { model: "codex/gpt-6.2-astra", thinking: "high" },
-        ],
-        separatePlanReviewers: false,
-        codeReviewers: [
-          { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-          { model: "codex/gpt-6.2-astra", thinking: "high" },
-        ],
-        expert: { model: "claude/claude-sonnet-5-5", thinking: "medium" },
-        complexMode: "simple",
-      },
-    },
-  });
-
-  const draftAgentId = "draft-chat-ee921d96";
-  h.agentDirectory.set(draftAgentId, {
-    id: draftAgentId,
-    workspaceId: "wks_todo",
-    cwd: h.workspaceDir,
-    provider: "claude",
-    model: "claude-opus-5-5",
-    thinkingOptionId: "high",
-    status: "running",
-    parentAgentId: null,
-    title: "继续完成背景自定义图片功能",
-    metadata: {},
-  });
-
-  // 1. Brand-new top-level chat opens with no task yet; agent.open.before attaches `paseo_team`.
-  const openOut = (await h.invokeHook("agent.open.before", {
-    request: {
-      workspaceId: "wks_todo",
-      cwd: h.workspaceDir,
-      reason: "create",
-      purpose: "interactive",
-      background: false,
-      agentId: draftAgentId,
-      provider: "claude",
-      title: "继续完成背景自定义图片功能",
-      labels: {},
-      metadata: {},
-      appendSystemPrompt: [],
-      tools: [],
-      env: {},
-      mcpServers: {},
-    },
-  })) as {
-    tools: Array<{
-      name: string;
-      description: string;
-      execute: (
-        args: Record<string, unknown>,
-        context?: Record<string, unknown>,
-      ) => Promise<{
-        text: string;
-        structuredContent?: unknown;
-        isError?: boolean;
-      }>;
-    }>;
-  };
-  const teamTool = (openOut?.tools ?? []).find(
-    (tool) => tool.name === "paseo_team",
-  );
-  assert.ok(
-    teamTool,
-    "top-level draft chat should receive persistent paseo_team tool",
-  );
-  assert.match(teamTool.description, /action="start"/);
-
-  // 2. Permission hook auto-allows `paseo_team(action="start")` on top-level chat even before task.json exists,
-  //    but does NOT auto-allow other actions or subagent start calls.
-  await h.invokeHook("agent.permission.before", {
-    agent: {
-      id: draftAgentId,
-      workspaceId: "wks_todo",
-      parentAgentId: null,
-      provider: "claude",
-      cwd: h.workspaceDir,
-      title: "继续完成背景自定义图片功能",
-      background: false,
-      metadata: {},
-    },
-    request: {
-      id: "perm-draft-start",
-      kind: "tool",
-      toolName: "mcp_paseo_paseo_team",
-      input: { action: "start", rawArgs: "继续完成背景自定义图片功能" },
-      actions: [{ id: "allow-once", behavior: "allow" }],
-    },
-  });
-  await h.invokeHook("agent.permission.before", {
-    agent: {
-      id: draftAgentId,
-      workspaceId: "wks_todo",
-      parentAgentId: null,
-      provider: "claude",
-      cwd: h.workspaceDir,
-      title: "继续完成背景自定义图片功能",
-      background: false,
-      metadata: {},
-    },
-    request: {
-      id: "perm-draft-set-route-no-task",
-      kind: "tool",
-      toolName: "mcp_paseo_paseo_team",
-      input: { action: "set_route" },
-      actions: [{ id: "allow-once", behavior: "allow" }],
-    },
-  });
-  assert.equal(
-    h.permissionResponses.some((r) => r.requestId === "perm-draft-start"),
+    isAutoAllowedTeamPermission({
+      toolName: "mcp__paseo__create_agent",
+      isTeamCoordinator: true,
+      isTeamSubagent: false,
+    }),
     true,
   );
   assert.equal(
-    h.permissionResponses.some(
-      (r) => r.requestId === "perm-draft-set-route-no-task",
-    ),
+    isAutoAllowedTeamPermission({
+      toolName: "mcp__paseo__create_agent",
+      isTeamCoordinator: false,
+      isTeamSubagent: false,
+    }),
+    false,
+  );
+  assert.equal(
+    isAutoAllowedTeamPermission({
+      toolName: "run_shell_command",
+      isTeamCoordinator: true,
+      isTeamSubagent: false,
+    }),
     false,
   );
 
-  // 3. Calling `action="start"` while chat is already running creates task.json, binds metadata,
-  //    strips accidental `/paseo-team` prefix, does NOT call send(), and returns the full kickoff brief.
-  const toolCtx = {
+  await h.invokeHook("agent.permission.before", {
     agent: {
-      id: draftAgentId,
-      workspaceId: "wks_todo",
+      id: "coord-1",
       parentAgentId: null,
-      provider: "claude",
-      cwd: h.workspaceDir,
-      title: "继续完成背景自定义图片功能",
-      background: false,
-      metadata: {},
-    },
-    paseo: h.paseo,
-  };
-  const started = await teamTool.execute(
-    {
-      action: "start",
-      rawArgs: "/paseo-team 继续完成背景自定义图片功能 with review",
-    },
-    toolCtx,
-  );
-  assert.notEqual(started.isError, true);
-  // MCP unwrap contract (regression for bcd00383): structuredContent must be omitted
-  // because Paseo's unwrapMcpResult drops `text` whenever structuredContent is present.
-  assert.equal(
-    started.structuredContent,
-    undefined,
-    "paseo_team tool results must omit structuredContent so Paseo never strips text",
-  );
-  assert.match(started.text, /\[Team 任务启动\]/);
-  assert.match(started.text, /继续完成背景自定义图片功能/);
-  assert.match(started.text, /"modeId":"auto"/);
-  assert.match(started.text, /"role":"developer"/);
-  assert.equal(
-    h.sentMessages.filter((m) => m.agentId === draftAgentId).length,
-    0,
-    "tool start must return kickoff inline without sending a duplicate user message",
-  );
-  const meta = (
-    h.agentDirectory.get(draftAgentId)?.metadata as
-      Record<string, unknown> | undefined
-  )?.["paseo-team.task"] as
-    { taskId?: string; recordPath?: string; role?: string } | undefined;
-  assert.equal(meta?.role, "coordinator");
-  assert.ok(meta?.recordPath, "metadata should record task recordPath");
-  const record = loadTask(meta.recordPath);
-  assert.equal(record.coordinatorAgentId, draftAgentId);
-  assert.equal(record.codeReview, "required");
-  assert.equal(
-    record.nodes.find((n) => n.nodeId === "coordinator")?.profile,
-    "claude/claude-opus-5-5",
-  );
-
-  // 4. Calling `action="start"` again immediately on the same unrouted task is idempotent and text-only.
-  const dup = await teamTool.execute(
-    { action: "start", rawArgs: "继续完成背景自定义图片功能" },
-    toolCtx,
-  );
-  assert.notEqual(dup.isError, true);
-  assert.equal(dup.structuredContent, undefined);
-  assert.match(dup.text, /already initialized/i);
-
-  // 5. Subagent calls to `action="start"` are rejected.
-  const subDenied = await teamTool.execute(
-    { action: "start", rawArgs: "subagent attempt" },
-    {
-      ...toolCtx,
-      agent: {
-        ...toolCtx.agent,
-        id: "child-dev-1",
-        parentAgentId: draftAgentId,
-      },
-    },
-  );
-  assert.equal(subDenied.isError, true);
-
-  // 6. Immediately calling `set_route` and `summary` in the same turn works and omits structuredContent.
-  const routed = await teamTool.execute(
-    {
-      action: "set_route",
-      isComplex: false,
-      planReview: false,
-      codeReview: true,
-      reason: "单文件前端背景功能，跳过方案评审但保留代码审查",
-    },
-    toolCtx,
-  );
-  assert.notEqual(routed.isError, true);
-  assert.equal(routed.structuredContent, undefined);
-  assert.equal(loadTask(meta.recordPath).routeDecided, true);
-
-  const summaryOut = await teamTool.execute({ action: "summary" }, toolCtx);
-  assert.notEqual(summaryOut.isError, true);
-  assert.equal(summaryOut.structuredContent, undefined);
-  assert.match(summaryOut.text, /继续完成背景自定义图片功能/);
-
-  // 7. Role-separation guard: Coordinator cannot fabricate a Developer delivery via `update`
-  //    before actually dispatching a Developer agent via create_agent.
-  const fakeDelivery = await teamTool.execute(
-    {
-      action: "update",
-      summary: "Coordinator edited file directly",
-      ciStatus: "pass",
-    },
-    toolCtx,
-  );
-  assert.equal(fakeDelivery.isError, true);
-  assert.match(fakeDelivery.text, /create_agent/);
-
-  // 8. Dispatch-in-progress guard (regression for bcd00383): once Developer is dispatched and still
-  //    running, calling `update` with a "已派发" progress note must be rejected instead of marking
-  //    Developer completed prematurely.
-  const devId = "dev-live-a1f8de04";
-  h.agentDirectory.set(devId, {
-    id: devId,
-    workspaceId: "wks_todo",
-    cwd: h.workspaceDir,
-    provider: "antigravity",
-    model: "gemini-4-neon",
-    status: "running",
-    parentAgentId: draftAgentId,
-    title: "Developer: 设置按钮 + 背景透明",
-    metadata: {},
-  });
-  await h.invokeHook("agent.create.after", {
-    agent: {
-      id: devId,
-      workspaceId: "wks_todo",
-      parentAgentId: draftAgentId,
-      provider: "antigravity",
-      cwd: h.workspaceDir,
-      title: "Developer: 设置按钮 + 背景透明",
-      background: false,
-      metadata: {},
-    },
-  });
-  const prematureUpdate = await teamTool.execute(
-    {
-      action: "update",
-      stage: "code",
-      agentId: devId,
-      summary: "Developer 已派发：设置 dialog 收纳主题/背景控件",
-    },
-    toolCtx,
-  );
-  assert.equal(prematureUpdate.isError, true);
-  assert.match(prematureUpdate.text, /still running/i);
-  assert.equal(loadTask(meta.recordPath).delivery, null);
-  assert.equal(
-    loadTask(meta.recordPath).nodes.find((n) => n.role === "developer")?.status,
-    "running",
-  );
-
-  // Even if Developer becomes idle, a bare "已派发" note without ciStatus must not record a delivery.
-  h.agentDirectory.get(devId)!.status = "idle";
-  const dispatchNoteUpdate = await teamTool.execute(
-    {
-      action: "update",
-      agentId: devId,
-      summary: "Developer 已派发：准备开发",
-    },
-    toolCtx,
-  );
-  assert.equal(dispatchNoteUpdate.isError, true);
-  assert.equal(loadTask(meta.recordPath).delivery, null);
-
-  // `complete` (blocked) also omits structuredContent so missing-gate reasons reach the model.
-  const blockedComplete = await teamTool.execute(
-    { action: "complete", inspectOnly: true },
-    toolCtx,
-  );
-  assert.equal(blockedComplete.isError, true);
-  assert.equal(blockedComplete.structuredContent, undefined);
-  assert.match(blockedComplete.text, /Quality gate BLOCKED/);
-
-  // 9. Single-active-task guard: once task #1 is routed/active, neither the same chat nor another
-  //    active chat in the same working tree can start a second concurrent task.
-  h.agentDirectory.get(draftAgentId)!.status = "idle";
-  await assert.rejects(
-    () =>
-      h.invokeRpc(startTeamTaskRpc.name, {
-        cwd: h.workspaceDir,
-        workspaceId: "wks_todo",
-        agentId: draftAgentId,
-        rawArgs: "并发第二个任务应该被拦截",
-      }),
-    /同一对话不能同时运行两个任务|already has an active team task/,
-  );
-
-  const concurrentToolStart = await teamTool.execute(
-    { action: "start", rawArgs: "并发第二个任务应该被拦截" },
-    toolCtx,
-  );
-  assert.equal(concurrentToolStart.isError, true);
-  assert.match(
-    concurrentToolStart.text,
-    /同一对话不能同时运行两个任务|already has an active team task/,
-  );
-
-  // Another non-archived chat in the SAME workspace directory is also blocked while task #1 is active.
-  const otherChatId = "other-chat-in-same-dir";
-  h.agentDirectory.set(otherChatId, {
-    id: otherChatId,
-    workspaceId: "wks_todo",
-    cwd: h.workspaceDir,
-    provider: "claude",
-    model: "claude-opus-5-5",
-    status: "idle",
-    parentAgentId: null,
-    metadata: {},
-  });
-  await assert.rejects(
-    () =>
-      h.invokeRpc(startTeamTaskRpc.name, {
-        cwd: h.workspaceDir,
-        workspaceId: "wks_todo",
-        agentId: otherChatId,
-        rawArgs: "同目录另一个对话并发任务",
-      }),
-    /另一个对话的未结项团队任务|Another chat in this workspace directory/,
-  );
-
-  // If the first chat was archived in Paseo, its orphaned task is auto-abandoned and chat #2 can start cleanly.
-  h.agentDirectory.get(draftAgentId)!.archivedAt = "2026-11-27T12:00:00.000Z";
-  const recovered = (await h.invokeRpc(startTeamTaskRpc.name, {
-    cwd: h.workspaceDir,
-    workspaceId: "wks_todo",
-    agentId: otherChatId,
-    rawArgs: "原主控归档后在同目录启动新任务",
-  })) as { taskId: string; recordPath: string };
-  assert.ok(recovered.taskId);
-  assert.equal(loadTask(meta.recordPath).lifecycleStatus, "abandoned");
-  assert.equal(loadTask(recovered.recordPath).lifecycleStatus, "active");
-
-  // Abandoning task #2 via control RPC unlocks starting task #3 sequentially on the same chat.
-  await h.invokeRpc(controlTaskRpc.name, {
-    recordPath: recovered.recordPath,
-    action: "abandon_task",
-    language: "zh",
-  });
-  const third = (await h.invokeRpc(startTeamTaskRpc.name, {
-    cwd: h.workspaceDir,
-    workspaceId: "wks_todo",
-    agentId: otherChatId,
-    rawArgs: "放弃后串行启动下一个任务",
-  })) as { taskId: string; recordPath: string };
-  assert.ok(third.taskId);
-  assert.notEqual(third.taskId, recovered.taskId);
-});
-
-test("composer Team toggle metadata auto-starts on first open, clears flag on start/error, and tags subagent metadata", async (t) => {
-  const h = createPluginHarness(t);
-  const { TEAM_ENABLED_METADATA_KEY, TEAM_TASK_METADATA_KEY } =
-    await import("../shared/contracts.ts");
-  const { COORDINATOR_ACTIVATION_HINT, COORDINATOR_AUTO_START_HINT } =
-    await import("../server/prompts.ts");
-
-  saveConfig({
-    schemaVersion: 5,
-    default: "标准",
-    teams: { 标准: samplePreset },
-    projects: {},
-  });
-
-  // 1. Plain top-level chat without toggle receives activation hint only (no auto-start directive).
-  const normalOpen = (await h.invokeHook("agent.open.before", {
-    request: {
-      agentId: "normal-chat-1",
-      workspaceId: "wks_nw",
-      provider: "claude",
-      cwd: h.workspaceDir,
-      reason: "create",
-      purpose: "interactive",
-      title: "普通对话",
-      background: false,
-      labels: {},
-      metadata: {},
-      appendSystemPrompt: [],
-      tools: [],
-      env: {},
-      mcpServers: {},
-    },
-  })) as { appendSystemPrompt?: string[]; tools?: Array<{ name: string }> };
-  assert.ok(
-    normalOpen.appendSystemPrompt?.includes(COORDINATOR_ACTIVATION_HINT),
-  );
-  assert.equal(
-    normalOpen.appendSystemPrompt?.includes(COORDINATOR_AUTO_START_HINT),
-    false,
-  );
-
-  // 2. New Workspace / draft chat with Team toggle ON receives COORDINATOR_AUTO_START_HINT.
-  const nwAgentId = "new-workspace-team-1";
-  h.agentDirectory.set(nwAgentId, {
-    id: nwAgentId,
-    workspaceId: "wks_nw",
-    cwd: h.workspaceDir,
-    provider: "claude",
-    model: "claude-opus-5-5",
-    status: "running",
-    parentAgentId: null,
-    metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
-  });
-  const toggleOpen = (await h.invokeHook("agent.open.before", {
-    request: {
-      agentId: nwAgentId,
-      workspaceId: "wks_nw",
-      provider: "claude",
-      cwd: h.workspaceDir,
-      reason: "create",
-      purpose: "interactive",
-      title: "实现暗色主题切换",
-      background: false,
-      labels: {},
+      title: "透明度",
       metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
-      appendSystemPrompt: [],
-      tools: [],
-      env: {},
-      mcpServers: {},
     },
-  })) as {
-    appendSystemPrompt?: string[];
-    tools?: Array<{
-      name: string;
-      execute: (
-        args: Record<string, unknown>,
-        ctx: Record<string, unknown>,
-      ) => Promise<{ text: string; isError?: boolean }>;
-    }>;
-  };
-  assert.ok(
-    toggleOpen.appendSystemPrompt?.includes(COORDINATOR_ACTIVATION_HINT),
-  );
-  assert.ok(
-    toggleOpen.appendSystemPrompt?.includes(COORDINATOR_AUTO_START_HINT),
-  );
-
-  // 3. Model invokes `paseo_team(action="start")` with raw natural-language goal (no `/paseo-team` prefix).
-  const teamTool = toggleOpen.tools?.find((x) => x.name === "paseo_team");
-  assert.ok(teamTool);
-  const startRes = await teamTool.execute(
-    { action: "start", rawArgs: "实现暗色主题切换" },
-    {
-      agent: {
-        id: nwAgentId,
-        workspaceId: "wks_nw",
-        parentAgentId: null,
-        provider: "claude",
-        cwd: h.workspaceDir,
-        title: "实现暗色主题切换",
-        background: false,
-        metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
-      },
-      paseo: h.paseo,
-    },
-  );
-  assert.notEqual(startRes.isError, true);
-  assert.match(startRes.text, /\[Team 任务启动\]/);
-  assert.match(startRes.text, /实现暗色主题切换/);
-
-  // Flag must be cleared on start while task metadata is written.
-  const nwMeta = h.agentDirectory.get(nwAgentId)?.metadata as Record<
-    string,
-    unknown
-  >;
-  assert.equal(nwMeta[TEAM_ENABLED_METADATA_KEY], null);
-  const taskMeta = nwMeta[TEAM_TASK_METADATA_KEY] as {
-    taskId: string;
-    recordPath: string;
-    role: string;
-  };
-  assert.equal(taskMeta.role, "coordinator");
-
-  // 4. Subsequent resume does NOT inject COORDINATOR_AUTO_START_HINT even if stale flag lingers.
-  const resumeOpen = (await h.invokeHook("agent.open.before", {
     request: {
-      agentId: nwAgentId,
-      workspaceId: "wks_nw",
-      provider: "claude",
-      cwd: h.workspaceDir,
-      reason: "resume",
-      purpose: "interactive",
-      title: "实现暗色主题切换",
-      background: false,
-      labels: {},
-      metadata: {
-        [TEAM_TASK_METADATA_KEY]: taskMeta,
-        [TEAM_ENABLED_METADATA_KEY]: true,
-      },
-      appendSystemPrompt: [],
-      tools: [],
-      env: {},
-      mcpServers: {},
+      id: "perm-1",
+      kind: "tool",
+      toolName: "mcp__paseo__create_agent",
+      actions: [{ id: "allow-once", behavior: "allow" }],
     },
-  })) as { appendSystemPrompt?: string[] };
-  assert.equal(
-    resumeOpen.appendSystemPrompt?.includes(COORDINATOR_AUTO_START_HINT),
-    false,
-  );
-
-  // 5. Subagent created by coordinator gets TEAM_TASK_METADATA_KEY so composer hides Team toggle.
-  h.agentDirectory.set("nw-dev-1", {
-    id: "nw-dev-1",
-    workspaceId: "wks_nw",
-    cwd: h.workspaceDir,
-    provider: "antigravity",
-    parentAgentId: nwAgentId,
-    title: "Developer: 暗色主题切换",
-    metadata: {},
   });
-  await h.invokeHook("agent.create.after", {
+  await h.invokeHook("agent.permission.before", {
     agent: {
-      id: "nw-dev-1",
-      workspaceId: "wks_nw",
-      parentAgentId: nwAgentId,
-      provider: "antigravity",
-      cwd: h.workspaceDir,
-      title: "Developer: 暗色主题切换",
-      background: false,
-      metadata: {},
+      id: "coord-1",
+      parentAgentId: null,
+      title: "透明度",
+      metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
+    },
+    request: {
+      id: "perm-shell",
+      kind: "tool",
+      toolName: "bash",
+      actions: [{ id: "allow-once", behavior: "allow" }],
     },
   });
-  const devMeta = (
-    h.agentDirectory.get("nw-dev-1")?.metadata as Record<string, unknown>
-  )[TEAM_TASK_METADATA_KEY] as { role?: string; taskId?: string };
-  assert.equal(devMeta?.role, "developer");
-  assert.equal(devMeta?.taskId, taskMeta.taskId);
-
-  // 6. If a second chat with Team toggle ON fails to start (active task conflict), its flag is cleared.
-  const conflictChatId = "new-workspace-team-conflict";
-  h.agentDirectory.set(conflictChatId, {
-    id: conflictChatId,
-    workspaceId: "wks_nw",
-    cwd: h.workspaceDir,
-    provider: "claude",
-    status: "running",
-    parentAgentId: null,
-    metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
-  });
-  const failedStart = await teamTool.execute(
-    { action: "start", rawArgs: "并发第二个任务" },
-    {
-      agent: {
-        id: conflictChatId,
-        workspaceId: "wks_nw",
-        parentAgentId: null,
-        provider: "claude",
-        cwd: h.workspaceDir,
-        title: "并发第二个任务",
-        background: false,
-        metadata: { [TEAM_ENABLED_METADATA_KEY]: true },
-      },
-      paseo: h.paseo,
-    },
-  );
-  assert.equal(failedStart.isError, true);
-  assert.equal(
-    (h.agentDirectory.get(conflictChatId)?.metadata as Record<string, unknown>)[
-      TEAM_ENABLED_METADATA_KEY
-    ],
-    null,
-  );
-  assert.equal(
-    (taskMeta as { active?: boolean }).active,
-    true,
-    "started coordinator task metadata must mark active=true",
-  );
-
-  // 7. Abandoning task marks coordinator task metadata active=false so composer toggle turns off.
-  await h.invokeRpc(controlTaskRpc.name, {
-    recordPath: taskMeta.recordPath,
-    action: "abandon_task",
-    language: "zh",
-  });
-  const afterAbandonMeta = (
-    h.agentDirectory.get(nwAgentId)?.metadata as Record<string, unknown>
-  )[TEAM_TASK_METADATA_KEY] as { active?: boolean };
-  assert.equal(afterAbandonMeta?.active, false);
+  assert.deepEqual(h.permissionResponses, [
+    { agentId: "coord-1", requestId: "perm-1" },
+  ]);
 });
 
-test("regression for 47c1f1b8: legacy pre-plugin task without coordinator never bricks start, cross-worktree spawn gets paseo_team, and label-only parent builds native DAG", async (t) => {
-  const h = createPluginHarness(t);
-  const { getConversationGraphRpc } = await import("../shared/contracts.ts");
-  saveConfig({
-    schemaVersion: 5,
-    default: "标准",
-    teams: { 标准: samplePreset },
-    projects: {},
-  });
-
-  // 1. Write two historical/orphaned tasks in the same workspace:
-  //    a) pre-plugin task with phase="completed-candidate" & no coordinatorAgentId
-  //    b) orphaned task with no coordinatorAgentId and no phase/status
-  const legacyDir1 = path.join(h.stateRoot, "todo", "legacy-completed");
-  mkdirSync(legacyDir1, { recursive: true });
-  writeFileSync(
-    path.join(legacyDir1, "task.json"),
-    JSON.stringify({
-      taskId: "todo-whimsical-examples-2026-10-24",
-      repo: h.workspaceDir,
-      request: "legacy completed task",
-      phase: "completed-candidate",
-    }),
-  );
-  const legacyDir2 = path.join(h.stateRoot, "todo", "legacy-orphan");
-  mkdirSync(legacyDir2, { recursive: true });
-  writeFileSync(
-    path.join(legacyDir2, "task.json"),
-    JSON.stringify({
-      taskId: "legacy-orphan-no-coord",
-      repo: h.workspaceDir,
-      request: "orphan without coordinator",
-    }),
-  );
-  assert.equal(
-    loadTask(path.join(legacyDir1, "task.json")).lifecycleStatus,
-    "completed",
-  );
-
-  // 2. Starting a team task in h.workspaceDir auto-abandons the orphan and succeeds.
-  const mainChatId = "chat-47c1f1b8";
-  h.agentDirectory.set(mainChatId, {
-    id: mainChatId,
-    workspaceId: "wks_main_todo",
+test("config RPCs, startTeamTaskRpc, and live Paseo graph subscriptions work end-to-end", async (t) => {
+  const h = createServerHarness(t);
+  const saved = (await h.invokeRpc(saveConfigRpc.name, {
     cwd: h.workspaceDir,
-    provider: "claude",
-    model: "claude-opus-5-5",
-    status: "running",
-    parentAgentId: null,
-    metadata: {},
-  });
-  const mainOpen = (await h.invokeHook("agent.open.before", {
-    request: {
-      agentId: mainChatId,
-      workspaceId: "wks_main_todo",
-      provider: "claude",
-      cwd: h.workspaceDir,
-      reason: "create",
-      purpose: "interactive",
-      title: "设置组件透明度",
-      background: false,
-      labels: {},
-      metadata: {},
-      appendSystemPrompt: [],
-      tools: [],
-      env: {},
-      mcpServers: {},
+    config: {
+      schemaVersion: 5,
+      default: "标准",
+      teams: { 标准: samplePreset },
+      projects: {},
     },
-  })) as {
-    tools?: Array<{
-      name: string;
-      execute: (
-        args: Record<string, unknown>,
-        ctx: Record<string, unknown>,
-      ) => Promise<{ text: string; isError?: boolean }>;
-    }>;
-  };
-  const mainTool = mainOpen.tools?.find((x) => x.name === "paseo_team")!;
-  const startedMain = await mainTool.execute(
-    { action: "start", rawArgs: "设置组件透明度" },
-    {
-      agent: {
-        id: mainChatId,
-        workspaceId: "wks_main_todo",
-        parentAgentId: null,
-        provider: "claude",
-        cwd: h.workspaceDir,
-        metadata: {},
-      },
-      paseo: h.paseo,
-    },
-  );
-  assert.notEqual(startedMain.isError, true);
-  assert.equal(
-    loadTask(path.join(legacyDir2, "task.json")).lifecycleStatus,
-    "abandoned",
-  );
+  })) as { effectiveTeamName: string };
+  assert.equal(saved.effectiveTeamName, "标准");
 
-  // 3. Cross-worktree coordinator spawned via create_agent (different workspaceId & worktree cwd)
-  //    receives paseo_team + activation hint and can start its own team task!
-  const worktreeDir = path.join(h.baseDir, "worktree-panel-opacity");
-  mkdirSync(worktreeDir, { recursive: true });
-  const wtCoordId = "chat-060e18fe";
-  h.agentDirectory.set(wtCoordId, {
-    id: wtCoordId,
-    workspaceId: "wks_worktree_opacity",
-    cwd: worktreeDir,
-    provider: "claude",
-    model: "claude-opus-5-5",
-    status: "running",
-    labels: { "paseo.parent-agent-id": mainChatId },
-    title: "团队协调：自定义组件透明度",
-    metadata: {},
-  });
-  const wtOpen = (await h.invokeHook("agent.open.before", {
-    request: {
-      agentId: wtCoordId,
-      workspaceId: "wks_worktree_opacity",
-      provider: "claude",
-      cwd: worktreeDir,
-      reason: "create",
-      purpose: "interactive",
-      title: "团队协调：自定义组件透明度",
-      background: false,
-      labels: { "paseo.parent-agent-id": mainChatId },
-      metadata: {},
-      appendSystemPrompt: [],
-      tools: [],
-      env: {},
-      mcpServers: {},
-    },
-  })) as {
-    appendSystemPrompt?: string[];
-    tools?: Array<{
-      name: string;
-      execute: (
-        args: Record<string, unknown>,
-        ctx: Record<string, unknown>,
-      ) => Promise<{ text: string; isError?: boolean }>;
-    }>;
-  };
-  assert.ok(wtOpen, "cross-worktree coordinator must receive team open hook");
-  const wtTool = wtOpen.tools?.find((x) => x.name === "paseo_team");
-  assert.ok(wtTool, "cross-worktree coordinator must receive paseo_team tool");
-  const wtStart = await wtTool.execute(
-    { action: "start", rawArgs: "自定义组件透明度" },
-    {
-      agent: {
-        id: wtCoordId,
-        workspaceId: "wks_worktree_opacity",
-        parentAgentId: mainChatId,
-        provider: "claude",
-        cwd: worktreeDir,
-        metadata: {},
-      },
-      paseo: h.paseo,
-    },
-  );
-  assert.notEqual(wtStart.isError, true);
-  assert.match(wtStart.text, /自定义组件透明度/);
+  const loaded = (await h.invokeRpc(getConfigBundleRpc.name, {
+    cwd: h.workspaceDir,
+  })) as { effectiveTeamName: string };
+  assert.equal(loaded.effectiveTeamName, "标准");
 
-  // 4. Native subagent discovery resolves labels["paseo.parent-agent-id"] even when top-level parentAgentId is omitted.
-  const nativeParentId = "native-parent-1";
-  const nativeChildId = "native-child-1";
-  h.agentDirectory.set(nativeParentId, {
-    id: nativeParentId,
-    workspaceId: "wks_native",
-    cwd: worktreeDir,
-    provider: "claude",
+  h.agentDirectory.set("chat-1", {
+    id: "chat-1",
+    workspaceId: "wks_1",
+    cwd: h.workspaceDir,
     status: "idle",
-    title: "父对话",
-    metadata: {},
-  });
-  h.agentDirectory.set(nativeChildId, {
-    id: nativeChildId,
-    workspaceId: "wks_native_child",
-    cwd: worktreeDir,
     provider: "claude",
-    status: "running",
-    title: "子对话",
-    labels: { "paseo.parent-agent-id": nativeParentId },
+    model: "claude-opus-5-5",
+    title: "测试对话",
     metadata: {},
   });
-  const graph = (await h.invokeRpc(getConversationGraphRpc.name, {
-    agentId: nativeParentId,
-    workspaceId: "wks_native",
+
+  await h.invokeRpc(startTeamTaskRpc.name, {
+    cwd: h.workspaceDir,
+    workspaceId: "wks_1",
+    agentId: "chat-1",
+    rawArgs: "实现透明度滑块",
     language: "zh",
-  })) as {
-    mode: string;
-    task: { stages: Array<{ nodes: Array<{ agentId?: string }> }> } | null;
-  };
-  assert.equal(graph.mode, "native_subagents");
-  assert.ok(
-    graph.task?.stages.some((st) =>
-      st.nodes.some((n) => n.agentId === nativeChildId),
-    ),
-    "native subagent DAG must include child linked via labels['paseo.parent-agent-id']",
+  });
+  assert.equal(h.sentMessages.length, 1);
+
+  // Verify live subscriptions push Paseo trees cleanly
+  const convEvents: unknown[] = [];
+  const ac = new AbortController();
+  h.rpcs.get(watchConversationGraphSubscription.name)!(
+    { agentId: "chat-1", workspaceId: "wks_1", language: "zh" },
+    {
+      paseo: h.paseo,
+      push: async (ev: unknown) => {
+        convEvents.push(ev);
+      },
+      signal: ac.signal,
+    },
+  );
+  const treeEvents: unknown[] = [];
+  h.rpcs.get(watchActiveTreesSubscription.name)!(
+    { language: "zh" },
+    {
+      paseo: h.paseo,
+      push: async (ev: unknown) => {
+        treeEvents.push(ev);
+      },
+      signal: ac.signal,
+    },
+  );
+  await new Promise((r) => setTimeout(r, 20));
+  ac.abort();
+
+  assert.equal(convEvents.length, 1);
+  assert.equal(
+    (convEvents[0] as { rootAgentId: string }).rootAgentId,
+    "chat-1",
+  );
+  assert.equal(treeEvents.length, 1);
+  assert.equal(
+    (treeEvents[0] as { trees: Array<{ rootAgentId: string }> }).trees[0]
+      .rootAgentId,
+    "chat-1",
   );
 });

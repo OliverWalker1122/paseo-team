@@ -1,9 +1,9 @@
 {
   "name": "paseo-team",
-  "version": "6.0.0",
+  "version": "7.0.0",
   "private": true,
   "license": "MIT",
-  "description": "Paseo plugin that runs a coding task as a small team: a coordinator, a developer, and two cross-reviewing code reviewers behind a quality gate.",
+  "description": "Paseo plugin for role-separated multi-agent coding: pick models per role, toggle Team mode in any composer, and inspect the live agent graph.",
   "author": "OliverWalker1122",
   "homepage": "https://github.com/OliverWalker1122/paseo-team#readme",
   "repository": {
@@ -41,7 +41,7 @@
     "lint": "node scripts/check.mjs --lint",
     "check:plugin": "node scripts/check.mjs",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run check:plugin",
-    "test:unit": "node --experimental-strip-types --test tests/check.test.ts tests/task-store.test.ts tests/quality-gate.test.ts tests/turn-observer.test.ts tests/handoff.test.ts tests/prompts.test.ts tests/client-ui.test.ts",
+    "test:unit": "node --experimental-strip-types --test tests/check.test.ts tests/config-store.test.ts tests/prompts.test.ts tests/handlers.test.ts tests/client-ui.test.ts",
     "test:integration": "node --experimental-strip-types --test tests/hooks.integration.test.ts",
     "test:coverage": "node scripts/coverage.mjs --min-lines=80",
     "coverage:badge": "node scripts/coverage.mjs --write-badge --min-lines=80",

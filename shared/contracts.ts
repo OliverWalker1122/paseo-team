@@ -2,7 +2,9 @@ import { defineRpc, defineSubscription } from "@getpaseo/plugin";
 import { z } from "zod";
 
 export const TEAM_ENABLED_METADATA_KEY = "paseo-team.enabled";
-export const TEAM_TASK_METADATA_KEY = "paseo-team.task";
+export const TEAM_SUBAGENT_METADATA_KEY = "paseo-team.subagent";
+export const TEAM_ROLE_LABEL_KEY = "paseo-team.role";
+export const TEAM_PERSPECTIVE_LABEL_KEY = "paseo-team.perspective";
 
 export function hasTeamSlashPrefix(prompt: string): boolean {
   return /^\s*\/paseo-team(?:\s|$)/i.test(prompt);
@@ -72,149 +74,64 @@ export const ConfigBundleSchema = z.object({
   providers: z.array(ProviderCatalogItemSchema),
 });
 
-export const PipelineNodeViewSchema = z.object({
-  nodeId: z.string(),
-  stage: z.enum([
-    "coordinator",
-    "expert",
-    "plan-review",
-    "development",
-    "code-review",
-    "merge-gate",
-  ]),
-  role: z.enum([
-    "coordinator",
-    "expert",
-    "plan-reviewer",
-    "developer",
-    "code-reviewer",
-    "gate",
-  ]),
-  slotIndex: z.number(),
+export const AgentRoleSchema = z.enum([
+  "coordinator",
+  "expert",
+  "plan-reviewer",
+  "developer",
+  "code-reviewer",
+  "subagent",
+]);
+
+export const LiveAgentStatusSchema = z.enum([
+  "initializing",
+  "running",
+  "awaiting_permission",
+  "idle",
+  "error",
+  "closed",
+]);
+
+export const GraphNodeSchema = z.object({
+  agentId: z.string(),
+  parentAgentId: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  role: AgentRoleSchema,
   label: z.string(),
-  profile: z.string(),
-  modelBadge: z.string().optional(),
-  serverId: z.string().optional(),
-  agentId: z.string().optional(),
+  title: z.string(),
+  modelBadge: z.string(),
   perspectiveLabel: z.string().optional(),
-  briefSummary: z.string(),
-  liveState: z.enum([
-    "not_started",
-    "initializing",
-    "running",
-    "awaiting_permission",
-    "idle",
-    "error",
-    "closed",
-  ]),
-  visualStatus: z.enum([
-    "pending",
-    "running",
-    "awaiting_permission",
-    "completed",
-    "approved",
-    "changes_requested",
-    "blocked",
-    "skipped",
-  ]),
-  round: z.number().optional(),
-  verdict: z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]).optional(),
-  summary: z.string().optional(),
-  rounds: z
-    .array(
-      z.object({
-        round: z.number(),
-        verdict: z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]),
-        summary: z.string(),
-        findings: z.array(z.string()).optional(),
-        recordedAt: z.string().optional(),
-      }),
-    )
-    .optional(),
+  status: LiveAgentStatusSchema,
+  createdAt: z.string(),
   updatedAt: z.string(),
 });
 
-export const PipelineStageColumnSchema = z.object({
-  stepId: z.string(),
-  stageId: z.enum([
-    "coordinator",
-    "expert",
-    "plan-review",
-    "development",
-    "code-review",
-    "merge-gate",
-  ]),
-  round: z.number().optional(),
-  stepNumber: z.number(),
+export const GraphLayerSchema = z.object({
+  layerId: z.string(),
   title: z.string(),
-  subtitle: z.string(),
-  stageStatus: z.enum([
-    "pending",
-    "running",
-    "awaiting_permission",
-    "completed",
-    "blocked",
-    "skipped",
-  ]),
-  nodes: z.array(PipelineNodeViewSchema),
+  subtitle: z.string().optional(),
+  status: z.enum(["running", "awaiting_permission", "error", "idle"]),
+  nodes: z.array(GraphNodeSchema),
 });
 
-export const PipelineTaskSnapshotSchema = z.object({
-  recordPath: z.string(),
-  taskId: z.string(),
-  sourceKind: z.enum(["team_task", "native_subagents"]).optional(),
-  projectRoot: z.string(),
-  goal: z.string(),
-  isComplex: z.boolean(),
-  routeDecided: z.boolean().optional(),
-  routeReason: z.string().optional(),
-  teamName: z.string(),
-  complexMode: ComplexModeSchema,
-  coordinatorAgentId: z.string().optional(),
-  coordinatorServerId: z.string().optional(),
-  /** The chat that started the task; team chats link back to it. */
-  launcherAgentId: z.string().optional(),
-  planReview: z.enum(["required", "not-required", "waived"]),
-  planReviewReason: z.string().optional(),
-  planReviewRound: z.number(),
-  codeReview: z.enum(["required", "not-required", "waived"]),
-  codeReviewReason: z.string().optional(),
-  codeReviewRound: z.number(),
-  ciStatus: z.enum(["pending", "pass", "waived"]),
-  architectureImpact: z.string().optional(),
-  circuitBroken: z
-    .object({
-      stage: z.enum(["plan", "code"]),
-      round: z.number(),
-      reason: z.string(),
-      triggeredAt: z.string(),
-    })
-    .nullable(),
-  gateChecks: z.record(z.string(), z.boolean()).optional(),
-  gateReady: z.boolean().optional(),
-  gateMissing: z.array(z.string()).optional(),
-  lifecycleStatus: z.enum([
-    "active",
-    "completed",
-    "paused",
-    "abandoned",
-    "blocked",
-  ]),
+export const AgentTreeSnapshotSchema = z.object({
+  rootAgentId: z.string(),
+  workspaceId: z.string().nullable(),
+  title: z.string(),
+  cwd: z.string(),
+  isTeamChat: z.boolean(),
+  totalAgents: z.number(),
   runningCount: z.number(),
   attentionCount: z.number(),
-  skippedStageCount: z.number().optional(),
-  stages: z.array(PipelineStageColumnSchema),
+  layers: z.array(GraphLayerSchema),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 
 export const ConversationGraphPayloadSchema = z.object({
-  mode: z.enum(["team_task", "launcher", "native_subagents", "empty"]),
   viewerAgentId: z.string().nullable(),
   rootAgentId: z.string().nullable(),
-  task: PipelineTaskSnapshotSchema.nullable(),
-  /** mode "launcher": every task subtree this chat started, newest first. */
-  tasks: z.array(PipelineTaskSnapshotSchema).optional(),
+  tree: AgentTreeSnapshotSchema.nullable(),
 });
 
 export type RoleModelSpecDto = z.infer<typeof RoleModelSpecSchema>;
@@ -223,11 +140,11 @@ export type PaseoTeamConfigDto = z.infer<typeof PaseoTeamConfigSchema>;
 export type ProviderCatalogItemDto = z.infer<typeof ProviderCatalogItemSchema>;
 export type ProviderModelOptionDto = z.infer<typeof ProviderModelOptionSchema>;
 export type ConfigBundleDto = z.infer<typeof ConfigBundleSchema>;
-export type PipelineNodeViewDto = z.infer<typeof PipelineNodeViewSchema>;
-export type PipelineStageColumnDto = z.infer<typeof PipelineStageColumnSchema>;
-export type PipelineTaskSnapshotDto = z.infer<
-  typeof PipelineTaskSnapshotSchema
->;
+export type AgentRoleDto = z.infer<typeof AgentRoleSchema>;
+export type LiveAgentStatusDto = z.infer<typeof LiveAgentStatusSchema>;
+export type GraphNodeDto = z.infer<typeof GraphNodeSchema>;
+export type GraphLayerDto = z.infer<typeof GraphLayerSchema>;
+export type AgentTreeSnapshotDto = z.infer<typeof AgentTreeSnapshotSchema>;
 export type ConversationGraphPayloadDto = z.infer<
   typeof ConversationGraphPayloadSchema
 >;
@@ -249,15 +166,20 @@ export const saveConfigRpc = defineRpc({
   output: ConfigBundleSchema,
 });
 
-export const getConversationGraphRpc = defineRpc({
-  name: "paseo_team.conversation.get",
+export const startTeamTaskRpc = defineRpc({
+  name: "paseo_team.start",
   input: z.object({
-    agentId: z.string().optional(),
+    cwd: z.string().min(1),
     workspaceId: z.string().optional(),
-    cwd: z.string().optional(),
+    agentId: z.string().min(1),
+    rawArgs: z.string().min(1),
     language: UiLanguageSchema.optional(),
   }),
-  output: ConversationGraphPayloadSchema,
+  output: z.object({
+    coordinatorAgentId: z.string(),
+    teamName: z.string(),
+    message: z.string(),
+  }),
 });
 
 export const watchConversationGraphSubscription = defineSubscription({
@@ -265,7 +187,6 @@ export const watchConversationGraphSubscription = defineSubscription({
   input: z.object({
     agentId: z.string().optional(),
     workspaceId: z.string().optional(),
-    cwd: z.string().optional(),
     language: UiLanguageSchema.optional(),
   }),
   event: ConversationGraphPayloadSchema.extend({
@@ -273,72 +194,13 @@ export const watchConversationGraphSubscription = defineSubscription({
   }),
 });
 
-export const listTasksRpc = defineRpc({
-  name: "paseo_team.tasks.list",
+export const watchActiveTreesSubscription = defineSubscription({
+  name: "paseo_team.trees.watch",
   input: z.object({
-    cwd: z.string().optional(),
-    includeAllProjects: z.boolean().optional(),
-    language: UiLanguageSchema.optional(),
-  }),
-  output: z.object({
-    projectKey: z.string().nullable(),
-    tasks: z.array(PipelineTaskSnapshotSchema),
-  }),
-});
-
-export const watchTasksSubscription = defineSubscription({
-  name: "paseo_team.tasks.watch",
-  input: z.object({
-    cwd: z.string().optional(),
-    includeAllProjects: z.boolean().optional(),
     language: UiLanguageSchema.optional(),
   }),
   event: z.object({
-    projectKey: z.string().nullable(),
-    tasks: z.array(PipelineTaskSnapshotSchema),
+    trees: z.array(AgentTreeSnapshotSchema),
     timestamp: z.string(),
-  }),
-});
-
-export const startTeamTaskRpc = defineRpc({
-  name: "paseo_team.tasks.start",
-  input: z.object({
-    cwd: z.string().min(1),
-    workspaceId: z.string().optional(),
-    agentId: z.string().optional(),
-    rawArgs: z.string().min(1),
-    language: UiLanguageSchema.optional(),
-    teamOverride: z.string().optional(),
-    complexModeOverride: ComplexModeSchema.optional(),
-    isComplex: z.boolean().optional(),
-    requireReview: z.boolean().optional(),
-  }),
-  output: z.object({
-    taskId: z.string(),
-    recordPath: z.string(),
-    coordinatorAgentId: z.string().optional(),
-    teamName: z.string(),
-    message: z.string(),
-  }),
-});
-
-export const controlTaskRpc = defineRpc({
-  name: "paseo_team.tasks.control",
-  input: z.object({
-    recordPath: z.string().min(1),
-    action: z.enum([
-      "inspect_gate",
-      "complete_task",
-      "authorize_extra_round",
-      "abandon_task",
-    ]),
-    note: z.string().optional(),
-    language: UiLanguageSchema.optional(),
-  }),
-  output: z.object({
-    ok: z.boolean(),
-    message: z.string(),
-    checks: z.record(z.string(), z.boolean()).optional(),
-    task: PipelineTaskSnapshotSchema.optional(),
   }),
 });

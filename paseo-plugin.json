@@ -1,7 +1,7 @@
 {
   "id": "paseo-team",
   "name": "Paseo Team",
-  "description": "Run a coding task as a small team: a coordinator, a developer, and two cross-reviewing code reviewers behind a quality gate.",
+  "description": "Role-separated multi-agent coding in Paseo: pick models per role, toggle Team mode in any composer, and watch the live Paseo agent graph.",
   "media": [],
   "requirements": {
     "paseo": ">=0.17.3"
